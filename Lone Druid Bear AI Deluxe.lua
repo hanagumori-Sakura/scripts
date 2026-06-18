@@ -2797,6 +2797,7 @@ end
 -- =========================================================
 function ld.OnFrame()
     if not ui.on:Get() then return end
+    if not hero or not alive(hero) then return end
 
     local mx, my = get_cursor()
     local is_down = is_lmb_down()
@@ -2977,6 +2978,14 @@ function ld.OnUpdate()
         player = Players.GetLocal()
         hero   = Heroes.GetLocal()
         if not hero or not player then return end
+
+        -- Hero check: this script is for Lone Druid only
+        local hero_name = sc(NPC.GetUnitName, hero)
+        if hero_name ~= "npc_dota_hero_lone_druid" then
+            hero = nil  -- reset so we keep checking each tick without locking in the wrong hero
+            return
+        end
+
         init_teams()
 
         for i = 0, 5 do
