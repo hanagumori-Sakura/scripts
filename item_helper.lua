@@ -1,13 +1,17 @@
+--[[
+╭────────────────────────────────────────────────────────────╮
+│                                                            │
+│                    I T E M   H E L P E R                   │
+│                                                            │
+│                     Script by Euphoria                     │
+│                                                            │
+├────────────────────────────────────────────────────────────┤
+│                        By Pidaras                          │
+│                           VibeCode                         │
+╰────────────────────────────────────────────────────────────╯
+--]]
+
 local script = {}
-
---------------------------------------------------------------------------------
--- ITEM HELPER — Помощник по сборке предметов
--- Анализирует вражеский пик, фазу игры и предлагает оптимальные предметы
--- Локализация: RU / EN / CN
--- author: Euphoria
--- Updated: 2026-03-28
---------------------------------------------------------------------------------
-
 --------------------------------------------------------------------------------
 -- LOCALIZATION
 --------------------------------------------------------------------------------
@@ -854,12 +858,15 @@ local L_UI_OVERRIDES = {
 local L_BREAKDOWN_LABELS = {
     en = {
         counter_rules   = "counter rules",
+        hero_counter    = "hero counter",
         affordable      = "affordable",
         role_penalty    = "role penalty",
         style_bonus     = "hero style",
         tempo           = "tempo",
         mode_adjust     = "mode",
         phase_mult      = "phase",
+        phase_fit       = "phase fit",
+        team_need       = "team need",
         hero_specific   = "hero fit",
         function_overlap = "function overlap",
         ["enemy_item:bkb"]       = "vs BKB",
@@ -1006,6 +1013,8 @@ local function LR(itemName)
             item_glimmer = "item_glimmer_cape",
             item_refresher_orb = "item_refresher",
             item_scythe_of_vyse = "item_sheepstick",
+            item_bfury = "item_battlefury",
+            item_greater_crit = "item_daedalus",
         })[rawName] or rawName
     end
 
@@ -1036,11 +1045,23 @@ local ITEM_NAME_ALIASES = {
     item_glimmer = "item_glimmer_cape",
     item_refresher_orb = "item_refresher",
     item_scythe_of_vyse = "item_sheepstick",
+    item_bfury = "item_battlefury",
+    item_greater_crit = "item_daedalus",
 }
 
 local function canonItemName(itemName)
     if not itemName then return itemName end
     return ITEM_NAME_ALIASES[itemName] or itemName
+end
+
+local ITEM_ENGINE_NAME_ALIASES = {
+    item_battlefury = "item_bfury",
+    item_daedalus = "item_greater_crit",
+}
+
+local function engineItemName(itemName)
+    local canonical = canonItemName(itemName)
+    return ITEM_ENGINE_NAME_ALIASES[canonical] or ITEM_ENGINE_NAME_ALIASES[itemName] or canonical or itemName
 end
 
 --------------------------------------------------------------------------------
@@ -1185,6 +1206,66 @@ local HERO_TAGS = {
     npc_dota_hero_tiny               = {"phys_burst","stun","push","tanky"},
     npc_dota_hero_kez                = {"carry","phys_burst","mobility","invis"},
 }
+
+local function addHeroTags741D(heroName, tags)
+    local dst = HERO_TAGS[heroName] or {}
+    local seen = {}
+    for _, tag in ipairs(dst) do seen[tag] = true end
+    for _, tag in ipairs(tags or {}) do
+        if not seen[tag] then
+            dst[#dst + 1] = tag
+            seen[tag] = true
+        end
+    end
+    HERO_TAGS[heroName] = dst
+end
+
+local HERO_TAGS_741D_EXTRA = {
+    npc_dota_hero_antimage = {"blink_escape","spell_shield","pickoff"},
+    npc_dota_hero_arc_warden = {"clone","bubble","split_push"},
+    npc_dota_hero_bristleback = {"breakable","regen","frontliner"},
+    npc_dota_hero_broodmother = {"summon_swarm","lane_domination"},
+    npc_dota_hero_chaos_knight = {"illusion_burst","single_target_burst"},
+    npc_dota_hero_doom_bringer = {"bkb_piercing_disable","single_target_disable"},
+    npc_dota_hero_enigma = {"bkb_piercing_disable","channel_ultimate","blink_initiator"},
+    npc_dota_hero_faceless_void = {"bkb_piercing_disable","arena_control","blink_escape"},
+    npc_dota_hero_huskar = {"regen","low_hp_fighter","anti_magic_core"},
+    npc_dota_hero_legion_commander = {"bkb_piercing_disable","single_target_disable","snowball"},
+    npc_dota_hero_life_stealer = {"lifesteal","anti_magic_core"},
+    npc_dota_hero_medusa = {"mana_shield","mana_dependent","frontliner"},
+    npc_dota_hero_morphling = {"regen","attribute_shift","burst_escape"},
+    npc_dota_hero_naga_siren = {"illusion_core","sleep_setup"},
+    npc_dota_hero_necrolyte = {"regen","spell_lifesteal","execute"},
+    npc_dota_hero_omniknight = {"save_core","strong_dispel","anti_physical_save"},
+    npc_dota_hero_oracle = {"save_core","strong_dispel","heal"},
+    npc_dota_hero_phantom_assassin = {"breakable","evasion_core","jump_burst"},
+    npc_dota_hero_phantom_lancer = {"illusion_core","mana_burn_core"},
+    npc_dota_hero_puck = {"phase_escape","coil_control"},
+    npc_dota_hero_pudge = {"bkb_piercing_disable","hook_pickoff"},
+    npc_dota_hero_razor = {"link_drain","anti_carry"},
+    npc_dota_hero_riki = {"smoke_silence","permanent_invis"},
+    npc_dota_hero_shadow_demon = {"save_core","illusion_save","purge"},
+    npc_dota_hero_silencer = {"global_silence","anti_caster"},
+    npc_dota_hero_slark = {"leash","regen","night_vision"},
+    npc_dota_hero_spectre = {"breakable","global_dive","dispersion"},
+    npc_dota_hero_storm_spirit = {"ball_escape","mana_dependent","pickoff"},
+    npc_dota_hero_templar_assassin = {"evasion_core","invis_trap","refraction"},
+    npc_dota_hero_terrorblade = {"illusion_core","sunder","metamorph_timing"},
+    npc_dota_hero_tidehunter = {"blink_initiator","teamfight_disable"},
+    npc_dota_hero_tinker = {"spell_spam","blink_escape","split_push"},
+    npc_dota_hero_troll_warlord = {"low_hp_fighter","ult_survival"},
+    npc_dota_hero_ursa = {"roshan","jump_burst","status_resist"},
+    npc_dota_hero_viper = {"break","anti_carry","poison"},
+    npc_dota_hero_weaver = {"invis_escape","time_lapse","bug_vision"},
+    npc_dota_hero_windrunner = {"evasion_core","single_target_focus"},
+    npc_dota_hero_wisp = {"save_core","global_save","heal"},
+    npc_dota_hero_kez = {"parry","jump_burst","silence_window"},
+    npc_dota_hero_largo = {"magic_burst","disable","tanky","tempo_core"},
+}
+
+for heroName, tags in pairs(HERO_TAGS_741D_EXTRA) do
+    addHeroTags741D(heroName, tags)
+end
 
 --------------------------------------------------------------------------------
 -- GAME MODE DETECTION
@@ -1512,7 +1593,7 @@ local HERO_SPECIFIC_ITEMS = {
         reason_good = "All Meepos benefit from stats",
         reason_bad = "BF/Radiance only work on main Meepo"
     },
-    npc_dota_hero_antiimage = {
+    npc_dota_hero_antimage = {
         good_items = {
             "item_battlefury", "item_manta", "item_blink", "item_abyssal_blade",
             "item_skadi", "item_satanic", "item_butterfly", "item_black_king_bar"
@@ -2340,16 +2421,153 @@ local HERO_COUNTERS = {
     },
 }
 
+local HERO_COUNTERS_741D = {
+    npc_dota_hero_antimage = {items={"item_orchid","item_bloodthorn","item_sheepstick","item_gungir","item_abyssal_blade"}, reason="Lock down blink and punish mana burn", priority={item_orchid=12,item_bloodthorn=14,item_sheepstick=15,item_gungir=11,item_abyssal_blade=10}},
+    npc_dota_hero_arc_warden = {items={"item_blink","item_nullifier","item_sheepstick","item_mjollnir","item_crimson_guard"}, reason="Reach the real hero and clear doubles/summons", priority={item_blink=8,item_nullifier=12,item_sheepstick=13,item_mjollnir=9,item_crimson_guard=8}},
+    npc_dota_hero_bloodseeker = {items={"item_cyclone","item_force_staff","item_lotus_orb","item_ghost","item_spirit_vessel"}, reason="Reset Rupture/Blood Rite and reduce sustain", priority={item_cyclone=12,item_force_staff=10,item_lotus_orb=11,item_ghost=8,item_spirit_vessel=8}},
+    npc_dota_hero_bounty_hunter = {items={"item_dust","item_ward_sentry","item_force_staff","item_cyclone","item_lotus_orb"}, reason="Detection and dispel Track pressure", priority={item_dust=16,item_ward_sentry=14,item_lotus_orb=9,item_force_staff=7,item_cyclone=7}},
+    npc_dota_hero_broodmother = {items={"item_maelstrom","item_mjollnir","item_shivas_guard","item_crimson_guard","item_dust"}, reason="Clear spiders and reveal web pressure", priority={item_maelstrom=11,item_mjollnir=13,item_shivas_guard=12,item_crimson_guard=9,item_dust=8}},
+    npc_dota_hero_chaos_knight = {items={"item_mjollnir","item_shivas_guard","item_crimson_guard","item_heavens_halberd","item_ghost"}, reason="Illusion clear and disarm burst", priority={item_mjollnir=15,item_shivas_guard=13,item_crimson_guard=12,item_heavens_halberd=10,item_ghost=8}},
+    npc_dota_hero_clinkz = {items={"item_dust","item_ward_sentry","item_ghost","item_force_staff","item_heavens_halberd"}, reason="Detection plus kite physical burst", priority={item_dust=16,item_ward_sentry=14,item_ghost=9,item_force_staff=8,item_heavens_halberd=9}},
+    npc_dota_hero_drow_ranger = {items={"item_blink","item_heavens_halberd","item_ghost","item_crimson_guard","item_assault"}, reason="Close distance and reduce ranged physical damage", priority={item_blink=10,item_heavens_halberd=13,item_ghost=9,item_crimson_guard=8,item_assault=8}},
+    npc_dota_hero_faceless_void = {items={"item_aeon_disk","item_wind_waker","item_force_staff","item_ghost","item_sphere"}, reason="Survive or reset Chronosphere", priority={item_aeon_disk=16,item_wind_waker=15,item_force_staff=9,item_ghost=9,item_sphere=7}},
+    npc_dota_hero_gyrocopter = {items={"item_pipe","item_mage_slayer","item_crimson_guard","item_heavens_halberd","item_assault"}, reason="Layer magic and physical mitigation", priority={item_pipe=10,item_mage_slayer=9,item_crimson_guard=10,item_heavens_halberd=8,item_assault=7}},
+    npc_dota_hero_juggernaut = {items={"item_ghost","item_cyclone","item_heavens_halberd","item_abyssal_blade","item_spirit_vessel"}, reason="Dodge Omnislash and punish Healing Ward sustain", priority={item_ghost=14,item_cyclone=13,item_heavens_halberd=10,item_abyssal_blade=9,item_spirit_vessel=8}},
+    npc_dota_hero_kez = {items={"item_ghost","item_heavens_halberd","item_sheepstick","item_bloodthorn","item_crimson_guard"}, reason="Kite burst windows and stop mobility chains", priority={item_ghost=10,item_heavens_halberd=12,item_sheepstick=12,item_bloodthorn=10,item_crimson_guard=8}},
+    npc_dota_hero_life_stealer = {items={"item_heavens_halberd","item_skadi","item_spirit_vessel","item_ghost","item_sheepstick"}, reason="Disarm Rage downtime and cut lifesteal", priority={item_heavens_halberd=13,item_skadi=11,item_spirit_vessel=10,item_ghost=8,item_sheepstick=10}},
+    npc_dota_hero_luna = {items={"item_crimson_guard","item_assault","item_heavens_halberd","item_pipe","item_butterfly"}, reason="Mitigate glaives and Eclipse", priority={item_crimson_guard=11,item_assault=9,item_heavens_halberd=11,item_pipe=8,item_butterfly=7}},
+    npc_dota_hero_medusa = {items={"item_diffusal_blade","item_disperser","item_skadi","item_sheepstick","item_bloodthorn"}, reason="Mana pressure and hard control through tankiness", priority={item_diffusal_blade=14,item_disperser=15,item_skadi=9,item_sheepstick=10,item_bloodthorn=8}},
+    npc_dota_hero_meepo = {items={"item_shivas_guard","item_mjollnir","item_crimson_guard","item_ghost","item_aeon_disk"}, reason="AoE control and survival against Poof burst", priority={item_shivas_guard=14,item_mjollnir=12,item_crimson_guard=10,item_ghost=9,item_aeon_disk=10}},
+    npc_dota_hero_morphling = {items={"item_spirit_vessel","item_skadi","item_sheepstick","item_orchid","item_bloodthorn"}, reason="Cut attribute-shift sustain and lock mobility", priority={item_spirit_vessel=14,item_skadi=12,item_sheepstick=13,item_orchid=10,item_bloodthorn=12}},
+    npc_dota_hero_naga_siren = {items={"item_mjollnir","item_shivas_guard","item_crimson_guard","item_gungir","item_battlefury"}, reason="Illusion clear and root the real hero", priority={item_mjollnir=16,item_shivas_guard=13,item_crimson_guard=12,item_gungir=10,item_battlefury=8}},
+    npc_dota_hero_phantom_assassin = {items={"item_monkey_king_bar","item_bloodthorn","item_heavens_halberd","item_ghost","item_crimson_guard"}, reason="True strike and physical burst protection", priority={item_monkey_king_bar=16,item_bloodthorn=14,item_heavens_halberd=12,item_ghost=10,item_crimson_guard=8}},
+    npc_dota_hero_phantom_lancer = {items={"item_maelstrom","item_mjollnir","item_shivas_guard","item_crimson_guard","item_battlefury"}, reason="Illusion clear before he overwhelms fights", priority={item_maelstrom=14,item_mjollnir=16,item_shivas_guard=13,item_crimson_guard=12,item_battlefury=8}},
+    npc_dota_hero_riki = {items={"item_dust","item_ward_sentry","item_force_staff","item_gungir","item_ghost"}, reason="Detection and escape from Smoke Screen", priority={item_dust=17,item_ward_sentry=15,item_force_staff=11,item_gungir=9,item_ghost=8}},
+    npc_dota_hero_slark = {items={"item_force_staff","item_ghost","item_heavens_halberd","item_bloodthorn","item_spirit_vessel"}, reason="Break leash pressure and punish sustain", priority={item_force_staff=13,item_ghost=11,item_heavens_halberd=12,item_bloodthorn=10,item_spirit_vessel=9}},
+    npc_dota_hero_sniper = {items={"item_blink","item_hurricane_pike","item_force_staff","item_ghost","item_heavens_halberd"}, reason="Close or create distance against long range", priority={item_blink=13,item_hurricane_pike=11,item_force_staff=9,item_ghost=8,item_heavens_halberd=9}},
+    npc_dota_hero_spectre = {items={"item_spirit_vessel","item_silver_edge","item_shivas_guard","item_crimson_guard","item_heavens_halberd"}, reason="Reduce sustain and survive Haunt damage", priority={item_spirit_vessel=11,item_silver_edge=12,item_shivas_guard=10,item_crimson_guard=10,item_heavens_halberd=8}},
+    npc_dota_hero_sven = {items={"item_ghost","item_heavens_halberd","item_crimson_guard","item_butterfly","item_force_staff"}, reason="Kite God's Strength burst", priority={item_ghost=13,item_heavens_halberd=14,item_crimson_guard=10,item_butterfly=8,item_force_staff=8}},
+    npc_dota_hero_templar_assassin = {items={"item_dust","item_monkey_king_bar","item_bloodthorn","item_heavens_halberd","item_shivas_guard"}, reason="Reveal Meld and fight through evasion/refraction", priority={item_dust=11,item_monkey_king_bar=12,item_bloodthorn=11,item_heavens_halberd=9,item_shivas_guard=8}},
+    npc_dota_hero_terrorblade = {items={"item_mjollnir","item_shivas_guard","item_crimson_guard","item_heavens_halberd","item_spirit_vessel"}, reason="Illusion clear and stop Sunder windows", priority={item_mjollnir=15,item_shivas_guard=13,item_crimson_guard=12,item_heavens_halberd=10,item_spirit_vessel=9}},
+    npc_dota_hero_troll_warlord = {items={"item_heavens_halberd","item_ghost","item_cyclone","item_skadi","item_sheepstick"}, reason="Disarm or reset Battle Trance", priority={item_heavens_halberd=16,item_ghost=12,item_cyclone=11,item_skadi=9,item_sheepstick=10}},
+    npc_dota_hero_ursa = {items={"item_ghost","item_heavens_halberd","item_force_staff","item_cyclone","item_spirit_vessel"}, reason="Kite Fury Swipes and cut Roshan sustain", priority={item_ghost=14,item_heavens_halberd=13,item_force_staff=11,item_cyclone=10,item_spirit_vessel=9}},
+    npc_dota_hero_weaver = {items={"item_dust","item_gungir","item_bloodthorn","item_sheepstick","item_nullifier"}, reason="Detection, root and stop Time Lapse saves", priority={item_dust=15,item_gungir=12,item_bloodthorn=12,item_sheepstick=13,item_nullifier=10}},
+
+    npc_dota_hero_axe = {items={"item_lotus_orb","item_aeon_disk","item_ghost","item_force_staff","item_spirit_vessel"}, reason="Survive Call/Blade Mail and reduce regen", priority={item_lotus_orb=12,item_aeon_disk=11,item_ghost=10,item_force_staff=8,item_spirit_vessel=7}},
+    npc_dota_hero_batrider = {items={"item_sphere","item_lotus_orb","item_force_staff","item_hurricane_pike","item_black_king_bar"}, reason="Block or break Flaming Lasso initiation", priority={item_sphere=16,item_lotus_orb=13,item_force_staff=10,item_hurricane_pike=9,item_black_king_bar=8}},
+    npc_dota_hero_beastmaster = {items={"item_sphere","item_lotus_orb","item_crimson_guard","item_mjollnir","item_force_staff"}, reason="Block Roar and control summons", priority={item_sphere=15,item_lotus_orb=12,item_crimson_guard=10,item_mjollnir=9,item_force_staff=8}},
+    npc_dota_hero_brewmaster = {items={"item_black_king_bar","item_orchid","item_bloodthorn","item_sheepstick","item_nullifier"}, reason="Stop Split setup or purge cyclone saves", priority={item_black_king_bar=8,item_orchid=10,item_bloodthorn=12,item_sheepstick=12,item_nullifier=9}},
+    npc_dota_hero_bristleback = {items={"item_silver_edge","item_spirit_vessel","item_skadi","item_shivas_guard","item_heavens_halberd"}, reason="Break passive and reduce Quill/sustain", priority={item_silver_edge=16,item_spirit_vessel=12,item_skadi=10,item_shivas_guard=9,item_heavens_halberd=8}},
+    npc_dota_hero_centaur = {items={"item_spirit_vessel","item_silver_edge","item_shivas_guard","item_pipe","item_force_staff"}, reason="Reduce tank sustain and reset initiation", priority={item_spirit_vessel=10,item_silver_edge=9,item_shivas_guard=9,item_pipe=8,item_force_staff=7}},
+    npc_dota_hero_dark_seer = {items={"item_pipe","item_black_king_bar","item_lotus_orb","item_shivas_guard","item_mjollnir"}, reason="Mitigate Wall/Vacuum magic and illusions", priority={item_pipe=12,item_black_king_bar=10,item_lotus_orb=8,item_shivas_guard=9,item_mjollnir=8}},
+    npc_dota_hero_doom_bringer = {items={"item_sphere","item_lotus_orb","item_aeon_disk","item_black_king_bar","item_force_staff"}, reason="Block Doom or buy time after initiation", priority={item_sphere=18,item_lotus_orb=14,item_aeon_disk=13,item_black_king_bar=9,item_force_staff=8}},
+    npc_dota_hero_dragon_knight = {items={"item_spirit_vessel","item_silver_edge","item_skadi","item_shivas_guard","item_assault"}, reason="Cut regen and armor tankiness", priority={item_spirit_vessel=11,item_silver_edge=11,item_skadi=9,item_shivas_guard=8,item_assault=7}},
+    npc_dota_hero_earthshaker = {items={"item_black_king_bar","item_aeon_disk","item_force_staff","item_pipe","item_sphere"}, reason="Survive chain stuns and Echo burst", priority={item_black_king_bar=13,item_aeon_disk=12,item_force_staff=8,item_pipe=9,item_sphere=7}},
+    npc_dota_hero_elder_titan = {items={"item_force_staff","item_ghost","item_black_king_bar","item_assault","item_crimson_guard"}, reason="Respect armor removal and long control", priority={item_force_staff=8,item_ghost=8,item_black_king_bar=10,item_assault=8,item_crimson_guard=7}},
+    npc_dota_hero_enigma = {items={"item_black_king_bar","item_aeon_disk","item_wind_waker","item_force_staff","item_sphere"}, reason="Prevent or survive Black Hole", priority={item_black_king_bar=12,item_aeon_disk=16,item_wind_waker=15,item_force_staff=10,item_sphere=7}},
+    npc_dota_hero_kunkka = {items={"item_black_king_bar","item_lotus_orb","item_force_staff","item_pipe","item_ghost"}, reason="Dispel X/rum burst and kite cleave", priority={item_black_king_bar=11,item_lotus_orb=10,item_force_staff=8,item_pipe=8,item_ghost=7}},
+    npc_dota_hero_legion_commander = {items={"item_sphere","item_lotus_orb","item_aeon_disk","item_heavens_halberd","item_ghost"}, reason="Block Duel or prevent burst during Duel", priority={item_sphere=18,item_lotus_orb=14,item_aeon_disk=13,item_heavens_halberd=10,item_ghost=9}},
+    npc_dota_hero_magnataur = {items={"item_black_king_bar","item_aeon_disk","item_force_staff","item_sphere","item_lotus_orb"}, reason="Survive RP/Skewer initiation", priority={item_black_king_bar=12,item_aeon_disk=14,item_force_staff=10,item_sphere=7,item_lotus_orb=8}},
+    npc_dota_hero_mars = {items={"item_black_king_bar","item_force_staff","item_lotus_orb","item_ghost","item_heavens_halberd"}, reason="Escape Arena/Spear and reduce physical follow-up", priority={item_black_king_bar=11,item_force_staff=12,item_lotus_orb=9,item_ghost=8,item_heavens_halberd=7}},
+    npc_dota_hero_night_stalker = {items={"item_force_staff","item_ghost","item_heavens_halberd","item_black_king_bar","item_glimmer_cape"}, reason="Escape silence dive and night chase", priority={item_force_staff=12,item_ghost=11,item_heavens_halberd=10,item_black_king_bar=9,item_glimmer_cape=8}},
+    npc_dota_hero_pangolier = {items={"item_black_king_bar","item_sphere","item_force_staff","item_bloodthorn","item_sheepstick"}, reason="Stop Rolling Thunder chain control", priority={item_black_king_bar=11,item_sphere=8,item_force_staff=9,item_bloodthorn=10,item_sheepstick=11}},
+    npc_dota_hero_primal_beast = {items={"item_black_king_bar","item_force_staff","item_ghost","item_heavens_halberd","item_aeon_disk"}, reason="Kite trample burst and Pulverize", priority={item_black_king_bar=11,item_force_staff=12,item_ghost=9,item_heavens_halberd=8,item_aeon_disk=9}},
+    npc_dota_hero_pudge = {items={"item_force_staff","item_hurricane_pike","item_lotus_orb","item_sphere","item_spirit_vessel"}, reason="Break Hook/Dismember and cut tank sustain", priority={item_force_staff=14,item_hurricane_pike=10,item_lotus_orb=11,item_sphere=12,item_spirit_vessel=8}},
+    npc_dota_hero_sand_king = {items={"item_black_king_bar","item_dust","item_ward_sentry","item_pipe","item_aeon_disk"}, reason="Detection plus magic burst protection", priority={item_black_king_bar=11,item_dust=12,item_ward_sentry=10,item_pipe=10,item_aeon_disk=8}},
+    npc_dota_hero_slardar = {items={"item_lotus_orb","item_heavens_halberd","item_ghost","item_assault","item_crimson_guard"}, reason="Dispel Corrosive Haze and reduce bash damage", priority={item_lotus_orb=13,item_heavens_halberd=11,item_ghost=9,item_assault=8,item_crimson_guard=8}},
+    npc_dota_hero_spirit_breaker = {items={"item_lotus_orb","item_sphere","item_force_staff","item_ghost","item_heavens_halberd"}, reason="Reflect/block Charge and kite bash chain", priority={item_lotus_orb=12,item_sphere=10,item_force_staff=9,item_ghost=8,item_heavens_halberd=8}},
+    npc_dota_hero_tidehunter = {items={"item_black_king_bar","item_aeon_disk","item_force_staff","item_pipe","item_lotus_orb"}, reason="Survive Ravage and Anchor Smash teamfights", priority={item_black_king_bar=12,item_aeon_disk=12,item_force_staff=8,item_pipe=8,item_lotus_orb=7}},
+    npc_dota_hero_tiny = {items={"item_ghost","item_force_staff","item_heavens_halberd","item_crimson_guard","item_aeon_disk"}, reason="Respect Avalanche/Toss physical burst", priority={item_ghost=12,item_force_staff=10,item_heavens_halberd=9,item_crimson_guard=9,item_aeon_disk=10}},
+    npc_dota_hero_abyssal_underlord = {items={"item_black_king_bar","item_pipe","item_force_staff","item_shivas_guard","item_nullifier"}, reason="Mitigate Pit/Firestorm and punish saves", priority={item_black_king_bar=10,item_pipe=10,item_force_staff=8,item_shivas_guard=7,item_nullifier=7}},
+
+    npc_dota_hero_invoker = {items={"item_black_king_bar","item_pipe","item_mage_slayer","item_sphere","item_lotus_orb"}, reason="Reduce spell combos and block key disables", priority={item_black_king_bar=14,item_pipe=11,item_mage_slayer=10,item_sphere=9,item_lotus_orb=8}},
+    npc_dota_hero_leshrac = {items={"item_pipe","item_mage_slayer","item_black_king_bar","item_spirit_vessel","item_shivas_guard"}, reason="Magic mitigation and anti-heal vs spell sustain", priority={item_pipe=15,item_mage_slayer=13,item_black_king_bar=11,item_spirit_vessel=9,item_shivas_guard=8}},
+    npc_dota_hero_lina = {items={"item_black_king_bar","item_pipe","item_mage_slayer","item_sphere","item_aeon_disk"}, reason="Survive Laguna and magic/physical burst", priority={item_black_king_bar=13,item_pipe=10,item_mage_slayer=10,item_sphere=10,item_aeon_disk=9}},
+    npc_dota_hero_nevermore = {items={"item_black_king_bar","item_pipe","item_ghost","item_assault","item_heavens_halberd"}, reason="Answer mixed burst and armor reduction", priority={item_black_king_bar=11,item_pipe=9,item_ghost=8,item_assault=8,item_heavens_halberd=8}},
+    npc_dota_hero_obsidian_destroyer = {items={"item_black_king_bar","item_mage_slayer","item_sphere","item_lotus_orb","item_pipe"}, reason="Block Astral/Sanity burst and reduce magic output", priority={item_black_king_bar=13,item_mage_slayer=11,item_sphere=11,item_lotus_orb=9,item_pipe=8}},
+    npc_dota_hero_puck = {items={"item_orchid","item_bloodthorn","item_sheepstick","item_rod_of_atos","item_black_king_bar"}, reason="Silence or hard-control elusive spell burst", priority={item_orchid=14,item_bloodthorn=15,item_sheepstick=15,item_rod_of_atos=10,item_black_king_bar=9}},
+    npc_dota_hero_queenofpain = {items={"item_orchid","item_bloodthorn","item_sheepstick","item_black_king_bar","item_pipe"}, reason="Silence mobility and reduce magic burst", priority={item_orchid=13,item_bloodthorn=14,item_sheepstick=13,item_black_king_bar=10,item_pipe=8}},
+    npc_dota_hero_storm_spirit = {items={"item_orchid","item_bloodthorn","item_sheepstick","item_rod_of_atos","item_black_king_bar"}, reason="Lock Ball Lightning and survive pickoffs", priority={item_orchid=15,item_bloodthorn=16,item_sheepstick=15,item_rod_of_atos=10,item_black_king_bar=9}},
+    npc_dota_hero_tinker = {items={"item_black_king_bar","item_pipe","item_mage_slayer","item_blink","item_orchid"}, reason="Reach him and reduce spell spam", priority={item_black_king_bar=12,item_pipe=11,item_mage_slayer=10,item_blink=9,item_orchid=10}},
+    npc_dota_hero_void_spirit = {items={"item_orchid","item_bloodthorn","item_sheepstick","item_black_king_bar","item_pipe"}, reason="Silence mobility and survive magic burst", priority={item_orchid=13,item_bloodthorn=14,item_sheepstick=13,item_black_king_bar=10,item_pipe=8}},
+    npc_dota_hero_zuus = {items={"item_pipe","item_mage_slayer","item_black_king_bar","item_glimmer_cape","item_sphere"}, reason="Layer magic resistance against global burst", priority={item_pipe=15,item_mage_slayer=11,item_black_king_bar=10,item_glimmer_cape=9,item_sphere=8}},
+
+    npc_dota_hero_abaddon = {items={"item_spirit_vessel","item_nullifier","item_skadi","item_shivas_guard","item_silver_edge"}, reason="Purge saves and cut healing", priority={item_spirit_vessel=12,item_nullifier=14,item_skadi=10,item_shivas_guard=9,item_silver_edge=8}},
+    npc_dota_hero_ancient_apparition = {items={"item_pipe","item_black_king_bar","item_force_staff","item_glimmer_cape","item_sphere"}, reason="Avoid Ice Blast follow-up and magic burst", priority={item_pipe=10,item_black_king_bar=10,item_force_staff=8,item_glimmer_cape=8,item_sphere=8}},
+    npc_dota_hero_bane = {items={"item_sphere","item_lotus_orb","item_cyclone","item_black_king_bar","item_aeon_disk"}, reason="Block Nightmare/Fiend's Grip pickoffs", priority={item_sphere=15,item_lotus_orb=12,item_cyclone=9,item_black_king_bar=10,item_aeon_disk=9}},
+    npc_dota_hero_chen = {items={"item_spirit_vessel","item_nullifier","item_mjollnir","item_crimson_guard","item_shivas_guard"}, reason="Anti-heal and summon clear", priority={item_spirit_vessel=13,item_nullifier=10,item_mjollnir=10,item_crimson_guard=9,item_shivas_guard=8}},
+    npc_dota_hero_crystal_maiden = {items={"item_black_king_bar","item_pipe","item_force_staff","item_glimmer_cape","item_mage_slayer"}, reason="Reduce root/Freezing Field magic damage", priority={item_black_king_bar=10,item_pipe=9,item_force_staff=8,item_glimmer_cape=8,item_mage_slayer=7}},
+    npc_dota_hero_dark_willow = {items={"item_black_king_bar","item_pipe","item_force_staff","item_cyclone","item_orchid"}, reason="Handle fear/root magic control", priority={item_black_king_bar=12,item_pipe=9,item_force_staff=9,item_cyclone=8,item_orchid=8}},
+    npc_dota_hero_dazzle = {items={"item_nullifier","item_spirit_vessel","item_orchid","item_bloodthorn","item_shivas_guard"}, reason="Purge Shallow Grave and cut healing", priority={item_nullifier=16,item_spirit_vessel=13,item_orchid=9,item_bloodthorn=10,item_shivas_guard=8}},
+    npc_dota_hero_death_prophet = {items={"item_spirit_vessel","item_skadi","item_pipe","item_mage_slayer","item_orchid"}, reason="Cut siphon sustain and magic pressure", priority={item_spirit_vessel=14,item_skadi=11,item_pipe=10,item_mage_slayer=9,item_orchid=8}},
+    npc_dota_hero_disruptor = {items={"item_black_king_bar","item_force_staff","item_lotus_orb","item_sphere","item_glimmer_cape"}, reason="Escape Kinetic Field/Static Storm catches", priority={item_black_king_bar=12,item_force_staff=12,item_lotus_orb=10,item_sphere=8,item_glimmer_cape=7}},
+    npc_dota_hero_enchantress = {items={"item_spirit_vessel","item_silver_edge","item_bloodthorn","item_pipe","item_mage_slayer"}, reason="Cut heal and break Untouchable-style survivability", priority={item_spirit_vessel=11,item_silver_edge=11,item_bloodthorn=9,item_pipe=7,item_mage_slayer=7}},
+    npc_dota_hero_grimstroke = {items={"item_black_king_bar","item_lotus_orb","item_force_staff","item_pipe","item_glimmer_cape"}, reason="Dispel/survive silence and Soulbind setups", priority={item_black_king_bar=11,item_lotus_orb=10,item_force_staff=9,item_pipe=8,item_glimmer_cape=7}},
+    npc_dota_hero_hoodwink = {items={"item_dust","item_force_staff","item_black_king_bar","item_pipe","item_lotus_orb"}, reason="Reveal evasive setup and escape Bushwhack", priority={item_dust=10,item_force_staff=11,item_black_king_bar=10,item_pipe=8,item_lotus_orb=8}},
+    npc_dota_hero_jakiro = {items={"item_pipe","item_black_king_bar","item_force_staff","item_mage_slayer","item_glimmer_cape"}, reason="Magic mitigation and reposition from Ice Path", priority={item_pipe=12,item_black_king_bar=10,item_force_staff=9,item_mage_slayer=8,item_glimmer_cape=8}},
+    npc_dota_hero_keeper_of_the_light = {items={"item_pipe","item_mage_slayer","item_black_king_bar","item_orchid","item_force_staff"}, reason="Reduce spell spam and catch channeling/caster play", priority={item_pipe=10,item_mage_slayer=9,item_black_king_bar=8,item_orchid=8,item_force_staff=7}},
+    npc_dota_hero_lich = {items={"item_pipe","item_black_king_bar","item_force_staff","item_glimmer_cape","item_mage_slayer"}, reason="Magic mitigation and spacing vs Chain Frost", priority={item_pipe=11,item_black_king_bar=9,item_force_staff=10,item_glimmer_cape=8,item_mage_slayer=7}},
+    npc_dota_hero_lion = {items={"item_sphere","item_lotus_orb","item_aeon_disk","item_black_king_bar","item_glimmer_cape"}, reason="Block Hex/Finger pickoffs", priority={item_sphere=15,item_lotus_orb=12,item_aeon_disk=11,item_black_king_bar=10,item_glimmer_cape=7}},
+    npc_dota_hero_marci = {items={"item_ghost","item_force_staff","item_heavens_halberd","item_cyclone","item_crimson_guard"}, reason="Kite Unleash and jump burst", priority={item_ghost=12,item_force_staff=11,item_heavens_halberd=11,item_cyclone=9,item_crimson_guard=8}},
+    npc_dota_hero_mirana = {items={"item_dust","item_ward_sentry","item_force_staff","item_black_king_bar","item_lotus_orb"}, reason="Detection and arrow/spell protection", priority={item_dust=11,item_ward_sentry=10,item_force_staff=8,item_black_king_bar=8,item_lotus_orb=8}},
+    npc_dota_hero_muerta = {items={"item_black_king_bar","item_pipe","item_mage_slayer","item_ghost","item_heavens_halberd"}, reason="Handle mixed magic and right-click windows", priority={item_black_king_bar=12,item_pipe=10,item_mage_slayer=9,item_ghost=8,item_heavens_halberd=8}},
+    npc_dota_hero_necrolyte = {items={"item_spirit_vessel","item_skadi","item_pipe","item_mage_slayer","item_sphere"}, reason="Cut healing and block Reaper setup", priority={item_spirit_vessel=15,item_skadi=11,item_pipe=9,item_mage_slayer=8,item_sphere=9}},
+    npc_dota_hero_nyx_assassin = {items={"item_dust","item_ward_sentry","item_black_king_bar","item_pipe","item_sphere"}, reason="Detection plus Carapace/Mana Burn protection", priority={item_dust=15,item_ward_sentry=13,item_black_king_bar=9,item_pipe=8,item_sphere=8}},
+    npc_dota_hero_ogre_magi = {items={"item_pipe","item_black_king_bar","item_lotus_orb","item_sphere","item_mage_slayer"}, reason="Reduce multicast disables and magic damage", priority={item_pipe=9,item_black_king_bar=9,item_lotus_orb=9,item_sphere=8,item_mage_slayer=7}},
+    npc_dota_hero_omniknight = {items={"item_nullifier","item_spirit_vessel","item_skadi","item_shivas_guard","item_orchid"}, reason="Purge saves and cut healing", priority={item_nullifier=16,item_spirit_vessel=12,item_skadi=10,item_shivas_guard=9,item_orchid=8}},
+    npc_dota_hero_oracle = {items={"item_nullifier","item_spirit_vessel","item_orchid","item_bloodthorn","item_sheepstick"}, reason="Stop False Promise save chains", priority={item_nullifier=16,item_spirit_vessel=12,item_orchid=11,item_bloodthorn=12,item_sheepstick=10}},
+    npc_dota_hero_phoenix = {items={"item_pipe","item_mage_slayer","item_black_king_bar","item_spirit_vessel","item_assault"}, reason="Magic mitigation, anti-heal and attack speed for Egg", priority={item_pipe=11,item_mage_slayer=9,item_black_king_bar=9,item_spirit_vessel=10,item_assault=8}},
+    npc_dota_hero_pugna = {items={"item_black_king_bar","item_pipe","item_mage_slayer","item_spirit_vessel","item_orchid"}, reason="Reduce Nether magic and Life Drain sustain", priority={item_black_king_bar=12,item_pipe=10,item_mage_slayer=9,item_spirit_vessel=9,item_orchid=8}},
+    npc_dota_hero_ringmaster = {items={"item_black_king_bar","item_force_staff","item_pipe","item_lotus_orb","item_aeon_disk"}, reason="Survive control chains and forced positioning", priority={item_black_king_bar=11,item_force_staff=10,item_pipe=8,item_lotus_orb=8,item_aeon_disk=8}},
+    npc_dota_hero_rubick = {items={"item_black_king_bar","item_lotus_orb","item_sphere","item_pipe","item_force_staff"}, reason="Reduce stolen-spell pickoffs and Telekinesis catches", priority={item_black_king_bar=9,item_lotus_orb=9,item_sphere=8,item_pipe=7,item_force_staff=7}},
+    npc_dota_hero_shadow_demon = {items={"item_black_king_bar","item_lotus_orb","item_sphere","item_nullifier","item_mjollnir"}, reason="Block Disruption/Demonic Purge and clear illusions", priority={item_black_king_bar=9,item_lotus_orb=10,item_sphere=10,item_nullifier=8,item_mjollnir=7}},
+    npc_dota_hero_shadow_shaman = {items={"item_sphere","item_lotus_orb","item_aeon_disk","item_black_king_bar","item_force_staff"}, reason="Block Hex/Shackles and survive ward traps", priority={item_sphere=15,item_lotus_orb=12,item_aeon_disk=10,item_black_king_bar=10,item_force_staff=8}},
+    npc_dota_hero_silencer = {items={"item_manta","item_lotus_orb","item_black_king_bar","item_cyclone","item_disperser"}, reason="Dispel silence and keep casting through Global", priority={item_manta=13,item_lotus_orb=12,item_black_king_bar=11,item_cyclone=10,item_disperser=11}},
+    npc_dota_hero_skywrath_mage = {items={"item_black_king_bar","item_pipe","item_glimmer_cape","item_force_staff","item_sphere"}, reason="Survive silence into Mystic Flare", priority={item_black_king_bar=14,item_pipe=11,item_glimmer_cape=10,item_force_staff=10,item_sphere=10}},
+    npc_dota_hero_snapfire = {items={"item_pipe","item_black_king_bar","item_force_staff","item_mage_slayer","item_glimmer_cape"}, reason="Magic mitigation and spacing vs Kisses/Cookie", priority={item_pipe=11,item_black_king_bar=10,item_force_staff=9,item_mage_slayer=8,item_glimmer_cape=7}},
+    npc_dota_hero_techies = {items={"item_pipe","item_black_king_bar","item_force_staff","item_glimmer_cape","item_mage_slayer"}, reason="Magic burst protection and reposition from mines", priority={item_pipe=12,item_black_king_bar=10,item_force_staff=9,item_glimmer_cape=8,item_mage_slayer=8}},
+    npc_dota_hero_treant = {items={"item_dust","item_ward_sentry","item_lotus_orb","item_black_king_bar","item_force_staff"}, reason="Detection and Overgrowth dispel/reposition", priority={item_dust=12,item_ward_sentry=11,item_lotus_orb=10,item_black_king_bar=9,item_force_staff=8}},
+    npc_dota_hero_tusk = {items={"item_force_staff","item_ghost","item_black_king_bar","item_lotus_orb","item_heavens_halberd"}, reason="Escape Snowball/Walrus burst and save allies", priority={item_force_staff=12,item_ghost=10,item_black_king_bar=9,item_lotus_orb=8,item_heavens_halberd=8}},
+    npc_dota_hero_undying = {items={"item_spirit_vessel","item_shivas_guard","item_pipe","item_mjollnir","item_crimson_guard"}, reason="Cut healing and clear Tombstone pressure", priority={item_spirit_vessel=14,item_shivas_guard=10,item_pipe=8,item_mjollnir=8,item_crimson_guard=8}},
+    npc_dota_hero_vengefulspirit = {items={"item_lotus_orb","item_sphere","item_force_staff","item_ghost","item_heavens_halberd"}, reason="Reflect/block swap stun and reduce right-click aura", priority={item_lotus_orb=11,item_sphere=10,item_force_staff=9,item_ghost=7,item_heavens_halberd=7}},
+    npc_dota_hero_venomancer = {items={"item_pipe","item_black_king_bar","item_force_staff","item_lotus_orb","item_mage_slayer"}, reason="Mitigate poison and dispel slows", priority={item_pipe=13,item_black_king_bar=10,item_force_staff=9,item_lotus_orb=8,item_mage_slayer=8}},
+    npc_dota_hero_visage = {items={"item_crimson_guard","item_mjollnir","item_assault","item_spirit_vessel","item_shivas_guard"}, reason="Handle familiars and gravekeeper sustain", priority={item_crimson_guard=10,item_mjollnir=9,item_assault=8,item_spirit_vessel=8,item_shivas_guard=8}},
+    npc_dota_hero_warlock = {items={"item_pipe","item_black_king_bar","item_spirit_vessel","item_mjollnir","item_force_staff"}, reason="Survive teamfight magic and clear golem pressure", priority={item_pipe=12,item_black_king_bar=10,item_spirit_vessel=9,item_mjollnir=8,item_force_staff=7}},
+    npc_dota_hero_witch_doctor = {items={"item_black_king_bar","item_pipe","item_glimmer_cape","item_force_staff","item_spirit_vessel"}, reason="Stop Maledict/Death Ward burst and cut healing", priority={item_black_king_bar=12,item_pipe=11,item_glimmer_cape=9,item_force_staff=8,item_spirit_vessel=8}},
+    npc_dota_hero_windrunner = {items={"item_monkey_king_bar","item_bloodthorn","item_heavens_halberd","item_ghost","item_sheepstick"}, reason="True strike and stop Focus Fire", priority={item_monkey_king_bar=15,item_bloodthorn=13,item_heavens_halberd=11,item_ghost=9,item_sheepstick=10}},
+    npc_dota_hero_winter_wyvern = {items={"item_black_king_bar","item_pipe","item_nullifier","item_lotus_orb","item_force_staff"}, reason="Purge saves and survive Winter's Curse setups", priority={item_black_king_bar=10,item_pipe=8,item_nullifier=12,item_lotus_orb=9,item_force_staff=8}},
+    npc_dota_hero_wisp = {items={"item_spirit_vessel","item_nullifier","item_skadi","item_shivas_guard","item_orchid"}, reason="Cut tether sustain and stop Relocate saves", priority={item_spirit_vessel=14,item_nullifier=12,item_skadi=10,item_shivas_guard=9,item_orchid=8}},
+    npc_dota_hero_dawnbreaker = {items={"item_spirit_vessel","item_heavens_halberd","item_ghost","item_shivas_guard","item_force_staff"}, reason="Cut global healing and kite physical burst", priority={item_spirit_vessel=12,item_heavens_halberd=10,item_ghost=8,item_shivas_guard=8,item_force_staff=8}},
+    npc_dota_hero_earth_spirit = {items={"item_black_king_bar","item_lotus_orb","item_force_staff","item_cyclone","item_pipe"}, reason="Survive silence/control chains and reposition", priority={item_black_king_bar=11,item_lotus_orb=10,item_force_staff=10,item_cyclone=8,item_pipe=8}},
+    npc_dota_hero_ember_spirit = {items={"item_orchid","item_bloodthorn","item_sheepstick","item_gungir","item_black_king_bar"}, reason="Silence or root Sleight/Remnant mobility", priority={item_orchid=14,item_bloodthorn=15,item_sheepstick=14,item_gungir=12,item_black_king_bar=8}},
+    npc_dota_hero_furion = {items={"item_mjollnir","item_battlefury","item_force_staff","item_blink"}, reason="Clear treants and answer global split-push", priority={item_mjollnir=9,item_battlefury=7,item_force_staff=7,item_blink=7}},
+    npc_dota_hero_lone_druid = {items={"item_heavens_halberd","item_ghost","item_crimson_guard","item_assault","item_spirit_vessel"}, reason="Disarm bear pressure and reduce sustain", priority={item_heavens_halberd=12,item_ghost=9,item_crimson_guard=10,item_assault=8,item_spirit_vessel=8}},
+    npc_dota_hero_lycan = {items={"item_crimson_guard","item_mjollnir","item_shivas_guard","item_heavens_halberd","item_ghost"}, reason="Block summons and kite Shapeshift", priority={item_crimson_guard=13,item_mjollnir=11,item_shivas_guard=10,item_heavens_halberd=9,item_ghost=8}},
+    npc_dota_hero_monkey_king = {items={"item_force_staff","item_ghost","item_heavens_halberd","item_crimson_guard","item_black_king_bar"}, reason="Leave Wukong area and reduce burst", priority={item_force_staff=12,item_ghost=10,item_heavens_halberd=9,item_crimson_guard=8,item_black_king_bar=8}},
+    npc_dota_hero_rattletrap = {items={"item_force_staff","item_hurricane_pike","item_black_king_bar","item_ghost","item_lotus_orb"}, reason="Escape Cogs and Hookshot follow-up", priority={item_force_staff=16,item_hurricane_pike=12,item_black_king_bar=9,item_ghost=7,item_lotus_orb=7}},
+    npc_dota_hero_alchemist = {items={"item_spirit_vessel","item_skadi","item_shivas_guard","item_heavens_halberd","item_silver_edge"}, reason="Cut Chemical Rage sustain and physical timing", priority={item_spirit_vessel=15,item_skadi=12,item_shivas_guard=10,item_heavens_halberd=10,item_silver_edge=8}},
+    npc_dota_hero_huskar = {items={"item_spirit_vessel","item_skadi","item_heavens_halberd","item_ghost","item_silver_edge"}, reason="Anti-heal and disarm Burning Spears burst", priority={item_spirit_vessel=16,item_skadi=12,item_heavens_halberd=13,item_ghost=10,item_silver_edge=8}},
+    npc_dota_hero_razor = {items={"item_force_staff","item_hurricane_pike","item_lotus_orb","item_heavens_halberd","item_ghost"}, reason="Break Static Link and kite Eye timing", priority={item_force_staff=14,item_hurricane_pike=12,item_lotus_orb=9,item_heavens_halberd=9,item_ghost=8}},
+    npc_dota_hero_shredder = {items={"item_spirit_vessel","item_pipe","item_mage_slayer","item_silver_edge","item_black_king_bar"}, reason="Cut regen and reduce pure/magic spam", priority={item_spirit_vessel=14,item_pipe=9,item_mage_slayer=9,item_silver_edge=10,item_black_king_bar=8}},
+    npc_dota_hero_viper = {items={"item_pipe","item_black_king_bar","item_lotus_orb","item_force_staff","item_mage_slayer"}, reason="Mitigate poison, break and slows", priority={item_pipe=12,item_black_king_bar=11,item_lotus_orb=9,item_force_staff=9,item_mage_slayer=8}},
+    npc_dota_hero_skeleton_king = {items={"item_spirit_vessel","item_skadi","item_heavens_halberd","item_ghost","item_crimson_guard"}, reason="Cut lifesteal and handle reincarnation fights", priority={item_spirit_vessel=10,item_skadi=9,item_heavens_halberd=11,item_ghost=9,item_crimson_guard=8}},
+    npc_dota_hero_largo = {items={"item_pipe","item_black_king_bar","item_force_staff","item_lotus_orb","item_aeon_disk"}, reason="Default 7.41d profile: respect control and magic burst", priority={item_pipe=9,item_black_king_bar=9,item_force_staff=8,item_lotus_orb=8,item_aeon_disk=8}},
+}
+
+for heroName, data in pairs(HERO_COUNTERS_741D) do
+    HERO_COUNTERS[heroName] = data
+end
+
 --------------------------------------------------------------------------------
 -- ITEM DATABASE (partial for net worth calculation)
 --------------------------------------------------------------------------------
 local ITEM_COSTS = {
     -- Boots
-    item_boots = 500, item_phase_boots = 1500, item_power_treads = 1400,
-    item_arcane_boots = 1300, item_tranquil_boots = 900, item_travel_boots = 2500, item_travel_boots_2 = 2000,
-    item_boots_of_bearing = 4125,
+    item_boots = 500, item_phase_boots = 1450, item_power_treads = 1400,
+    item_arcane_boots = 1500, item_tranquil_boots = 900, item_travel_boots = 2500, item_travel_boots_2 = 4500,
+    item_boots_of_bearing = 4225,
     -- Basic items
-    item_magic_wand = 450, item_magic_stick = 200, item_bracer = 505,
+    item_magic_wand = 460, item_magic_stick = 200, item_bracer = 505,
     item_wraith_band = 505, item_null_talisman = 505, item_belt_of_strength = 450,
     item_boots_of_elves = 450, item_robe = 450, item_circlet = 155, item_crown = 450,
     item_ogre_axe = 1000, item_blade_of_alacrity = 1000, item_staff_of_wizardry = 1000,
@@ -2357,59 +2575,64 @@ local ITEM_COSTS = {
     -- Weapons
     item_broadsword = 1000, item_claymore = 1350, item_mithril_hammer = 1600,
     item_blades_of_attack = 450, item_quarterstaff = 875, item_javelin = 900,
-    item_mask_of_madness = 1900, item_armlet = 2500,
-    item_blight_stone = 300, item_orb_of_venom = 275,
+    item_mask_of_madness = 1900, item_armlet = 2500, item_blade_mail = 2400,
+    item_blight_stone = 300, item_orb_of_venom = 350,
     -- Armor
-    item_chainmail = 550, item_platemail = 1400, item_helm_of_iron_will = 975,
-    item_ring_of_protection = 175, item_buckler = 200, item_vanguard = 1700,
-    item_crimson_guard = 3600, item_assault = 5125, item_shivas_guard = 5175,
+    item_chainmail = 500, item_platemail = 1400, item_helm_of_iron_will = 975,
+    item_ring_of_protection = 175, item_buckler = 425, item_vanguard = 1700,
+    item_crimson_guard = 3725, item_assault = 5125, item_shivas_guard = 4500,
     -- Accessories
     item_blink = 2250, item_force_staff = 2200, item_ultimate_scepter = 4200,
-    item_aghanims_shard = 1400, item_black_king_bar = 4050, item_sphere = 4600,
-    item_aeon_disk = 3000, item_lotus_orb = 3850, item_linkens = 4600,
+    item_aghanims_shard = 1400, item_black_king_bar = 4050, item_sphere = 4800,
+    item_aeon_disk = 3000, item_lotus_orb = 3850, item_linkens = 4800,
     -- Damage
-    item_daedalus = 5150, item_demon_edge = 2200, item_eagle = 2800, item_reaver = 2800,
-    item_mystic_staff = 2700, item_hyperstone = 2000, item_talisman_of_evasion = 1300,
-    item_relic = 3800, item_sacred_relic = 3800,
+    item_daedalus = 5100, item_demon_edge = 2200, item_eagle = 2800, item_reaver = 2800,
+    item_mystic_staff = 2800, item_hyperstone = 2000, item_talisman_of_evasion = 1300,
+    item_relic = 3400, item_sacred_relic = 3400,
     -- Specific items
     -- Specific items
-    item_mjollnir = 5600, item_radiance = 5150, item_heart = 5000, item_tarrasque = 5000,
-    item_butterfly = 4975, item_satanic = 5050, item_skadi = 5300, item_eye_of_skadi = 5300,
-    item_abyssal_blade = 6250, item_nullifier = 4725, item_bloodthorn = 6800,
-    item_silver_edge = 5450, item_diffusal_blade = 2500, item_diffusal_blade_2 = 2500,
-    item_sheepstick = 5675, item_scythe_of_vyse = 5675, item_gungir = 5500, item_gleipnir = 5500,
-    item_pipe = 3475, item_crimson_guard = 3600, item_heavens_halberd = 3550,
-    item_solar_crest = 2400, item_manta = 4600, item_disperser = 5300,
-    item_cyclone = 2725, item_euls = 2725, item_wind_waker = 5150,
-    item_desolator = 3500, item_monkey_king_bar = 4975, item_spirit_vessel = 2830,
-    item_urnd = 2830, item_guardian_greaves = 4950, item_refresher = 5000,
+    item_mjollnir = 5500, item_radiance = 4700, item_heart = 5100, item_tarrasque = 5100,
+    item_butterfly = 5450, item_satanic = 5050, item_skadi = 5900, item_eye_of_skadi = 5900,
+    item_abyssal_blade = 6250, item_nullifier = 4350, item_bloodthorn = 6400,
+    item_silver_edge = 5700, item_diffusal_blade = 2500, item_diffusal_blade_2 = 2500,
+    item_sheepstick = 5200, item_scythe_of_vyse = 5200, item_gungir = 4650, item_gleipnir = 4650,
+    item_pipe = 3725, item_crimson_guard = 3725, item_heavens_halberd = 3400,
+    item_solar_crest = 2575, item_manta = 4650, item_disperser = 6100,
+    item_cyclone = 2600, item_euls = 2600, item_wind_waker = 6800,
+    item_desolator = 3500, item_monkey_king_bar = 5000, item_spirit_vessel = 2725,
+    item_urnd = 2725, item_guardian_greaves = 4450, item_refresher = 5000,
     item_refresher_orb = 5000, item_overwhelming_blink = 6800, item_swift_blink = 6800,
-    item_arcane_blink = 6800, item_hurricane_pike = 4450, item_orchid = 3475,
-    item_orchid_malevolence = 3475, item_ethereal_blade = 5200, item_rod_of_atos = 2750,
-    item_pavise = 1100, item_holy_locket = 2350, item_witch_blade = 2600,
-    item_veil_of_discord = 1525, item_kaya_and_sange = 4100, item_sange_and_yasha = 4100,
-    item_yasha_and_kaya = 4100, item_invis_sword = 3000, item_shadow_blade = 3000,
-    item_bloodstone = 4600, item_octarine_core = 5275, item_phylactery = 2400,
-    item_hand_of_midas = 2200, item_harpoon = 4700, item_dagon = 2850,
-    item_medallion = 1025, item_solar = 2400,
+    item_arcane_blink = 6800, item_hurricane_pike = 4450, item_orchid = 3275,
+    item_orchid_malevolence = 3275, item_ethereal_blade = 5200, item_rod_of_atos = 2250,
+    item_pavise = 1350, item_holy_locket = 2250, item_witch_blade = 2775,
+    item_veil_of_discord = 1700, item_kaya_and_sange = 4200, item_sange_and_yasha = 4200,
+    item_yasha_and_kaya = 4200, item_invis_sword = 3250, item_shadow_blade = 3250,
+    item_bloodstone = 4700, item_octarine_core = 4900, item_phylactery = 2600,
+    item_hand_of_midas = 2200, item_harpoon = 4700, item_dagon = 3050,
+    item_medallion = 1025, item_solar = 2575,
     item_vladmir = 2200, item_vladmirs_offering = 2200, item_mekansm = 1775,
-    item_glimmer = 1950, item_glimmer_cape = 1950,
-    item_drum = 1650, item_headdress = 600,
-    item_buckler = 200, item_ring_of_basilius = 425, item_basilius = 425,
+    item_glimmer = 2150, item_glimmer_cape = 2150,
+    item_drum = 1650, item_headdress = 425,
+    item_buckler = 425, item_ring_of_basilius = 425, item_basilius = 425,
     -- 7.41 Additions
+    item_battlefury = 3900, item_bfury = 3900, item_maelstrom = 2950, item_mage_slayer = 3100,
     item_splintmail = 950, item_shawl = 450, item_chasm_stone = 800, item_wizard_hat = 250,
-    item_consecrated_wraps = 2450, item_angels_demise = 4950, item_crellas_crozier = 5200,
-    item_essence_distiller = 3500,
+    item_consecrated_wraps = 2600, item_angels_demise = 5600, item_crellas_crozier = 4800,
+    item_essence_distiller = 1775,
 }
 
 -- Function to get item cost from database
 local function GetItemCost(itemName)
     if not itemName then return 0 end
+    local rawName = itemName
     itemName = canonItemName(itemName)
+    local engineName = engineItemName(itemName)
     -- Prefer live game data when available; fallback to local table for aliases/undocumented cases.
-    local ok, liveCost = pcall(GameRules.GetItemCost, itemName)
+    local ok, liveCost = pcall(GameRules.GetItemCost, engineName)
     if ok and liveCost and liveCost > 0 then return liveCost end
-    local cost = ITEM_COSTS[itemName]
+    ok, liveCost = pcall(GameRules.GetItemCost, itemName)
+    if ok and liveCost and liveCost > 0 then return liveCost end
+    local cost = ITEM_COSTS[itemName] or ITEM_COSTS[rawName] or ITEM_COSTS[engineName]
     if cost then return cost end
     return 0
 end
@@ -2426,51 +2649,54 @@ local PHASE_LATE  = 3
 --------------------------------------------------------------------------------
 local ITEM_DB = {
     -- ═══════════════════════ EARLY GAME ═══════════════════════
-    {name="item_magic_wand",     display="Magic Wand",       cost=450,   phase={1,2},     tags={"sustain","vs_spam"}},
+    {name="item_magic_wand",     display="Magic Wand",       cost=460,   phase={1,2},     tags={"sustain","vs_spam"}},
     {name="item_bracer",         display="Bracer",            cost=505,   phase={1},       tags={"hp","phys_def"}},
     {name="item_wraith_band",    display="Wraith Band",       cost=505,   phase={1},       tags={"agi","phys_dps"}},
     {name="item_null_talisman",  display="Null Talisman",     cost=505,   phase={1},       tags={"int","magic_dps"}},
     {name="item_soul_ring",      display="Soul Ring",         cost=805,   phase={1,2},     tags={"mana","hp","armor","sustain"}},
     {name="item_wizard_hat",     display="Wizard Hat",        cost=250,   phase={1},       tags={"mana","int"}},
     -- Boots
-    {name="item_phase_boots",    display="Phase Boots",       cost=1500,  phase={1,2},     tags={"mobility","phys_dps","armor"}},
+    {name="item_phase_boots",    display="Phase Boots",       cost=1450,  phase={1,2},     tags={"mobility","phys_dps","armor"}},
     {name="item_power_treads",   display="Power Treads",      cost=1400,  phase={1,2},     tags={"attack_speed","stats","sustain"}},
-    {name="item_arcane_boots",   display="Arcane Boots",      cost=1300,  phase={1,2},     tags={"mana","team_utility"}},
+    {name="item_arcane_boots",   display="Arcane Boots",      cost=1500,  phase={1,2},     tags={"mana","team_utility"}},
     {name="item_tranquil_boots", display="Tranquil Boots",    cost=900,   phase={1,2},     tags={"mobility","sustain","armor"}},
-    {name="item_boots_of_bearing",display="Boots of Bearing", cost=4125,  phase={2,3},     tags={"aura","team_utility","attack_speed"}},
+    {name="item_boots_of_bearing",display="Boots of Bearing", cost=4225,  phase={2,3},     tags={"aura","team_utility","attack_speed"}},
     {name="item_travel_boots",   display="Boots of Travel",   cost=2500,  phase={2,3},     tags={"mobility","push","global"}},
     -- ═══════════════════════ CORE / MID GAME ══════════════════
     -- Physical defense
     {name="item_ghost",          display="Ghost Scepter",    cost=1500,   phase={1,2},     tags={"vs_phys","save"}},
-    {name="item_blade_mail",     display="Blade Mail",       cost=2100,   phase={1,2},     tags={"vs_phys","vs_burst","armor","reflect"},
+    {name="item_blade_mail",     display="Blade Mail",       cost=2400,   phase={1,2},     tags={"vs_phys","vs_burst","armor","reflect"},
      triggers={"carry","phys_burst","phys_dps"}},
     {name="item_vanguard",       display="Vanguard",         cost=1700,   phase={1,2},     tags={"hp","block","tanky"}},
     {name="item_splintmail",     display="Splintmail",       cost=950,    phase={1,2},     tags={"armor","vs_phys","hp"}},
-    {name="item_pavise",         display="Pavise",           cost=1100,   phase={1,2},     tags={"vs_phys","save","armor"},
+    {name="item_pavise",         display="Pavise",           cost=1350,   phase={1,2},     tags={"vs_phys","save","armor"},
      triggers={"phys_dps","phys_burst"}},
-    {name="item_crimson_guard",  display="Crimson Guard",    cost=3600,   phase={2,3},     tags={"vs_phys","team","block","armor"},
+    {name="item_crimson_guard",  display="Crimson Guard",    cost=3725,   phase={2,3},     tags={"vs_phys","team","block","armor"},
      triggers={"phys_dps","summons","illusions","push"}},
     {name="item_assault",        display="Assault Cuirass",  cost=5125,   phase={2,3},     tags={"armor","attack_speed","aura","vs_phys"},
      triggers={"phys_dps","carry","armor_reduce"}},
-    {name="item_shivas_guard",   display="Shiva's Guard",    cost=5175,   phase={2,3},     tags={"armor","vs_phys","slow","int"},
+    {name="item_shivas_guard",   display="Shiva's Guard",    cost=4500,   phase={2,3},     tags={"armor","vs_phys","slow","int"},
      triggers={"phys_dps","carry","heal","attack_speed"}},
-    {name="item_heavens_halberd",display="Heaven's Halberd", cost=3550,   phase={2,3},     tags={"vs_phys","disarm","evasion","hp"},
+    {name="item_heavens_halberd",display="Heaven's Halberd", cost=3400,   phase={2,3},     tags={"vs_phys","disarm","evasion","hp"},
      triggers={"carry","phys_dps","phys_burst"}},
-    {name="item_solar_crest",    display="Solar Crest",      cost=2400,   phase={1,2},     tags={"armor","vs_phys","buff","debuff"}},
+    {name="item_solar_crest",    display="Solar Crest",      cost=2575,   phase={1,2},     tags={"armor","vs_phys","buff","debuff"}},
     -- Magical defense
-    {name="item_pipe",           display="Pipe of Insight",  cost=3475,   phase={2,3},     tags={"vs_magic","team","magic_resist","barrier"},
+    {name="item_pipe",           display="Pipe of Insight",  cost=3725,   phase={2,3},     tags={"vs_magic","team","magic_resist","barrier"},
      triggers={"magic_burst"}},
-    {name="item_glimmer_cape",   display="Glimmer Cape",     cost=1950,   phase={1,2},     tags={"vs_magic","save","invis"},
+    {name="item_glimmer_cape",   display="Glimmer Cape",     cost=2150,   phase={1,2},     tags={"vs_magic","save","invis"},
      triggers={"magic_burst","disable"}},
+    {name="item_mage_slayer",    display="Mage Slayer",      cost=3100,   phase={1,2,3},   tags={"vs_magic","magic_resist","debuff","phys_dps"},
+     triggers={"magic_burst","spell_lifesteal"}},
     {name="item_shawl",          display="Shawl",            cost=450,    phase={1,2},     tags={"vs_magic","magic_resist"}},
-    {name="item_consecrated_wraps",display="Consecrated Wraps",cost=2450, phase={2,3},     tags={"vs_magic","save"}},
+    {name="item_consecrated_wraps",display="Consecrated Wraps",cost=2600, phase={2,3},     tags={"vs_magic","save","hp","mobility"},
+     triggers={"magic_burst","slow"}},
     {name="item_black_king_bar", display="BKB",              cost=4050,   phase={2,3},     tags={"vs_magic","magic_immune","vs_disable"},
      triggers={"disable","stun","silence","hex","magic_burst","doom"}},
     -- Anti-heal
-    {name="item_spirit_vessel",  display="Spirit Vessel",    cost=2980,   phase={1,2},     tags={"anti_heal","hp","move_speed"},
+    {name="item_spirit_vessel",  display="Spirit Vessel",    cost=2725,   phase={1,2},     tags={"anti_heal","hp","move_speed"},
      triggers={"heal","save","tanky"}},
     -- Anti-evasion
-    {name="item_monkey_king_bar",display="MKB",              cost=4975,   phase={2,3},     tags={"vs_evasion","phys_dps","attack"},
+    {name="item_monkey_king_bar",display="MKB",              cost=5000,   phase={2,3},     tags={"vs_evasion","phys_dps","attack"},
      triggers={"evasion"}},
     -- Anti-invis
     {name="item_dust",           display="Dust of Appearance",cost=80,    phase={1,2,3},   tags={"vs_invis","detection"},
@@ -2478,16 +2704,16 @@ local ITEM_DB = {
     {name="item_ward_sentry",    display="Sentry Ward",      cost=50,     phase={1,2,3},   tags={"vs_invis","detection"},
      triggers={"invis"}},
     -- Anti-illusions & summons
-    {name="item_mjollnir",       display="Mjollnir",         cost=5600,   phase={2,3},     tags={"vs_illusions","attack_speed","phys_dps","cleave"},
+    {name="item_mjollnir",       display="Mjollnir",         cost=5500,   phase={2,3},     tags={"vs_illusions","attack_speed","phys_dps","cleave"},
      triggers={"illusions","summons","push"}},
-    {name="item_battlefury",     display="Battle Fury",      cost=4100,   phase={1,2},     tags={"vs_illusions","cleave","farm","phys_dps"},
+    {name="item_battlefury",     display="Battle Fury",      cost=3900,   phase={1,2},     tags={"vs_illusions","cleave","farm","phys_dps"},
      triggers={"illusions","summons"}},
-    {name="item_radiance",       display="Radiance",         cost=5150,   phase={2,3},     tags={"vs_illusions","burn","miss","farm"},
+    {name="item_radiance",       display="Radiance",         cost=4700,   phase={2,3},     tags={"vs_illusions","burn","miss","farm"},
      triggers={"illusions","summons","invis"}},
-    {name="item_maelstrom",      display="Maelstrom",        cost=2700,   phase={1,2},     tags={"vs_illusions","attack_speed","farm"},
+    {name="item_maelstrom",      display="Maelstrom",        cost=2950,   phase={1,2},     tags={"vs_illusions","attack_speed","farm"},
      triggers={"illusions","summons"}},
     {name="item_mask_of_madness",display="Mask of Madness",  cost=1900,   phase={1,2},     tags={"phys_dps","attack_speed","lifesteal","farm"}},
-    {name="item_gungir",         display="Gleipnir",         cost=5500,   phase={2,3},     tags={"root","vs_illusions","attack_speed","phys_dps"},
+    {name="item_gungir",         display="Gleipnir",         cost=4650,   phase={2,3},     tags={"root","vs_illusions","attack_speed","phys_dps"},
      triggers={"mobility","illusions","invis"}},
     -- Mobility
     {name="item_blink",          display="Blink Dagger",     cost=2250,   phase={1,2,3},   tags={"mobility","initiation"}},
@@ -2498,73 +2724,77 @@ local ITEM_DB = {
     -- Dispel / Purge
     {name="item_lotus_orb",      display="Lotus Orb",        cost=3850,   phase={2,3},     tags={"dispel","reflect","armor","mana"},
      triggers={"disable","stun","hex","silence","doom"}},
-    {name="item_manta",          display="Manta Style",      cost=4600,   phase={2,3},     tags={"dispel","illusions","stats","phys_dps"},
+    {name="item_manta",          display="Manta Style",      cost=4650,   phase={2,3},     tags={"dispel","illusions","stats","phys_dps"},
      triggers={"silence","slow","root"}},
-    {name="item_disperser",      display="Disperser",        cost=5300,   phase={2,3},     tags={"dispel","mobility","agi","slow"},
+    {name="item_disperser",      display="Disperser",        cost=6100,   phase={2,3},     tags={"dispel","mobility","agi","slow"},
      triggers={"silence","slow","root","disable"}},
-    {name="item_cyclone",        display="Eul's Scepter",    cost=2725,   phase={1,2},     tags={"dispel","mana","mobility","disable"},
+    {name="item_cyclone",        display="Eul's Scepter",    cost=2600,   phase={1,2},     tags={"dispel","mana","mobility","disable"},
      triggers={"silence","slow","disable"}},
     -- Protection
-    {name="item_sphere",         display="Linken's Sphere",  cost=4600,   phase={2,3},     tags={"block_spell","save","stats"},
+    {name="item_sphere",         display="Linken's Sphere",  cost=4800,   phase={2,3},     tags={"block_spell","save","stats"},
      triggers={"disable","hex","doom","duel","black_hole"}},
     {name="item_aeon_disk",      display="Aeon Disk",        cost=3000,   phase={2,3},     tags={"save","vs_burst","dispel"},
      triggers={"phys_burst","magic_burst","chrono","black_hole"}},
-    {name="item_wind_waker",     display="Wind Waker",       cost=5150,   phase={2,3},     tags={"save","dispel","mobility","mana"},
+    {name="item_wind_waker",     display="Wind Waker",       cost=6800,   phase={2,3},     tags={"save","dispel","mobility","mana"},
      triggers={"disable","chrono","black_hole"}},
     -- Damage items
     {name="item_armlet",         display="Armlet of Mordiggian", cost=2500, phase={1,2},   tags={"phys_dps","attack_speed","armor","tanky","hp"}},
     {name="item_desolator",      display="Desolator",        cost=3500,   phase={2},       tags={"armor_reduce","phys_dps"}},
-    {name="item_daedalus",       display="Daedalus",         cost=5150,   phase={2,3},     tags={"crit","phys_dps"}},
-    {name="item_butterfly",      display="Butterfly",        cost=4975,   phase={3},       tags={"evasion","attack_speed","agi","phys_dps"}},
+    {name="item_daedalus",       display="Daedalus",         cost=5100,   phase={2,3},     tags={"crit","phys_dps"}},
+    {name="item_butterfly",      display="Butterfly",        cost=5450,   phase={3},       tags={"evasion","attack_speed","agi","phys_dps"}},
     {name="item_satanic",        display="Satanic",          cost=5050,   phase={3},       tags={"lifesteal","hp","save","phys_dps"}},
-    {name="item_skadi",          display="Eye of Skadi",     cost=5300,   phase={3},       tags={"slow","stats","hp","anti_heal"},
+    {name="item_skadi",          display="Eye of Skadi",     cost=5900,   phase={3},       tags={"slow","stats","hp","anti_heal"},
      triggers={"heal","tanky","mobility"}},
     {name="item_abyssal_blade",  display="Abyssal Blade",    cost=6250,   phase={3},       tags={"stun","bash","vs_bkb","phys_dps","block"},
      triggers={"magic_immune","carry"}},
-    {name="item_nullifier",      display="Nullifier",        cost=4725,   phase={3},       tags={"dispel","vs_save","phys_dps"},
+    {name="item_nullifier",      display="Nullifier",        cost=4350,   phase={3},       tags={"dispel","vs_save","phys_dps"},
      triggers={"save","invis","evasion"}},
-    {name="item_bloodthorn",     display="Bloodthorn",       cost=6800,   phase={3},       tags={"silence","crit","vs_evasion","attack_speed"},
+    {name="item_bloodthorn",     display="Bloodthorn",       cost=6400,   phase={3},       tags={"silence","crit","vs_evasion","attack_speed"},
      triggers={"evasion","mobility","magic_burst"}},
-    {name="item_silver_edge",    display="Silver Edge",      cost=5450,   phase={2,3},     tags={"invis","break","phys_dps"},
-     triggers={"tanky","evasion"}},
+    {name="item_silver_edge",    display="Silver Edge",      cost=5700,   phase={2,3},     tags={"invis","break","phys_dps"},
+     triggers={"tanky","evasion","breakable"}},
     {name="item_diffusal_blade", display="Diffusal Blade",   cost=2500,   phase={1,2},     tags={"mana_burn","slow","agi","phys_dps"},
      triggers={"mana_burn"}},
     -- Utility / Mixed
     {name="item_aether_lens",    display="Aether Lens",      cost=2275,   phase={1,2,3},   tags={"mana","int","cast_range"}},
-    {name="item_rod_of_atos",    display="Rod of Atos",      cost=2750,   phase={1,2},     tags={"root","hp","int"},
+    {name="item_rod_of_atos",    display="Rod of Atos",      cost=2250,   phase={1,2},     tags={"root","hp","int"},
      triggers={"mobility","invis"}},
-    {name="item_orchid",         display="Orchid Malevolence",cost=3475,   phase={2},       tags={"silence","mana","attack_speed"},
+    {name="item_orchid",         display="Orchid Malevolence",cost=3275,   phase={2},       tags={"silence","mana","attack_speed"},
      triggers={"magic_burst","mobility","versatile"}},
-    {name="item_sheepstick",     display="Scythe of Vyse",    cost=5675,   phase={3},       tags={"hex","disable","mana","int"},
+    {name="item_sheepstick",     display="Scythe of Vyse",    cost=5200,   phase={3},       tags={"hex","disable","mana","int"},
      triggers={"carry","magic_immune","mobility"}},
     {name="item_ethereal_blade", display="Ethereal Blade",   cost=5200,   phase={2,3},     tags={"vs_phys","magic_amp","save","agi"}},
     {name="item_refresher",      display="Refresher Orb",    cost=5000,   phase={3},       tags={"refresh","ultimate"}},
-    {name="item_heart",          display="Heart of Tarrasque",cost=5000,  phase={3},       tags={"hp","tanky","regen"},
+    {name="item_heart",          display="Heart of Tarrasque",cost=5100,  phase={3},       tags={"hp","tanky","regen"},
      triggers={"phys_dps","magic_burst"}},
     {name="item_overwhelming_blink", display="Overwhelming Blink", cost=6800, phase={3},   tags={"mobility","slow","str","initiation"}},
     {name="item_swift_blink",    display="Swift Blink",      cost=6800,   phase={3},       tags={"mobility","agi","attack_speed"}},
     {name="item_arcane_blink",   display="Arcane Blink",     cost=6800,   phase={3},       tags={"mobility","int","cd_reduction"}},
-    {name="item_witch_blade",    display="Witch Blade",      cost=2600,   phase={1,2},     tags={"int","phys_dps","slow","armor"}},
-    {name="item_veil_of_discord",display="Veil of Discord",  cost=1525,   phase={1,2},     tags={"magic_amp","int","armor"}},
-    {name="item_kaya_and_sange", display="Kaya and Sange",   cost=4100,   phase={2,3},     tags={"hp","int","magic_amp","slow"}},
-    {name="item_sange_and_yasha",display="Sange and Yasha",  cost=4100,   phase={2,3},     tags={"hp","agi","mobility","slow"}},
-    {name="item_yasha_and_kaya", display="Yasha and Kaya",   cost=4100,   phase={2,3},     tags={"agi","int","magic_amp","mobility"}},
-    {name="item_invis_sword",    display="Shadow Blade",     cost=3000,   phase={1,2},     tags={"invis","phys_dps","initiation"}},
+    {name="item_witch_blade",    display="Witch Blade",      cost=2775,   phase={1,2},     tags={"int","phys_dps","slow","armor"}},
+    {name="item_veil_of_discord",display="Veil of Discord",  cost=1700,   phase={1,2},     tags={"magic_amp","int","armor"}},
+    {name="item_kaya_and_sange", display="Kaya and Sange",   cost=4200,   phase={2,3},     tags={"hp","int","magic_amp","slow"}},
+    {name="item_sange_and_yasha",display="Sange and Yasha",  cost=4200,   phase={2,3},     tags={"hp","agi","mobility","slow"}},
+    {name="item_yasha_and_kaya", display="Yasha and Kaya",   cost=4200,   phase={2,3},     tags={"agi","int","magic_amp","mobility"}},
+    {name="item_invis_sword",    display="Shadow Blade",     cost=3250,   phase={1,2},     tags={"invis","phys_dps","initiation"}},
+    {name="item_crellas_crozier",display="Crella's Crozier", cost=4800,   phase={2,3},     tags={"stats","mobility","save","escape"},
+     triggers={"slow","root","mobility"}},
     -- Support items
     {name="item_mekansm",        display="Mekansm",          cost=1775,   phase={1,2},     tags={"heal","team","armor"}},
-    {name="item_guardian_greaves",display="Guardian Greaves", cost=4950,   phase={2,3},     tags={"heal","team","dispel","armor","mana"},
+    {name="item_essence_distiller",display="Essence Distiller",cost=1775, phase={1,2},     tags={"heal","team","save","sustain"},
+     triggers={"phys_burst","magic_burst"}},
+    {name="item_guardian_greaves",display="Guardian Greaves", cost=4450,   phase={2,3},     tags={"heal","team","dispel","armor","mana"},
      triggers={"disable","silence"}},
     {name="item_vladmir",        display="Vladmir's Offering",cost=2200,   phase={1,2},     tags={"team","aura","armor","mana","lifesteal"}},
-    {name="item_holy_locket",    display="Holy Locket",      cost=2350,   phase={1,2},     tags={"heal","hp","save"}},
+    {name="item_holy_locket",    display="Holy Locket",      cost=2250,   phase={1,2},     tags={"heal","hp","save"}},
     {name="item_ultimate_scepter",display="Aghanim's Scepter",cost=4200, phase={2,3},     tags={"ultimate","stats"}},
     {name="item_aghanims_shard", display="Aghanim's Shard",  cost=1400,  phase={2,3},     tags={"ultimate","ability"}},
-    {name="item_bloodstone",     display="Bloodstone",       cost=4600,   phase={2,3},     tags={"hp","mana","spell_lifesteal","int"}},
-    {name="item_dagon",          display="Dagon",            cost=2850,   phase={1,2},     tags={"magic_burst","int"}},
-    {name="item_octarine_core",  display="Octarine Core",    cost=5275,   phase={3},       tags={"cd_reduction","hp","mana","int"}},
-    {name="item_phylactery",     display="Phylactery",       cost=2400,   phase={1,2},     tags={"magic_burst","hp","int"}},
+    {name="item_bloodstone",     display="Bloodstone",       cost=4700,   phase={2,3},     tags={"hp","mana","spell_lifesteal","int"}},
+    {name="item_dagon",          display="Dagon",            cost=3050,   phase={1,2},     tags={"magic_burst","int"}},
+    {name="item_octarine_core",  display="Octarine Core",    cost=4900,   phase={3},       tags={"cd_reduction","hp","mana","int"}},
+    {name="item_phylactery",     display="Phylactery",       cost=2600,   phase={1,2},     tags={"magic_burst","hp","int"}},
     {name="item_chasm_stone",    display="Chasm Stone",      cost=800,    phase={1,2},     tags={"aoe","stats"}},
-    {name="item_angels_demise",   display="Angel's Demise",   cost=4950,   phase={2,3},     tags={"magic_burst","hp","int","slow"},
-     triggers={"magic_burst"}},
+    {name="item_angels_demise",   display="Angel's Demise",   cost=5600,   phase={2,3},     tags={"magic_burst","hp","int","slow"},
+     triggers={"magic_burst","mobility","tanky"}},
     {name="item_hand_of_midas",  display="Hand of Midas",    cost=2200,   phase={1},       tags={"farm","attack_speed"}},
 }
 
@@ -2682,36 +2912,64 @@ local COUNTER_RULES = {
 --------------------------------------------------------------------------------
 -- PANEL POSITION PERSISTENCE (io.open — matching broodmother pattern)
 --------------------------------------------------------------------------------
+local UI = {}
+local PANEL_CONFIG_FILE = "item_helper_panel.ini"
+
+local function GetScriptDir()
+    local getInfo = debug and debug.getinfo
+    if not getInfo then return nil end
+    local ok, info = pcall(getInfo, 1, "S")
+    local source = ok and info and info.source or ""
+    source = tostring(source):gsub("^@", "")
+    return source:match("^(.*)[/\\][^/\\]+$")
+end
+
 local function GetConfigPath()
-    return "item_helper_panel.ini"
+    local dir = GetScriptDir()
+    if dir and dir ~= "" then
+        return dir .. "\\" .. PANEL_CONFIG_FILE
+    end
+    return PANEL_CONFIG_FILE
+end
+
+local function ReadPanelPositionFile(configPath, x, y)
+    local file = io.open(configPath, "r")
+    if not file then return x, y, false end
+    for line in file:lines() do
+        local xMatch = line:match("pos_x=([%d%.%-]+)")
+        local yMatch = line:match("pos_y=([%d%.%-]+)")
+        if xMatch then x = tonumber(xMatch) or x end
+        if yMatch then y = tonumber(yMatch) or y end
+    end
+    file:close()
+    return x, y, true
 end
 
 local function LoadPanelPosition()
-    local configPath = GetConfigPath()
     local x, y = 100.0, 100.0
-    local ok, res = pcall(function()
-        local file = io.open(configPath, "r")
-        if file then
-            for line in file:lines() do
-                local xMatch = line:match("pos_x=([%d%.%-]+)")
-                local yMatch = line:match("pos_y=([%d%.%-]+)")
-                if xMatch then x = tonumber(xMatch) or x end
-                if yMatch then y = tonumber(yMatch) or y end
-            end
-            file:close()
+    pcall(function()
+        local loaded
+        x, y, loaded = ReadPanelPositionFile(GetConfigPath(), x, y)
+        if not loaded then
+            x, y = ReadPanelPositionFile(PANEL_CONFIG_FILE, x, y)
         end
     end)
     return x, y
 end
 
+local function SavePanelPositionToMenu(px, py)
+    px, py = tonumber(px), tonumber(py)
+    if not px or not py then return nil, nil end
+    px = math.floor(px + 0.5)
+    py = math.floor(py + 0.5)
+
+    if UI.panelX and UI.panelX.Set then pcall(function() UI.panelX:Set(px) end) end
+    if UI.panelY and UI.panelY.Set then pcall(function() UI.panelY:Set(py) end) end
+    return px, py
+end
+
 local function SavePanelPosition(px, py)
-    pcall(function()
-        local file = io.open(GetConfigPath(), "w")
-        if file then
-            file:write(string.format("pos_x=%d\npos_y=%d\n", px, py))
-            file:close()
-        end
-    end)
+    SavePanelPositionToMenu(px, py)
 end
 
 local _loadedPanelX, _loadedPanelY = LoadPanelPosition()
@@ -2719,8 +2977,6 @@ local _loadedPanelX, _loadedPanelY = LoadPanelPosition()
 --------------------------------------------------------------------------------
 -- MENU
 --------------------------------------------------------------------------------
-local UI = {}
-
 function script.OnScriptsLoaded()
     local tab = Menu.Create("General", "Main", "Item Helper")
     tab:Icon("\u{f085}")
@@ -2780,6 +3036,11 @@ function script.OnScriptsLoaded()
 
     UI.opacity = g_panel:Slider(L("m_opacity"), 20, 100, 85, "%d")
     UI.opacity:ToolTip(L("m_tt_opacity"))
+
+    UI.panelX = g_panel:Slider(L("m_offx"), 0, 7680, math.floor((_loadedPanelX or 100) + 0.5), "%d")
+    UI.panelY = g_panel:Slider(L("m_offy"), 0, 4320, math.floor((_loadedPanelY or 100) + 0.5), "%d")
+    if UI.panelX.Visible then UI.panelX:Visible(false) end
+    if UI.panelY.Visible then UI.panelY:Visible(false) end
 
     UI.showOwned = g_panel:Switch(L("m_highlight_owned"), true, "\u{f00c}")
     UI.showOwned:ToolTip(L("m_tt_owned"))
@@ -2855,6 +3116,8 @@ local S = {
     hoveredRegion    = nil,     -- current hovered click region
     panelVisible     = false,   -- last panel draw visibility state
     panelRect        = nil,     -- last panel bounds for hit-tests
+    panelBlockInputUntil = 0,   -- short gate after panel mouse events
+    panelMenuPosLoaded = false, -- panel position restored from persisted menu sliders
     -- Drag-to-move state
     panelPos         = {x = _loadedPanelX, y = _loadedPanelY},
     isDragging       = false,
@@ -2917,6 +3180,19 @@ local function sg(widget, fallback)
     local ok, v = pcall(function() return widget:Get() end)
     if ok and v ~= nil then return v end
     return fallback
+end
+
+local function restorePanelPositionFromMenu()
+    if S.panelMenuPosLoaded then return end
+    if not UI.panelX or not UI.panelY then return end
+
+    local x = sg(UI.panelX, S.panelPos.x or 100)
+    local y = sg(UI.panelY, S.panelPos.y or 100)
+    if type(x) == "number" and type(y) == "number" then
+        S.panelPos.x = x
+        S.panelPos.y = y
+        S.panelMenuPosLoaded = true
+    end
 end
 
 local function gt()
@@ -3129,6 +3405,78 @@ local function StyleColor(style, key, alphaOverride)
     return Color(c.r or 200, c.g or 200, c.b or 200, alphaOverride or c.a or 255)
 end
 
+local function colorPart(c, key, fallback)
+    local v = c and c[key]
+    if type(v) ~= "number" then v = tonumber(v) or fallback end
+    return clamp(v or fallback or 0, 0, 255)
+end
+
+local function withAlpha(c, alpha)
+    return col(colorPart(c, "r", 200), colorPart(c, "g", 200), colorPart(c, "b", 200), alpha or colorPart(c, "a", 255))
+end
+
+local function mixColor(a, b, t, alpha)
+    t = clamp(t or 0.5, 0, 1)
+    local r = colorPart(a, "r", 0) + (colorPart(b, "r", 0) - colorPart(a, "r", 0)) * t
+    local g = colorPart(a, "g", 0) + (colorPart(b, "g", 0) - colorPart(a, "g", 0)) * t
+    local bl = colorPart(a, "b", 0) + (colorPart(b, "b", 0) - colorPart(a, "b", 0)) * t
+    return col(r + 0.5, g + 0.5, bl + 0.5, alpha or colorPart(a, "a", 255))
+end
+
+local function linearChannel(v)
+    v = clamp(v or 0, 0, 255) / 255
+    if v <= 0.03928 then return v / 12.92 end
+    return ((v + 0.055) / 1.055) ^ 2.4
+end
+
+local function relativeLuma(c)
+    return 0.2126 * linearChannel(colorPart(c, "r", 0))
+        + 0.7152 * linearChannel(colorPart(c, "g", 0))
+        + 0.0722 * linearChannel(colorPart(c, "b", 0))
+end
+
+local function contrastRatio(a, b)
+    local la, lb = relativeLuma(a), relativeLuma(b)
+    if la < lb then la, lb = lb, la end
+    return (la + 0.05) / (lb + 0.05)
+end
+
+local function readableColor(fg, bg, minRatio, lightFallback, darkFallback)
+    local alpha = colorPart(fg, "a", 255)
+    local candidate = withAlpha(fg, alpha)
+    if contrastRatio(candidate, bg) >= (minRatio or 4.5) then return candidate end
+
+    local light = withAlpha(lightFallback or col(242, 245, 255, alpha), alpha)
+    local dark = withAlpha(darkFallback or col(22, 26, 34, alpha), alpha)
+    if contrastRatio(light, bg) >= contrastRatio(dark, bg) then
+        return light
+    end
+    return dark
+end
+
+local function readableMutedColor(rawDim, bg, text, minRatio, alpha)
+    local targetAlpha = alpha or colorPart(rawDim, "a", 180)
+    local candidate = withAlpha(rawDim, targetAlpha)
+    if contrastRatio(candidate, bg) >= (minRatio or 3.0) then return candidate end
+
+    candidate = mixColor(bg, text, 0.64, targetAlpha)
+    if contrastRatio(candidate, bg) >= (minRatio or 3.0) then return candidate end
+
+    local light = mixColor(bg, col(255, 255, 255, targetAlpha), 0.72, targetAlpha)
+    local dark = mixColor(bg, col(0, 0, 0, targetAlpha), 0.72, targetAlpha)
+    return readableColor(candidate, bg, minRatio or 3.0, light, dark)
+end
+
+local function readableAccentColor(rawAccent, bg, text)
+    local alpha = colorPart(rawAccent, "a", 255)
+    local candidate = withAlpha(rawAccent, alpha)
+    if contrastRatio(candidate, bg) >= 2.2 then return candidate end
+
+    local fallback = relativeLuma(bg) < 0.45 and col(255, 205, 70, alpha) or col(0, 110, 180, alpha)
+    if contrastRatio(fallback, bg) >= 2.2 then return fallback end
+    return withAlpha(text, alpha)
+end
+
 local function getEnemyFilterValue(name)
     if not UI.enemyFilterList or not UI.enemyFilterList.Get then return nil end
     local ok, val = pcall(function() return UI.enemyFilterList:Get(name) end)
@@ -3263,7 +3611,8 @@ local function applyRolePenalty(score, itemName, myRole, myStyle)
         end
     end
     if penalized then
-        score = math.max(1, math.floor(score * 0.15))
+        local factor = score >= 24 and 0.45 or 0.25
+        score = math.max(1, math.floor(score * factor))
     end
     return score
 end
@@ -3325,13 +3674,139 @@ local function itemAllowedForProfile(itemName, myRole, myStyle)
     return canonical, probe > 1
 end
 
+local ITEM_COUNTER_PROFILES = {
+    item_magic_wand = {threats={magic_burst=1.5, spell_spam=2, disable=1}},
+    item_bracer = {threats={phys_burst=2, jump_burst=2, carry=1}},
+    item_soul_ring = {threats={mana_burn=2}},
+    item_phase_boots = {threats={phys_dps=1.5, armor_reduce=1.5}},
+    item_power_treads = {threats={mana_burn=1, phys_dps=1}},
+    item_arcane_boots = {threats={mana_burn=1.5, spell_spam=1}},
+    item_tranquil_boots = {threats={slow=1, poison=1}},
+    item_boots_of_bearing = {threats={slow=2, summon_swarm=1.5, teamfight_disable=1.5}},
+
+    item_ghost = {threats={phys_burst=6, jump_burst=5, carry=3, duel=4, low_hp_fighter=3, single_target_focus=4}},
+    item_blade_mail = {threats={phys_burst=4, magic_burst=2, jump_burst=4, low_hp_fighter=2}},
+    item_vanguard = {threats={phys_dps=3, summon_swarm=4, illusions=3, push=2}},
+    item_splintmail = {threats={phys_dps=3, phys_burst=2, armor_reduce=2}},
+    item_pavise = {threats={phys_burst=4, phys_dps=3, jump_burst=3}},
+    item_crimson_guard = {threats={illusion_core=6, illusions=5, summon_swarm=5, summons=4, phys_dps=3, push=3}},
+    item_assault = {threats={phys_dps=4, armor_reduce=4, push=2, illusion_core=2}},
+    item_shivas_guard = {threats={heal=4, regen=5, illusion_core=5, illusions=4, phys_dps=3, attack_speed=3, low_hp_fighter=3}},
+    item_heavens_halberd = {threats={carry=5, phys_dps=5, phys_burst=4, jump_burst=3, low_hp_fighter=4, single_target_focus=4}},
+    item_solar_crest = {threats={phys_burst=2, armor_reduce=2, roshan=2}},
+
+    item_pipe = {threats={magic_burst=6, spell_spam=5, teamfight_disable=2, poison=3, global=3}},
+    item_glimmer_cape = {threats={magic_burst=4, single_target_disable=3, pickoff=3, global=2}},
+    item_mage_slayer = {threats={magic_burst=5, spell_spam=5, spell_lifesteal=4}},
+    item_shawl = {threats={magic_burst=3, spell_spam=2}},
+    item_consecrated_wraps = {threats={magic_burst=4, slow=3, poison=2, spell_spam=2}},
+    item_black_king_bar = {threats={magic_burst=5, disable=5, stun=4, silence=5, hex=5, root=3, fear=4, global_silence=6, teamfight_disable=3}},
+
+    item_spirit_vessel = {threats={heal=6, regen=6, save=4, save_core=5, spell_lifesteal=5, low_hp_fighter=5, tanky=3}},
+    item_monkey_king_bar = {threats={evasion=6, evasion_core=7, refraction=3}},
+    item_dust = {threats={invis=7, permanent_invis=8, invis_escape=7, invis_trap=5}},
+    item_ward_sentry = {threats={invis=6, permanent_invis=7, invis_escape=6, invis_trap=6}},
+
+    item_mjollnir = {threats={illusion_core=7, illusions=6, summon_swarm=5, summons=4, push=3}},
+    item_battlefury = {threats={illusion_core=4, illusions=4, summon_swarm=3, summons=3}},
+    item_radiance = {threats={illusion_core=4, illusions=4, summons=3, invis=2, evasion=2}},
+    item_maelstrom = {threats={illusion_core=5, illusions=5, summon_swarm=4, summons=3}},
+    item_gungir = {threats={mobility=5, blink_escape=6, ball_escape=5, phase_escape=4, invis_escape=4, illusion_core=3}},
+
+    item_blink = {threats={ranged=4, siege=4, backline=3, split_push=3, spell_spam=2}},
+    item_force_staff = {threats={slow=4, root=4, leash=5, hook_pickoff=5, arena_control=4, cogs=5, jump_burst=3, single_target_disable=3}},
+    item_hurricane_pike = {threats={ranged=3, slow=3, hook_pickoff=4, jump_burst=3, phys_dps=2}},
+    item_harpoon = {threats={ranged=3, mobility=3, blink_escape=2}},
+
+    item_lotus_orb = {threats={single_target_disable=6, doom=5, duel=5, hex=5, silence=4, stun=3, track=4, armor_reduce=3, hook_pickoff=4}},
+    item_manta = {threats={silence=5, global_silence=5, slow=3, root=4, track=3, poison=2}},
+    item_disperser = {threats={silence=4, global_silence=4, slow=5, root=5, leash=4, mana_shield=3, mobility=2}},
+    item_cyclone = {threats={silence=4, slow=3, root=3, phys_burst=3, low_hp_fighter=4, rupture=5}},
+    item_sphere = {threats={single_target_disable=7, doom=7, duel=7, hex=5, hook_pickoff=5, bkb_piercing_disable=4, pickoff=4}},
+    item_aeon_disk = {threats={phys_burst=5, magic_burst=5, jump_burst=5, arena_control=5, bkb_piercing_disable=5, pickoff=4}},
+    item_wind_waker = {threats={bkb_piercing_disable=6, arena_control=5, single_target_disable=4, phys_burst=4, magic_burst=4}},
+
+    item_skadi = {threats={heal=5, regen=5, mobility=3, low_hp_fighter=4, mana_shield=3, lifesteal=5}},
+    item_abyssal_blade = {threats={magic_immune=5, carry=4, mobility=3, low_hp_fighter=4}},
+    item_nullifier = {threats={save=7, save_core=8, invis=4, phase_escape=3, evasion=3, ghost_save=6}},
+    item_bloodthorn = {threats={evasion=5, evasion_core=6, mobility=5, phase_escape=5, blink_escape=5, magic_burst=3, spell_spam=3}},
+    item_silver_edge = {threats={breakable=7, tanky=4, regen=3, evasion=2, dispersion=5}},
+    item_diffusal_blade = {threats={mana_shield=7, mana_dependent=4, low_mana=3, mobility=2}},
+    item_rod_of_atos = {threats={mobility=4, blink_escape=4, ball_escape=4, invis_escape=3, ranged=2}},
+    item_orchid = {threats={mobility=5, phase_escape=5, ball_escape=6, spell_spam=4, magic_burst=4, save_core=3}},
+    item_sheepstick = {threats={carry=4, mobility=5, magic_immune=3, phase_escape=5, ball_escape=5, low_hp_fighter=4, save_core=4}},
+
+    item_mekansm = {threats={magic_burst=2, phys_burst=2, push=2}},
+    item_essence_distiller = {threats={magic_burst=3, phys_burst=3, jump_burst=2}},
+    item_guardian_greaves = {threats={silence=4, disable=3, magic_burst=2, poison=2}},
+    item_holy_locket = {threats={magic_burst=2, phys_burst=2, heal=2}},
+    item_vladmir = {threats={armor_reduce=2, phys_dps=2, push=2}},
+    item_dagon = {threats={low_hp_fighter=3, invis_escape=2, pickoff=2}},
+    item_angels_demise = {threats={magic_burst=3, mobility=3, tanky=2, regen=2}},
+    item_crellas_crozier = {threats={slow=3, root=3, hook_pickoff=3, pickoff=2}},
+}
+
+local function getItemCounterProfile(itemName)
+    return ITEM_COUNTER_PROFILES[canonItemName(itemName)] or ITEM_COUNTER_PROFILES[itemName]
+end
+
+local function ownedItemContains(ownedItems, itemName)
+    if not ownedItems or not itemName then return false end
+    local canonical = canonItemName(itemName)
+    local engineName = engineItemName(itemName)
+    return ownedItems[itemName] or ownedItems[canonical] or ownedItems[engineName] or false
+end
+
+local function scaledThreatCount(count)
+    count = count or 0
+    if count <= 0 then return 0 end
+    return 1 + math.max(0, count - 1) * 0.65
+end
+
+local function phaseFitFactor(itemDef, phase, gameMode)
+    if not itemDef or not itemDef.phase then return 0 end
+    if tableContains(itemDef.phase, phase) then return 1.0 end
+
+    local minPhase, maxPhase = 9, 0
+    for _, p in ipairs(itemDef.phase) do
+        if p < minPhase then minPhase = p end
+        if p > maxPhase then maxPhase = p end
+    end
+
+    if gameMode == GAME_MODE.TURBO then
+        if phase < minPhase then return 0.75 end
+        if phase > maxPhase then return itemHasTag(itemDef, "farm") and 0.2 or 0.55 end
+    end
+
+    if phase < minPhase then
+        local gap = minPhase - phase
+        return gap == 1 and 0.55 or 0.3
+    end
+    if phase > maxPhase then
+        if itemHasTag(itemDef, "farm") then return 0.15 end
+        return 0.45
+    end
+    return 1.0
+end
+
+local function directCounterWeight(counterData, itemName)
+    if not counterData then return 0 end
+    local canonical = canonItemName(itemName)
+    if counterData.priority then
+        return counterData.priority[canonical] or counterData.priority[itemName] or counterData.priority[engineItemName(itemName)] or 0
+    end
+    return listContainsCanonicalItem(counterData.items, itemName) and 10 or 0
+end
+
 local function computeItemScore(itemDef, ctx, withBreakdown)
     if not itemDef or not ctx then return 0, nil end
-    if not tableContains(itemDef.phase, ctx.phase) then return 0, nil end
-    if ctx.ownedItems and ctx.ownedItems[itemDef.name] then return -1, nil end
+    if ownedItemContains(ctx.ownedItems, itemDef.name) then return -1, nil end
 
     local enemyTags = ctx.enemyTags or {}
+    local activeEnemyCount = math.max(1, ctx.activeEnemyCount or 0)
     local score = 0
+    local directScore = 0
+    local tacticalScore = 0
     local breakMap = withBreakdown and {} or nil
 
     local function addBreak(key, delta)
@@ -3341,12 +3816,41 @@ local function computeItemScore(itemDef, ctx, withBreakdown)
         breakMap[key] = (breakMap[key] or 0) + delta
     end
 
+    for _, enemy in ipairs(ctx.enemyHeroes or {}) do
+        if enemy.included then
+            local cd = HERO_COUNTERS[enemy.name]
+            if cd and listContainsCanonicalItem(cd.items, itemDef.name) then
+                local w = directCounterWeight(cd, itemDef.name)
+                if w <= 0 then w = 10 end
+                if (enemy.level or 0) >= 18 then w = w + 2
+                elseif (enemy.level or 0) >= 12 then w = w + 1 end
+                directScore = directScore + w
+            end
+        end
+    end
+    if directScore > 0 then
+        score = score + directScore
+        addBreak("hero_counter", directScore)
+    end
+
+    local profile = getItemCounterProfile(itemDef.name)
+    if profile and profile.threats then
+        for tag, weight in pairs(profile.threats) do
+            local cnt = enemyTags[tag] or 0
+            if cnt > 0 then
+                local d = weight * scaledThreatCount(cnt)
+                tacticalScore = tacticalScore + d
+                addBreak("profile:" .. tag, d)
+            end
+        end
+    end
+
     if itemDef.triggers then
         for _, tr in ipairs(itemDef.triggers) do
             local cnt = enemyTags[tr] or 0
             if cnt > 0 then
-                local d = cnt * 4
-                score = score + d
+                local d = 2.25 * scaledThreatCount(cnt)
+                tacticalScore = tacticalScore + d
                 addBreak("trigger:" .. tr, d)
             end
         end
@@ -3363,16 +3867,102 @@ local function computeItemScore(itemDef, ctx, withBreakdown)
         if matched then
             local itemMatch = countMatches(itemDef.tags or {}, rule.suggest)
             if itemMatch > 0 then
-                local d = itemMatch * rule.weight * math.max(1, totalEnemyTags)
-                score = score + d
+                local d = itemMatch * rule.weight * scaledThreatCount(totalEnemyTags) * 0.65
+                tacticalScore = tacticalScore + d
                 addBreak("counter_rules", d)
             end
         end
     end
 
+    score = score + tacticalScore
+    if score <= 0 then return 0, nil end
+
+    if ctx.trackEnemyItems and ctx.enemyItemCounts then
+        local counts = ctx.enemyItemCounts
+        local bkbCount = counts["item_black_king_bar"] or 0
+        if bkbCount > 0 and (itemDef.name == "item_nullifier" or itemDef.name == "item_abyssal_blade" or itemDef.name == "item_sheepstick") then
+            local d = bkbCount * 4
+            score = score + d
+            addBreak("enemy_item:bkb", d)
+        end
+        local linkenCount = counts["item_sphere"] or counts["item_linkens"] or 0
+        if linkenCount > 0 and (itemHasTag(itemDef, "disable") or itemDef.name == "item_nullifier" or itemDef.name == "item_diffusal_blade") then
+            local d = linkenCount * 3
+            score = score + d
+            addBreak("enemy_item:linkens", d)
+        end
+        local aeonCount = counts["item_aeon_disk"] or 0
+        if aeonCount > 0 and (itemDef.name == "item_nullifier" or itemDef.name == "item_orchid" or itemDef.name == "item_bloodthorn") then
+            local d = aeonCount * 6
+            score = score + d
+            addBreak("enemy_item:aeon", d)
+        end
+        local ghostCount = counts["item_ghost"] or counts["item_ethereal_blade"] or 0
+        if ghostCount > 0 and itemDef.name == "item_nullifier" then
+            local d = ghostCount * 6
+            score = score + d
+            addBreak("enemy_item:ghost", d)
+        end
+        local glimmerCount = counts["item_glimmer_cape"] or counts["item_glimmer"] or 0
+        if glimmerCount > 0 and (itemDef.name == "item_dust" or itemDef.name == "item_ward_sentry" or itemDef.name == "item_nullifier") then
+            local d = glimmerCount * 5
+            score = score + d
+            addBreak("enemy_item:glimmer", d)
+        end
+        local butterflyCount = counts["item_butterfly"] or counts["item_talisman_of_evasion"] or 0
+        if butterflyCount > 0 and (itemDef.name == "item_monkey_king_bar" or itemDef.name == "item_bloodthorn") then
+            local d = butterflyCount * 7
+            score = score + d
+            addBreak("enemy_item:evasion", d)
+        end
+        local satanicCount = counts["item_satanic"] or counts["item_heart"] or counts["item_bloodstone"] or 0
+        if satanicCount > 0 and (itemDef.name == "item_spirit_vessel" or itemDef.name == "item_skadi" or itemDef.name == "item_shivas_guard") then
+            local d = satanicCount * 5
+            score = score + d
+            addBreak("enemy_item:sustain", d)
+        end
+    end
+
+    if itemHasTag(itemDef, "team") then
+        local magicLoad = (enemyTags.magic_burst or 0) + (enemyTags.spell_spam or 0)
+        local physLoad = (enemyTags.phys_dps or 0) + (enemyTags.illusion_core or 0) + (enemyTags.summon_swarm or 0)
+        if itemHasTag(itemDef, "vs_magic") and magicLoad >= math.min(3, activeEnemyCount) then
+            score = score + 3
+            addBreak("team_need", 3)
+        elseif itemHasTag(itemDef, "vs_phys") and physLoad >= math.min(3, activeEnemyCount) then
+            score = score + 3
+            addBreak("team_need", 3)
+        end
+    end
+
     if score > 0 and ctx.myGoldKnown and ctx.myGold and ctx.myGold >= itemDef.cost then
-        score = score + 2
-        addBreak("affordable", 2)
+        score = score + 1.5
+        addBreak("affordable", 1.5)
+    end
+
+    if score > 0 then
+        local d = stylePreferenceBonus(itemDef, ctx)
+        if d ~= 0 then
+            score = score + d
+            addBreak("style_bonus", d)
+        end
+    end
+
+    if ctx.showNetWorth and ctx.gameTempo then
+        local before = score
+        if ctx.gameTempo == "ahead" then
+            if itemDef.cost >= 4000 and (itemHasTag(itemDef, "phys_dps") or itemHasTag(itemDef, "disable") or itemHasTag(itemDef, "vs_save")) then
+                score = score + 2
+            end
+        elseif ctx.gameTempo == "behind" then
+            if itemDef.cost <= 3100 and (itemHasTag(itemDef, "vs_phys") or itemHasTag(itemDef, "vs_magic") or itemHasTag(itemDef, "save") or itemHasTag(itemDef, "dispel")) then
+                score = score + 4
+            end
+            if itemDef.cost >= 5600 and directScore <= 0 then
+                score = math.max(1, math.floor(score * 0.55))
+            end
+        end
+        addBreak("tempo", score - before)
     end
 
     do
@@ -3382,66 +3972,9 @@ local function computeItemScore(itemDef, ctx, withBreakdown)
     end
 
     do
-        local d = stylePreferenceBonus(itemDef, ctx)
-        if d ~= 0 then
-            score = score + d
-            addBreak("style_bonus", d)
-        end
-    end
-
-    if ctx.trackEnemyItems and ctx.enemyItemCounts then
-        local counts = ctx.enemyItemCounts
-        local bkbCount = counts["item_black_king_bar"] or 0
-        if bkbCount > 0 and (itemDef.name == "item_nullifier" or itemDef.name == "item_abyssal_blade") then
-            local d = bkbCount * 8
-            score = score + d
-            addBreak("enemy_item:bkb", d)
-        end
-        local linkenCount = counts["item_sphere"] or 0
-        if linkenCount > 0 and itemDef.tags and tableContains(itemDef.tags, "disable") then
-            local d = linkenCount * 4
-            score = score + d
-            addBreak("enemy_item:linkens", d)
-        end
-        local aeonCount = counts["item_aeon_disk"] or 0
-        if aeonCount > 0 and itemDef.name == "item_nullifier" then
-            local d = aeonCount * 6
-            score = score + d
-            addBreak("enemy_item:aeon", d)
-        end
-        local ghostCount = counts["item_ghost"] or 0
-        if ghostCount > 0 and (itemDef.name == "item_ethereal_blade" or itemDef.name == "item_nullifier") then
-            local d = ghostCount * 5
-            score = score + d
-            addBreak("enemy_item:ghost", d)
-        end
-        local glimmerCount = counts["item_glimmer_cape"] or 0
-        if glimmerCount > 0 and (itemDef.name == "item_dust" or itemDef.name == "item_nullifier") then
-            local d = glimmerCount * 4
-            score = score + d
-            addBreak("enemy_item:glimmer", d)
-        end
-        local bladeMailCount = counts["item_blade_mail"] or 0
-        if bladeMailCount > 0 and itemDef.tags and (tableContains(itemDef.tags, "lifesteal") or tableContains(itemDef.tags, "vs_phys")) then
-            local d = bladeMailCount * 3
-            score = score + d
-            addBreak("enemy_item:blademail", d)
-        end
-    end
-
-    if ctx.showNetWorth and ctx.gameTempo then
         local before = score
-        if ctx.gameTempo == "ahead" and itemDef.cost >= 4000 and itemHasTag(itemDef, "phys_dps") then
-            score = score + 3
-        elseif ctx.gameTempo == "behind" then
-            if itemDef.cost < 3000 and (itemHasTag(itemDef, "vs_phys") or itemHasTag(itemDef, "vs_magic") or itemHasTag(itemDef, "save")) then
-                score = score + 4
-            end
-            if itemDef.cost >= 5000 then
-                score = math.max(1, math.floor(score * 0.5))
-            end
-        end
-        addBreak("tempo", score - before)
+        score = applyHeroSpecificAdjust(score, ctx.heroName, itemDef.name)
+        addBreak("hero_specific", score - before)
     end
 
     local modeMultipliers = MODE_PHASE_MULTIPLIERS[ctx.gameMode or GAME_MODE.UNKNOWN] or MODE_PHASE_MULTIPLIERS[GAME_MODE.UNKNOWN]
@@ -3451,29 +3984,29 @@ local function computeItemScore(itemDef, ctx, withBreakdown)
     do
         local before = score
         if ctx.gameMode == GAME_MODE.TURBO then
-            if itemDef.cost < 1500 and tableContains(itemDef.phase, PHASE_EARLY) and not tableContains(itemDef.phase, PHASE_MID) then
-                score = math.max(1, math.floor(score * 0.3))
+            if itemDef.cost < 1400 and tableContains(itemDef.phase, PHASE_EARLY) and not tableContains(itemDef.phase, PHASE_MID) then
+                score = score * 0.35
             end
-            if itemDef.cost >= 3000 then
-                score = score + 3
+            if itemDef.cost >= 3000 and directScore > 0 then
+                score = score + 2
             end
-        elseif ctx.gameMode == GAME_MODE.RANKED and itemDef.cost >= 2000 and itemDef.cost <= 5000 then
+        elseif ctx.gameMode == GAME_MODE.RANKED and itemDef.cost >= 1800 and itemDef.cost <= 4800 then
             score = score + 1
         end
+        score = score * multiplier
         addBreak("mode_adjust", score - before)
     end
 
     do
         local before = score
-        score = math.floor(score * multiplier)
-        addBreak("phase_mult", score - before)
+        local factor = phaseFitFactor(itemDef, ctx.phase, ctx.gameMode)
+        if directScore >= 14 and factor < 0.55 then factor = 0.55 end
+        score = score * factor
+        addBreak("phase_fit", score - before)
     end
 
-    do
-        local before = score
-        score = applyHeroSpecificAdjust(score, ctx.heroName, itemDef.name)
-        addBreak("hero_specific", score - before)
-    end
+    score = math.floor(score + 0.5)
+    if score <= 0 then return 0, nil end
 
     if not breakMap then
         return score, nil
@@ -3517,6 +4050,9 @@ local function breakdownKeyLabel(key)
     if key:find("trigger:", 1, true) == 1 then
         return key:sub(9):gsub("_", " ")
     end
+    if key:find("profile:", 1, true) == 1 then
+        return key:sub(9):gsub("_", " ")
+    end
     return tostring(key):gsub("_", " ")
 end
 
@@ -3528,12 +4064,14 @@ local function classifySuggestionCategory(itemDef, score, breakdown)
         or itemHasTag(itemDef, "block_spell")
     local triggerPower = sumBreakdownPrefix(breakdown, "trigger:")
     local counterPower = sumBreakdownPrefix(breakdown, "counter_rules")
+    local heroPower = sumBreakdownPrefix(breakdown, "hero_counter")
+    local profilePower = sumBreakdownPrefix(breakdown, "profile:")
     local enemyItemPower = sumBreakdownPrefix(breakdown, "enemy_item:")
 
-    if defensive and (score >= 10 or triggerPower >= 8 or enemyItemPower >= 6) then
+    if defensive and (score >= 10 or triggerPower >= 8 or heroPower >= 10 or enemyItemPower >= 6) then
         return "must_have"
     end
-    if (counterPower + enemyItemPower) >= 10 and score >= 9 then
+    if (counterPower + heroPower + profilePower + enemyItemPower) >= 10 and score >= 9 then
         return "must_have"
     end
 
@@ -3601,6 +4139,17 @@ local ITEM_FUNCTION_WEIGHTS = {
     vs_invis = 6,
     detection = 6,
     vs_illusions = 5,
+    vs_evasion = 5,
+    vs_save = 5,
+    disarm = 5,
+    ["break"] = 5,
+    silence = 4,
+    root = 4,
+    hex = 5,
+    stun = 4,
+    magic_immune = 4,
+    magic_resist = 3,
+    barrier = 3,
     mobility = 3,
     team = 2,
     armor = 2,
@@ -3723,12 +4272,14 @@ local function buildEnemyFocusData(ctxTemplate)
             for k, v in pairs(ctxTemplate) do ctx[k] = v end
             ctx.enemyTags = enemy.tagCounts or {}
             ctx.enemyItemCounts = enemy.itemCounts or {}
+            ctx.enemyHeroes = {enemy}
+            ctx.activeEnemyCount = 1
 
             local scored = {}
             local function addScore(itemName, value, reason)
                 local itemDef = ITEM_LOOKUP[itemName]
                 if not itemDef then return end
-                if ctx.ownedItems and ctx.ownedItems[itemName] then return end
+                if ownedItemContains(ctx.ownedItems, itemName) then return end
                 local entry = scored[itemName]
                 if not entry then
                     entry = {item = itemDef, score = 0, reasons = {}}
@@ -3809,6 +4360,7 @@ end
 -- Item names where script has no underscore but panorama asset has (e.g. item_battlefury -> battle_fury)
 local ITEM_ICON_NAME_OVERRIDES = {
     item_battlefury = "battle_fury",
+    item_daedalus = "greater_crit",
 }
 
 local function itemIcon(name)
@@ -4042,6 +4594,62 @@ local function findClickRegionAt(x, y)
     return nil
 end
 
+local function mouseKey(key)
+    local bc = Enum and Enum.ButtonCode
+    if not bc then return false end
+    return key == bc.KEY_MOUSE1
+        or key == bc.KEY_MOUSE2
+        or key == bc.KEY_MOUSE3
+        or key == bc.KEY_MOUSE4
+        or key == bc.KEY_MOUSE5
+        or key == bc.KEY_MWHEELUP
+        or key == bc.KEY_MWHEELDOWN
+end
+
+local function panelHitTestAt(x, y)
+    local pr = S.panelRect
+    if not S.panelVisible or not pr then return false end
+
+    if x and y and pointInRect(x, y, pr.x or 0, pr.y or 0, pr.w or 0, pr.h or 0) then
+        return true
+    end
+
+    if Input and Input.IsCursorInRect then
+        return safeStatic(Input, "IsCursorInRect", pr.x or 0, pr.y or 0, pr.w or 0, pr.h or 0) == true
+    end
+
+    return false
+end
+
+local function cursorOnPanel()
+    local x, y = getCursorPos2D()
+    return panelHitTestAt(x, y)
+end
+
+local function markPanelInputBlocked(duration)
+    S.panelBlockInputUntil = os.clock() + (duration or 0.18)
+end
+
+local function shouldBlockPanelInput()
+    if not sg(UI.enabled, true) or not sg(UI.showPanel, true) or not S.toggleState then return false end
+    if S.isDragging then return true end
+    if os.clock() < (S.panelBlockInputUntil or 0) then return true end
+    return cursorOnPanel()
+end
+
+local function isLocalPlayerOrder(data, playerArg)
+    local localPlayer = safeStatic(Players, "GetLocal")
+    if not localPlayer then return true end
+
+    local orderPlayer = type(data) == "table" and data.player or playerArg
+    if not orderPlayer then return true end
+
+    local localId = safeStatic(Player, "GetPlayerID", localPlayer)
+    local orderId = safeStatic(Player, "GetPlayerID", orderPlayer)
+    if localId == nil or orderId == nil then return true end
+    return localId == orderId
+end
+
 --------------------------------------------------------------------------------
 -- ANALYSIS ENGINE
 --------------------------------------------------------------------------------
@@ -4177,14 +4785,22 @@ local function analyzeEnemyTeam()
         local item = safeStatic(NPC, "GetItemByIndex", me, i)
         if item then
             local iName = safeStatic(Ability, "GetName", item)
-            if iName then S.ownedItems[iName] = true end
+            if iName then
+                S.ownedItems[iName] = true
+                S.ownedItems[canonItemName(iName)] = true
+                S.ownedItems[engineItemName(iName)] = true
+            end
         end
     end
     -- Check neutral slot (slot 16)
     local neutralItem = safeStatic(NPC, "GetItemByIndex", me, 16)
     if neutralItem then
         local nName = safeStatic(Ability, "GetName", neutralItem)
-        if nName then S.ownedItems[nName] = true end
+        if nName then
+            S.ownedItems[nName] = true
+            S.ownedItems[canonItemName(nName)] = true
+            S.ownedItems[engineItemName(nName)] = true
+        end
     end
 
     -- Enemies (filter out illusions, clones, tempest doubles; deduplicate by name)
@@ -4230,9 +4846,11 @@ local function analyzeEnemyTeam()
                         if item then
                             local iName = safeStatic(Ability, "GetName", item)
                             if iName then
+                                local cName = canonItemName(iName)
                                 enemyData.items[iName] = true
-                                S.enemyItems[iName] = (S.enemyItems[iName] or 0) + 1
-                                S.enemyItemCounts[iName] = (S.enemyItemCounts[iName] or 0) + 1
+                                enemyData.items[cName] = true
+                                S.enemyItems[cName] = (S.enemyItems[cName] or 0) + 1
+                                S.enemyItemCounts[cName] = (S.enemyItemCounts[cName] or 0) + 1
                             end
                         end
                     end
@@ -4241,8 +4859,10 @@ local function analyzeEnemyTeam()
                     if neutralItem then
                         local nName = safeStatic(Ability, "GetName", neutralItem)
                         if nName then
+                            local cName = canonItemName(nName)
                             enemyData.items[nName] = true
-                            S.enemyItems[nName] = (S.enemyItems[nName] or 0) + 1
+                            enemyData.items[cName] = true
+                            S.enemyItems[cName] = (S.enemyItems[cName] or 0) + 1
                         end
                     end
                 end
@@ -4294,8 +4914,10 @@ local function analyzeEnemyTeam()
             if counterData then
                 for _, rawItemName in ipairs(counterData.items) do
                     local itemName, allowed = itemAllowedForProfile(rawItemName, myRole, myStyle)
-                    if allowed and not S.ownedItems[itemName] then
-                        counterScore[itemName] = (counterScore[itemName] or 0) + 1
+                    if allowed and not ownedItemContains(S.ownedItems, itemName) then
+                        local w = directCounterWeight(counterData, itemName)
+                        if w <= 0 then w = 10 end
+                        counterScore[itemName] = (counterScore[itemName] or 0) + w
                     end
                 end
             end
@@ -4320,7 +4942,10 @@ local function analyzeEnemyTeam()
                 reason = counterData and counterData.reason or "Counter pick"
             })
         end
-        table.sort(S.heroCounterSuggestions, function(a, b) return a.score > b.score end)
+        table.sort(S.heroCounterSuggestions, function(a, b)
+            if a.score ~= b.score then return a.score > b.score end
+            return tostring(a.item) < tostring(b.item)
+        end)
     end
 
     -- Score items
@@ -4328,6 +4953,8 @@ local function analyzeEnemyTeam()
         phase = S.gamePhase,
         ownedItems = S.ownedItems,
         enemyTags = S.enemyTags,
+        enemyHeroes = S.enemyHeroes,
+        activeEnemyCount = S.activeEnemyCount,
         enemyItemCounts = S.enemyItemCounts,
         myGold = S.myGold,
         myGoldKnown = S.myGoldKnown,
@@ -4523,11 +5150,17 @@ local function syncThemeColors()
     TC.lastSync = now
     local ok, style = pcall(Menu.Style)
     if not ok or not style then return end
-    TC.bg     = StyleColor(style, "additional_background", 220)
-    TC.border = StyleColor(style, "outline", 80)
-    TC.text   = StyleColor(style, "primary_first_tab_text", 255)
-    TC.accent = StyleColor(style, "primary", 255)
-    TC.dim    = StyleColor(style, "slider_background", 180)
+    local bg     = StyleColor(style, "additional_background", 220)
+    local border = StyleColor(style, "outline", 90)
+    local text   = StyleColor(style, "primary_first_tab_text", 255)
+    local accent = StyleColor(style, "primary", 255)
+    local dim    = StyleColor(style, "slider_background", 180)
+
+    TC.bg     = bg
+    TC.text   = readableColor(text, bg, 4.5, col(242, 245, 255, 255), col(24, 28, 36, 255))
+    TC.dim    = readableMutedColor(dim, bg, TC.text, 3.0, 185)
+    TC.accent = readableAccentColor(accent, bg, TC.text)
+    TC.border = contrastRatio(border, bg) >= 1.35 and border or readableMutedColor(border, bg, TC.text, 1.45, 105)
 end
 
 --------------------------------------------------------------------------------
@@ -5447,12 +6080,22 @@ local function HandlePanelInput()
     local isInHeader = (cx >= (pr.x or 0)) and (cx <= (pr.x or 0) + (pr.w or 0)) and
                        (cy >= (pr.y or 0)) and (cy <= (pr.y or 0) + headerH)
 
-    local mouseDown = Input.IsKeyDown(Enum.ButtonCode.KEY_MOUSE1)
+    local mouseDown = false
+    if Input and Input.IsKeyDown and Enum and Enum.ButtonCode then
+        local okDown, down = pcall(Input.IsKeyDown, Enum.ButtonCode.KEY_MOUSE1, true)
+        if not okDown then okDown, down = pcall(Input.IsKeyDown, Enum.ButtonCode.KEY_MOUSE1) end
+        mouseDown = okDown and down == true
+    end
+
+    if mouseDown and (S.isDragging or panelHitTestAt(cx, cy)) then
+        markPanelInputBlocked(0.22)
+    end
 
     if isInHeader and mouseDown and not S.isDragging then
         S.isDragging = true
         S.dragOffset.x = cx - (S.panelPos.x or 0)
         S.dragOffset.y = cy - (S.panelPos.y or 0)
+        markPanelInputBlocked(0.25)
     end
 
     if S.isDragging then
@@ -5464,6 +6107,7 @@ local function HandlePanelInput()
             local ph = pr.h or 400
             S.panelPos.x = clamp(S.panelPos.x, 0, sw - pw)
             S.panelPos.y = clamp(S.panelPos.y, 0, sh - ph)
+            SavePanelPositionToMenu(S.panelPos.x, S.panelPos.y)
         else
             S.isDragging = false
             SavePanelPosition(S.panelPos.x, S.panelPos.y)
@@ -5669,6 +6313,8 @@ local function drawPanel()
     local isMinimal = sg(UI.panelMode, 0) == 1
     local ph = isMinimal and measurePanelHeightMinimal(innerW) or measurePanelHeight(innerW)
 
+    restorePanelPositionFromMenu()
+
     -- Use drag position instead of sliders
     local px = F(S.panelPos.x)
     local py = F(S.panelPos.y)
@@ -5814,6 +6460,43 @@ function script.OnDraw()
     end
 end
 
+function script.OnKeyEvent(data, key, event)
+    local ok, block = pcall(function()
+        if not mouseKey(key) then return false end
+        if shouldBlockPanelInput() then
+            markPanelInputBlocked(0.22)
+            return true
+        end
+        return false
+    end)
+
+    if not ok then
+        print("[ItemHelper] KeyEvent: " .. tostring(block))
+        return
+    end
+
+    if block then return false end
+end
+
+function script.OnPrepareUnitOrders(data, playerArg, orderArg, targetArg, positionArg, abilityArg, orderIssuerArg, npcArg, queueArg, showEffectsArg)
+    local ok, block = pcall(function()
+        if not isLocalPlayerOrder(data, playerArg) then return false end
+        if shouldBlockPanelInput() then
+            markPanelInputBlocked(0.15)
+            return true
+        end
+        return false
+    end)
+
+    if not ok then
+        print("[ItemHelper] PrepareUnitOrders: " .. tostring(block))
+        return true
+    end
+
+    if block then return false end
+    return true
+end
+
 function script.OnGameEnd()
     S.enemyHeroes = {}
     S.enemyTags = {}
@@ -5839,6 +6522,7 @@ function script.OnGameEnd()
     S.hoveredRegion = nil
     S.panelVisible = false
     S.panelRect = nil
+    S.panelBlockInputUntil = 0
     S.lastFrame = 0
     S.dt = 0.016
     S.pulseTime = 0

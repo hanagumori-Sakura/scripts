@@ -605,46 +605,257 @@ end
 -- =========================================================
 -- PANEL RENDERER
 -- =========================================================
+local BEAR_PANEL_W = 320
+local BEAR_PANEL_H = 175
+
+-- =========================================================
+-- BEAR PANEL THEME
+-- =========================================================
+local BT = {
+    bg        = Color(12, 14, 26, 220),
+    border    = Color(40, 45, 65, 80),
+    text      = Color(235, 238, 255, 255),
+    accent    = Color(0, 200, 150, 255),
+    dim       = Color(160, 165, 180, 255),
+    last_sync = -999,
+}
+
+local function sync_bear_theme()
+    local now = 0
+    pcall(function() now = GameRules.GetGameTime() end)
+    if now - BT.last_sync < 0.5 then return end
+    BT.last_sync = now
+    local ok, style = pcall(Menu.Style)
+    if not ok or not style or type(style) ~= "table" then return end
+    local function SC(k, a)
+        local c = style[k]
+        if c and type(c.r) == "number" then return Color(c.r, c.g, c.b, a or c.a or 255) end
+        return nil
+    end
+    BT.bg     = SC("additional_background", 220) or BT.bg
+    BT.border = SC("outline", 80) or BT.border
+    BT.text   = SC("primary_first_tab_text", 255) or SC("Text", 255) or BT.text
+    BT.accent = SC("primary", 255) or SC("ButtonActive", 255) or SC("CheckMark", 255) or BT.accent
+    BT.dim    = SC("primary_second_tab_text", 255) or SC("third_tab_text", 255) or SC("section_group_text", 255) or Color(BT.text.r, BT.text.g, BT.text.b, 140)
+end
+
+local UIState = {
+    Collapsed = false,
+    HeightProgress = 1.0,
+    LastHeightProgress = 1.0,
+    
+    SheenProgress = 1.5,
+    SheenTimer = 0.0,
+    
+    LastRTWidth = 0,
+    LastRTHeight = 0,
+    
+    HoverProgress = {
+        btn_close = 0.0,
+        btn_collapse = 0.0,
+        btn_reset_pos = 0.0,
+        btn_farm = 0.0,
+        btn_push = 0.0,
+        theme_blue = 0.0,
+        theme_purple = 0.0,
+        theme_rose = 0.0,
+        theme_green = 0.0,
+        theme_gold = 0.0,
+    },
+    
+    InvHoverProgress = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0},
+    
+    Palette = {
+        Bg = Color(12, 14, 26, 140),
+        Border = Color(255, 255, 255, 20),
+        Accent = Color(0, 200, 150, 255),
+        Text = Color(235, 238, 255, 255),
+        Subtext = Color(160, 165, 180, 200),
+        Shadow = Color(0, 0, 0, 110),
+    }
+}
+
+local function ShiftColorHue(color, shiftAmount)
+    if not color then return Color(255, 255, 255, 255) end
+    local ok, h, s, l = pcall(color.ToHsl, color)
+    if not ok or not h then
+        return color
+    end
+    
+    local newH = (h + shiftAmount) % 1.0
+    local newCol = Color(0, 0, 0, 255)
+    local ok_as = pcall(newCol.AsHsl, newCol, newH, s, l, (color.a or 255) / 255)
+    if not ok_as then
+        return color
+    end
+    return newCol
+end
+
+local function DrawShadowText(font, size, text, pos, color, shadowAlpha)
+    shadowAlpha = shadowAlpha or 160
+    local shadowColor = Color(0, 0, 0, shadowAlpha)
+    Render.Text(font, size, text, Vec2(pos.x + 1, pos.y + 1), shadowColor)
+    Render.Text(font, size, text, pos, color)
+end
+
+local function UpdateUIAnimations(dt, mx, my)
+    -- Sheen swipe
+    UIState.SheenTimer = UIState.SheenTimer + dt
+    if UIState.SheenTimer >= 5.0 then
+        UIState.SheenTimer = 0.0
+        UIState.SheenProgress = -0.5
+    end
+    if UIState.SheenProgress < 1.5 then
+        UIState.SheenProgress = UIState.SheenProgress + 1.8 * dt
+    end
+
+    -- Dynamic collapse height animation
+    local targetHeightProgress = UIState.Collapsed and 0.0 or 1.0
+    UIState.HeightProgress = UIState.HeightProgress + (targetHeightProgress - UIState.HeightProgress) * 12.0 * dt
+    if math.abs(UIState.HeightProgress - targetHeightProgress) < 0.005 then
+        UIState.HeightProgress = targetHeightProgress
+    end
+
+    -- Update HoverProgress for header buttons and mode buttons
+    local px = ui.panel_x and ui.panel_x:Get() or 760
+    local py = ui.panel_y and ui.panel_y:Get() or 150
+    local scale = (Menu.Scale() or 100) / 100
+    local W = BEAR_PANEL_W * scale
+    
+    local btnY = py + 15 * scale
+    local closeX = px + 15 * scale
+    local collapseX = px + 30 * scale
+    local resetX = px + 45 * scale
+    local btnR = 4.5 * scale
+
+    local closeHover = mx and my and is_mouse_in_rect(mx, my, closeX - btnR - 2*scale, py, btnR*2 + 4*scale, 30*scale)
+    local collapseHover = mx and my and is_mouse_in_rect(mx, my, collapseX - btnR - 2*scale, py, btnR*2 + 4*scale, 30*scale)
+    local resetHover = mx and my and is_mouse_in_rect(mx, my, resetX - btnR - 2*scale, py, btnR*2 + 4*scale, 30*scale)
+
+    local function update_hover(ctrl_id, is_hovered)
+        local progress = UIState.HoverProgress[ctrl_id] or 0.0
+        local target = is_hovered and 1.0 or 0.0
+        local next_p = progress + (target - progress) * 11.0 * dt
+        if math.abs(next_p - target) < 0.001 then
+            next_p = target
+        end
+        UIState.HoverProgress[ctrl_id] = next_p
+    end
+
+    update_hover("btn_close", closeHover)
+    update_hover("btn_collapse", collapseHover)
+    update_hover("btn_reset_pos", resetHover)
+
+    -- Update Farm/Push buttons hover progress
+    local farm_x = px + W - 108 * scale
+    local push_x = px + W - 56 * scale
+    local btn_y = py + 8 * scale
+    local btn_w = 46 * scale
+    local btn_h = 17 * scale
+
+    local farmHover = mx and my and is_mouse_in_rect(mx, my, farm_x, btn_y, btn_w, btn_h)
+    local pushHover = mx and my and is_mouse_in_rect(mx, my, push_x, btn_y, btn_w, btn_h)
+
+    update_hover("btn_farm", farmHover)
+    update_hover("btn_push", pushHover)
+
+    -- Update inventory slots hover zoom
+    local inv_y = py + 135 * scale
+    local slot_w = 44 * scale
+    local slot_h = 30 * scale
+    local start_x = px + 13 * scale
+
+    for i = 0, 5 do
+        local sx = start_x + i * 50 * scale
+        local is_slot_hovered = mx and my and is_mouse_in_rect(mx, my, sx, inv_y, slot_w, slot_h) and not UIState.Collapsed
+        
+        local progress = UIState.InvHoverProgress[i + 1] or 0.0
+        local target = is_slot_hovered and 1.0 or 0.0
+        local next_p = progress + (target - progress) * 11.0 * dt
+        if math.abs(next_p - target) < 0.001 then
+            next_p = target
+        end
+        UIState.InvHoverProgress[i + 1] = next_p
+    end
+end
+
 local function draw_pretty_panel(x, y, w, h, title, lines, line_colors, move_mode)
-    local bg        = Color(14, 17, 22, 230)
-    local bg2       = Color(22, 25, 32, 200)
-    local accent    = Color(220, 70, 70, 255)
-    local border    = Color(50, 54, 62, 220)
-    local shadow    = Color(0, 0, 0, 100)
-    local title_col = Color(245, 245, 245, 255)
-    local subtle    = Color(110, 115, 125, 180)
-    local sep_col   = Color(50, 54, 62, 140)
-
-    -- Если включен режим перетаскивания, делаем панель зеленоватой
+    local scale = (Menu.Scale() or 100) / 100
+    local sw = w * scale
+    local sh = h * scale
+    local rounding = 10 * scale
+    
+    sync_bear_theme()
+    
+    -- 1. Backdrop Blur
+    pcall(function()
+        Render.Blur(Vec2(x, y), Vec2(x + sw, y + sh), 2.5, 1.0, rounding, Enum.DrawFlags.None)
+    end)
+    
+    -- 2. Shadow
+    local shadowCol = Color(0, 0, 0, 110)
+    pcall(function()
+        Render.Shadow(Vec2(x, y), Vec2(x + sw, y + sh), shadowCol, 22, rounding, Enum.DrawFlags.ShadowCutOutShapeBackground, Vec2(1, 2))
+    end)
+    
+    -- 3. Glass background
+    local acc = move_mode and Color(90, 255, 140, 255) or Color(255, 100, 110, 255)
+    local bgCol = Color(15, 12, 12, 140)
     if move_mode then
-        bg     = Color(20, 35, 25, 240)
-        bg2    = Color(25, 45, 30, 200)
-        accent = Color(80, 255, 100, 255)
-        border = Color(80, 255, 100, 255)
+        bgCol = Color(12, 22, 15, 140)
     end
-
-    Render.FilledRect(Vec2(x + 5, y + 5), Vec2(x + w + 5, y + h + 5), shadow)
-    Render.FilledRect(Vec2(x, y), Vec2(x + w, y + h), bg)
-    Render.FilledRect(Vec2(x, y), Vec2(x + w, y + 30), bg2)
-    Render.FilledRect(Vec2(x, y), Vec2(x + w, y + 3), accent)
-    Render.FilledRect(Vec2(x, y), Vec2(x + 3, y + h), accent)
-    Render.Rect(Vec2(x, y), Vec2(x + w, y + h), border)
-
-    Render.Text(font_big, 14, title, Vec2(x + 12, y + 9), title_col)
-
+    
+    pcall(function()
+        Render.FilledRect(Vec2(x, y), Vec2(x + sw, y + sh), bgCol, rounding)
+    end)
+    
+    -- Sheen
+    local sheenTopLeft = Color(255, 255, 255, 18)
+    local sheenTopRight = Color(255, 255, 255, 6)
+    local sheenBottomLeft = Color(255, 255, 255, 3)
+    local sheenBottomRight = Color(255, 255, 255, 0)
+    pcall(function()
+        Render.Gradient(Vec2(x, y), Vec2(x + sw, y + sh), sheenTopLeft, sheenTopRight, sheenBottomLeft, sheenBottomRight, rounding)
+    end)
+    
+    -- 4. Dynamic flowing border around warning
+    local animTime = GlobalVars.GetCurTime() or 0.0
+    local speed = 0.15
+    local cTopLeft = ShiftColorHue(acc, animTime * speed)
+    local cTopRight = ShiftColorHue(acc, animTime * speed + 0.25)
+    local borderAlpha = 160
+    
+    pcall(function()
+        Render.OutlineGradient(
+            Vec2(x, y), Vec2(x + sw, y + sh),
+            Color(cTopLeft.r, cTopLeft.g, cTopLeft.b, borderAlpha),
+            Color(cTopRight.r, cTopRight.g, cTopRight.b, borderAlpha),
+            Color(cTopLeft.r, cTopLeft.g, cTopLeft.b, borderAlpha),
+            Color(cTopRight.r, cTopRight.g, cTopRight.b, borderAlpha),
+            rounding, Enum.DrawFlags.None, 1.5
+        )
+    end)
+    
+    -- 5. Text
+    local title_col = Color(255, 255, 255, 255)
+    local headerText = title
     if move_mode then
-        local tag    = "[drag]"
-        local tag_sz = Render.TextSize(font_small, 12, tag)
-        Render.Text(font_small, 12, tag, Vec2(x + w - tag_sz.x - 10, y + 10), subtle)
+        headerText = "➔ DRAGGING ➔"
+        title_col = acc
     end
-
-    Render.FilledRect(Vec2(x + 10, y + 32), Vec2(x + w - 10, y + 33), sep_col)
-
-    local yy = y + 40
+    
+    DrawShadowText(font_big, 14 * scale, headerText, Vec2(x + 12 * scale, y + 8 * scale), title_col)
+    
+    local lineY = y + 28 * scale
+    pcall(function()
+        Render.FilledRect(Vec2(x + 10 * scale, lineY), Vec2(x + sw - 10 * scale, lineY + 1), Color(255, 255, 255, 20))
+    end)
+    
+    local yy = y + 36 * scale
     for i, text in ipairs(lines) do
         local col = line_colors[i] or Color(180, 180, 180, 255)
-        Render.Text(font_small, 12, text, Vec2(x + 12, yy), col)
-        yy = yy + 16
+        DrawShadowText(font_small, 11 * scale, text, Vec2(x + 12 * scale, yy), col)
+        yy = yy + 16 * scale
     end
 end
 
@@ -759,55 +970,7 @@ local function get_menu_glass_palette(move_mode)
     }
 end
 
-local BEAR_PANEL_W = 320
-local BEAR_PANEL_H = 175
 
--- =========================================================
--- BEAR PANEL THEME  (same pattern as item_helper.lua)
--- =========================================================
-local BT = {
-    bg        = Color(12, 14, 26, 220),
-    border    = Color(40, 45, 65, 80),
-    text      = Color(235, 238, 255, 255),
-    accent    = Color(0, 200, 150, 255),
-    dim       = Color(160, 165, 180, 255),
-    last_sync = -999,
-}
-
-local function sync_bear_theme()
-    local now = 0
-    pcall(function() now = GameRules.GetGameTime() end)
-    if now - BT.last_sync < 0.5 then return end
-    BT.last_sync = now
-    local ok, style = pcall(Menu.Style)
-    if not ok or not style or type(style) ~= "table" then return end
-    local function SC(k, a)
-        local c = style[k]
-        if c and type(c.r) == "number" then return Color(c.r, c.g, c.b, a or c.a or 255) end
-        return nil
-    end
-    BT.bg     = SC("additional_background", 220) or BT.bg
-    BT.border = SC("outline", 80) or BT.border
-    BT.text   = SC("primary_first_tab_text", 255) or SC("Text", 255) or BT.text
-    BT.accent = SC("primary", 255) or SC("ButtonActive", 255) or SC("CheckMark", 255) or BT.accent
-    BT.dim    = SC("primary_second_tab_text", 255) or SC("third_tab_text", 255) or SC("section_group_text", 255) or Color(BT.text.r, BT.text.g, BT.text.b, 140)
-end
-
-local function bp_rect(x, y, w, h, c, rnd)
-    local ok = pcall(Render.FilledRect, Vec2(x, y), Vec2(x + w, y + h), c, rnd or 0, Enum.DrawFlags.RoundCornersAll)
-    if not ok then pcall(Render.FilledRect, Vec2(x, y), Vec2(x + w, y + h), c) end
-end
-
-local function bp_border(x, y, w, h, c, rnd)
-    local ok = pcall(Render.Rect, Vec2(x, y), Vec2(x + w, y + h), c, rnd or 0, Enum.DrawFlags.RoundCornersAll)
-    if not ok then pcall(Render.Rect, Vec2(x, y), Vec2(x + w, y + h), c) end
-end
-
-local function bp_blur(x, y, w, h)
-    pcall(function()
-        Render.Blur(Vec2(x, y), Vec2(x + w, y + h), 1.0, 1.0, 0, Enum.DrawFlags.None)
-    end)
-end
 
 local function trim_panel_text(text, limit)
     local s = tostring(text or "")
@@ -877,155 +1040,328 @@ end
 -- =========================================================
 -- PANEL: BEAR STATUS
 -- =========================================================
+local function DrawSheenSwipe(x, y, w, h, progress, scale)
+    if progress < 0.0 or progress > 1.0 then return end
+    
+    local sheenW = 50 * scale
+    local totalPath = w + sheenW * 2
+    local sheenX = x - sheenW + totalPath * progress
+    
+    local colCenter = Color(255, 255, 255, 22)
+    local colFade = Color(255, 255, 255, 0)
+    
+    pcall(function()
+        Render.Gradient(
+            Vec2(sheenX, y), Vec2(sheenX + sheenW, y + h),
+            colFade, colCenter, colCenter, colFade, 0, Enum.DrawFlags.None
+        )
+    end)
+end
+
 local function draw_bear_panel(x, y, mode, aghs_ok, aghs_gate, hp_num, d_now, cur_camp, stack_state, minute, sec, move_mode)
     sync_bear_theme()
-    local W, H = BEAR_PANEL_W, BEAR_PANEL_H
+    local scale = (Menu.Scale() or 100) / 100
+    local W = BEAR_PANEL_W * scale
+    local H = BEAR_PANEL_H * scale
+    local rounding = 12 * scale
+    local currentHeight = (30 * scale) + (H - 30 * scale) * UIState.HeightProgress
     local F = math.floor
 
     local function aa(c, a)
         return Color(c.r, c.g, c.b, F(math.max(0, math.min(255, a))))
     end
     local function tsz(txt)
-        local ok, r = pcall(Render.TextSize, font_small, 12, tostring(txt))
-        return (ok and r) or {x = 7 * #tostring(txt), y = 14}
+        local ok, r = pcall(Render.TextSize, font_small, 11 * scale, tostring(txt))
+        return (ok and r) or {x = 6 * scale * #tostring(txt), y = 12 * scale}
     end
 
     local acc    = move_mode and Color(90, 255, 140, 255) or BT.accent
-    local bg     = BT.bg
     local txt_c  = BT.text
     local dim    = BT.dim
     local ok_c   = Color(80, 220, 130, 255)
     local warn_c = Color(255, 100, 110, 255)
     local sep_c  = Color(dim.r, dim.g, dim.b, 35)
-    local rnd    = 12
 
-    -- 1. Backdrop Blur (premium glass feel)
-    bp_blur(x, y, W, H)
+    -- 1. Backdrop Blur & Real-time Shadow
+    pcall(function()
+        Render.Blur(Vec2(x, y), Vec2(x + W, y + currentHeight), 2.5, 1.0, rounding, Enum.DrawFlags.None)
+    end)
+    local shadowCol = Color(0, 0, 0, 110)
+    pcall(function()
+        Render.Shadow(Vec2(x, y), Vec2(x + W, y + currentHeight), shadowCol, 22, rounding, Enum.DrawFlags.ShadowCutOutShapeBackground, Vec2(1, 2))
+    end)
 
-    -- 2. Drop Shadow
-    bp_rect(x + 2, y + 4, W, H, Color(0, 0, 0, 75), rnd)
+    -- 2. Render Target (RT) Caching
+    local rtHandle = Render.FindOrCreateRT("glass_panel_bear", W, H)
+    local sizeChanged = UIState.LastRTWidth ~= W or UIState.LastRTHeight ~= H
+    local heightChanged = UIState.LastHeightProgress ~= UIState.HeightProgress
+    
+    if sizeChanged then
+        pcall(Render.ResizeRT, rtHandle, W, H)
+        pcall(Render.MarkDirtyRT, rtHandle)
+        UIState.LastRTWidth = W
+        UIState.LastRTHeight = H
+    end
+    if heightChanged then
+        pcall(Render.MarkDirtyRT, rtHandle)
+        UIState.LastHeightProgress = UIState.HeightProgress
+    end
 
-    -- 3. Glass background
-    local glass_bg = Color(bg.r, bg.g, bg.b, 145)
-    bp_rect(x, y, W, H, glass_bg, rnd)
+    -- Clip both RT rendering and sheen swipe to the current active height!
+    pcall(function()
+        Render.PushClip(Vec2(x, y), Vec2(x + W, y + currentHeight))
+    end)
+    
+    pcall(function()
+        Render.RenderRT(function()
+            -- Baked glass background
+            Render.FilledRect(Vec2(0, 0), Vec2(W, currentHeight), Color(15, 15, 25, 140), rounding)
+            
+            -- Gloss Sheen Gradient
+            local sheenTopLeft = Color(255, 255, 255, 18)
+            local sheenTopRight = Color(255, 255, 255, 6)
+            local sheenBottomLeft = Color(255, 255, 255, 3)
+            local sheenBottomRight = Color(255, 255, 255, 0)
+            Render.Gradient(Vec2(0, 0), Vec2(W, currentHeight), sheenTopLeft, sheenTopRight, sheenBottomLeft, sheenBottomRight, rounding)
+            
+            -- Divider line
+            local lineY = F(29 * scale)
+            Render.FilledRect(Vec2(10 * scale, lineY), Vec2(W - 10 * scale, lineY + 1), Color(255, 255, 255, 18))
+        end, rtHandle, Vec2(x, y), Color(255, 255, 255, 255))
+    end)
 
-    -- 4. Inner white reflection border (very subtle)
-    bp_border(x, y, W, H, Color(255, 255, 255, 15), rnd)
+    -- Sheen swipe
+    pcall(function()
+        DrawSheenSwipe(x, y, W, currentHeight, UIState.SheenProgress, scale)
+    end)
+    
+    pcall(function()
+        Render.PopClip()
+    end)
 
-    -- 5. Outer theme border
-    local theme_border = Color(BT.border.r, BT.border.g, BT.border.b, 65)
-    bp_border(x, y, W, H, theme_border, rnd)
+    -- 3. Flowing Border Outline Gradient
+    local animTime = GlobalVars.GetCurTime() or 0.0
+    local speed = 0.15
+    local cTopLeft = ShiftColorHue(acc, animTime * speed)
+    local cTopRight = ShiftColorHue(acc, animTime * speed + 0.25)
+    local borderAlpha = 160
+    
+    pcall(function()
+        Render.OutlineGradient(
+            Vec2(x, y), Vec2(x + W, y + currentHeight),
+            Color(cTopLeft.r, cTopLeft.g, cTopLeft.b, borderAlpha),
+            Color(cTopRight.r, cTopRight.g, cTopRight.b, borderAlpha),
+            Color(cTopLeft.r, cTopLeft.g, cTopLeft.b, borderAlpha),
+            Color(cTopRight.r, cTopRight.g, cTopRight.b, borderAlpha),
+            rounding, Enum.DrawFlags.None, 1.5
+        )
+    end)
 
-    -- ── Header ──────────────────────────────────────────────
-    Render.Text(font_big, 14, "SPIRIT BEAR", Vec2(x + 12, y + 8), txt_c)
+    -- ── macOS-Style Header Buttons ──────────────────────────
+    local btnY = y + 15 * scale
+    local closeX = x + 15 * scale
+    local collapseX = x + 30 * scale
+    local resetX = x + 45 * scale
+    local btnR = 4.5 * scale
+
+    -- Draw Red Button (Close)
+    local closeHoverP = UIState.HoverProgress["btn_close"] or 0.0
+    local closeCol = mix_color(Color(255, 95, 87, 200), Color(255, 70, 60, 255), closeHoverP)
+    pcall(Render.FilledCircle, Vec2(closeX, btnY), btnR, closeCol)
+    if closeHoverP > 0.3 then
+        local crossCol = Color(0, 0, 0, F(180 * closeHoverP))
+        local d = 1.5 * scale
+        pcall(Render.Line, Vec2(closeX - d, btnY - d), Vec2(closeX + d, btnY + d), crossCol, 1)
+        pcall(Render.Line, Vec2(closeX - d, btnY + d), Vec2(closeX + d, btnY - d), crossCol, 1)
+    end
+
+    -- Draw Yellow Button (Collapse)
+    local collapseHoverP = UIState.HoverProgress["btn_collapse"] or 0.0
+    local collapseCol = mix_color(Color(254, 188, 46, 200), Color(254, 170, 30, 255), collapseHoverP)
+    pcall(Render.FilledCircle, Vec2(collapseX, btnY), btnR, collapseCol)
+    if collapseHoverP > 0.3 then
+        local lineCol = Color(0, 0, 0, F(180 * collapseHoverP))
+        local d = 1.5 * scale
+        pcall(Render.Line, Vec2(collapseX - d, btnY), Vec2(collapseX + d, btnY), lineCol, 1)
+    end
+
+    -- Draw Green Button (Reset Pos)
+    local resetHoverP = UIState.HoverProgress["btn_reset_pos"] or 0.0
+    local resetCol = mix_color(Color(40, 200, 64, 200), Color(30, 180, 50, 255), resetHoverP)
+    pcall(Render.FilledCircle, Vec2(resetX, btnY), btnR, resetCol)
+    if resetHoverP > 0.3 then
+        local plusCol = Color(0, 0, 0, F(180 * resetHoverP))
+        local d = 1.5 * scale
+        pcall(Render.Line, Vec2(resetX - d, btnY), Vec2(resetX + d, btnY), plusCol, 1)
+        pcall(Render.Line, Vec2(resetX, btnY - d), Vec2(resetX, btnY + d), plusCol, 1)
+    end
+
+    -- Header Title
+    local titleText = "SPIRIT BEAR"
+    if ui.drag_mode:Get() then
+        titleText = "➔ DRAGGING ➔"
+    end
+    local titleCol = ui.drag_mode:Get() and acc or txt_c
+    DrawShadowText(font_big, 13 * scale, titleText, Vec2(x + 60 * scale, y + 8 * scale), titleCol)
 
     -- Interactive Buttons (top-right)
+    local btn_y = y + 8 * scale
+    local btn_w = 46 * scale
+    local btn_h = 17 * scale
+    
+    local function draw_pill_btn(btn_x, text, isActive, hoverP, activeCol)
+        local baseBg = isActive and Color(activeCol.r, activeCol.g, activeCol.b, 40) or Color(0, 0, 0, 80)
+        local targetBg = Color(activeCol.r, activeCol.g, activeCol.b, 75)
+        local bgCol = isActive and baseBg or mix_color(baseBg, targetBg, hoverP)
+        
+        local baseBorder = isActive and activeCol or Color(255, 255, 255, 20)
+        local targetBorder = activeCol
+        local borderCol = mix_color(baseBorder, targetBorder, hoverP)
+        
+        local r = 4 * scale
+        
+        if isActive or hoverP > 0 then
+            local targetGlow = isActive and 60 or 40
+            local glowAlpha = F(targetGlow * (isActive and 1.0 or hoverP))
+            local glowCol = Color(activeCol.r, activeCol.g, activeCol.b, glowAlpha)
+            pcall(Render.Shadow, Vec2(btn_x, btn_y), Vec2(btn_x + btn_w, btn_y + btn_h), glowCol, 6 * scale, r, Enum.DrawFlags.ShadowCutOutShapeBackground)
+        end
+        
+        pcall(Render.FilledRect, Vec2(btn_x, btn_y), Vec2(btn_x + btn_w, btn_y + btn_h), bgCol, r)
+        pcall(Render.Rect, Vec2(btn_x, btn_y), Vec2(btn_x + btn_w, btn_y + btn_h), borderCol, r)
+        
+        local textCol = isActive and Color(255, 255, 255, 255) or Color(txt_c.r, txt_c.g, txt_c.b, 160 + F(95 * hoverP))
+        local tsz_btn = tsz(text)
+        Render.Text(font_small, 11 * scale, text, Vec2(btn_x + (btn_w - tsz_btn.x)/2, btn_y + (btn_h - 12 * scale)/2), textCol)
+    end
+
+    -- Draw Lock Warning or Normal buttons
     if aghs_gate ~= "" then
+        local lx = x + W - 156 * scale
+        local lw = 38 * scale
+        local lh = 17 * scale
+        local r = 4 * scale
+        local pulse = F(90 + 60 * math.sin(GlobalVars.GetCurTime() * 8.5))
+        pcall(Render.Shadow, Vec2(lx, btn_y), Vec2(lx + lw, btn_y + lh), Color(255, 100, 110, pulse), 6 * scale, r, Enum.DrawFlags.ShadowCutOutShapeBackground)
+        pcall(Render.FilledRect, Vec2(lx, btn_y), Vec2(lx + lw, btn_y + lh), Color(255, 100, 110, 30), r)
+        pcall(Render.Rect, Vec2(lx, btn_y), Vec2(lx + lw, btn_y + lh), Color(255, 100, 110, 180), r)
         local lsz = tsz("LOCK")
-        local lx = x + W - 156
-        bp_rect(lx - 5, y + 8, lsz.x + 10, 17, Color(warn_c.r, warn_c.g, warn_c.b, 25), 4)
-        bp_border(lx - 5, y + 8, lsz.x + 10, 17, Color(warn_c.r, warn_c.g, warn_c.b, 110), 4)
-        Render.Text(font_small, 12, "LOCK", Vec2(lx, y + 10), warn_c)
+        Render.Text(font_small, 10 * scale, "LOCK", Vec2(lx + (lw - lsz.x)/2, btn_y + (lh - 12 * scale)/2), Color(255, 100, 110, 255))
     end
 
     local farm_active = ui.farm:Get()
-    local farm_c = farm_active and Color(80, 200, 255, 220) or aa(dim, 140)
-    local fx = x + W - 108
-    bp_rect(fx, y + 8, 46, 17, Color(farm_c.r, farm_c.g, farm_c.b, farm_active and 35 or 15), 4)
-    bp_border(fx, y + 8, 46, 17, Color(farm_c.r, farm_c.g, farm_c.b, farm_active and 180 or 80), 4)
-    local fsz = tsz("FARM")
-    Render.Text(font_small, 12, "FARM", Vec2(fx + (46 - fsz.x)/2, y + 10), farm_c)
+    local farm_hover = UIState.HoverProgress["btn_farm"] or 0.0
+    draw_pill_btn(x + W - 108 * scale, "FARM", farm_active, farm_hover, Color(80, 200, 255, 255))
 
     local push_active = ui.push:Get()
-    local push_c = push_active and Color(255, 180, 50, 220) or aa(dim, 140)
-    local px2 = x + W - 56
-    bp_rect(px2, y + 8, 46, 17, Color(push_c.r, push_c.g, push_c.b, push_active and 35 or 15), 4)
-    bp_border(px2, y + 8, 46, 17, Color(push_c.r, push_c.g, push_c.b, push_active and 180 or 80), 4)
-    local psz = tsz("PUSH")
-    Render.Text(font_small, 12, "PUSH", Vec2(px2 + (46 - psz.x)/2, y + 10), push_c)
+    local push_hover = UIState.HoverProgress["btn_push"] or 0.0
+    draw_pill_btn(x + W - 56 * scale, "PUSH", push_active, push_hover, Color(255, 180, 50, 255))
 
-    -- ── Health bar ──────────────────────────────────────────
+    -- ── Collapsible Content Container ───────────────────────
+    pcall(function()
+        Render.PushClip(Vec2(x, y + 30 * scale), Vec2(x + W, y + currentHeight))
+    end)
+
+    -- ── Health Bar & Text ───────────────────────────────────
     local hp_txt = hp_num and (hp_num .. "%") or "N/A"
     local hp_c = hp_num and (hp_num <= 25 and warn_c or (hp_num <= 50 and Color(255, 185, 60, 255) or ok_c)) or aa(dim, 180)
     local hpsz = tsz(hp_txt)
-    Render.Text(font_small, 12, hp_txt, Vec2(x + W - hpsz.x - 12, y + 28), hp_c)
+    DrawShadowText(font_small, 11 * scale, hp_txt, Vec2(x + W - hpsz.x - 12 * scale, y + 28 * scale), hp_c)
 
-    local bar_y = y + 42
-    bp_rect(x + 11, bar_y, W - 22, 5, Color(bg.r + 8, bg.g + 8, bg.b + 14, 180), 2)
+    local bar_y = y + 42 * scale
+    pcall(Render.FilledRect, Vec2(x + 11 * scale, bar_y), Vec2(x + W - 11 * scale, bar_y + 5 * scale), Color(0, 0, 0, 80), 2.5 * scale)
     if hp_num and hp_num > 0 then
-        local fw = math.max(1, F((W - 22) * math.min(1, hp_num / 100)))
-        bp_rect(x + 11, bar_y, fw, 5, hp_c, 2)
+        local fw = math.max(1, F((W - 22 * scale) * math.min(1, hp_num / 100)))
+        pcall(Render.FilledRect, Vec2(x + 11 * scale, bar_y), Vec2(x + 11 * scale + fw, bar_y + 5 * scale), hp_c, 2.5 * scale)
+        -- Highlight glow under health bar
+        local barGlowCol = Color(hp_c.r, hp_c.g, hp_c.b, 60)
+        pcall(Render.Shadow, Vec2(x + 11 * scale, bar_y), Vec2(x + 11 * scale + fw, bar_y + 5 * scale), barGlowCol, 4 * scale, 2.5 * scale, Enum.DrawFlags.ShadowCutOutShapeBackground)
     end
 
-    -- Single clean divider separator
-    local s1 = y + 54
-    bp_rect(x + 10, s1, W - 20, 1, sep_c, 0)
+    -- Divider
+    local s1 = y + 54 * scale
+    pcall(Render.FilledRect, Vec2(x + 10 * scale, s1), Vec2(x + W - 10 * scale, s1 + 1), sep_c)
 
-    -- ── Grid Row 1 (AI | AGHS | MIRROR) ──────────────────────
-    local r1 = s1 + 7
-    Render.Text(font_small, 12, "AI", Vec2(x + 12, r1), aa(dim, 180))
+    -- ── Stats Grid Rows ─────────────────────────────────────
+    local r1 = s1 + 7 * scale
+    DrawShadowText(font_small, 11 * scale, "AI", Vec2(x + 12 * scale, r1), aa(dim, 180))
     local ai_v = ui.on:Get() and "ON" or "OFF"
-    Render.Text(font_small, 12, ai_v, Vec2(x + 32, r1), ui.on:Get() and ok_c or warn_c)
+    DrawShadowText(font_small, 11 * scale, ai_v, Vec2(x + 32 * scale, r1), ui.on:Get() and ok_c or warn_c)
 
-    Render.Text(font_small, 12, "AGHS", Vec2(x + 110, r1), aa(dim, 180))
+    DrawShadowText(font_small, 11 * scale, "AGHS", Vec2(x + 105 * scale, r1), aa(dim, 180))
     local ag_v = aghs_ok and L("ДА", "YES") or L("НЕТ", "NO")
-    Render.Text(font_small, 12, ag_v, Vec2(x + 152, r1), aghs_ok and ok_c or warn_c)
+    DrawShadowText(font_small, 11 * scale, ag_v, Vec2(x + 147 * scale, r1), aghs_ok and ok_c or warn_c)
 
-    Render.Text(font_small, 12, "MIRR", Vec2(x + 225, r1), aa(dim, 180))
+    DrawShadowText(font_small, 11 * scale, "MIRR", Vec2(x + 220 * scale, r1), aa(dim, 180))
     local mir_v = ui.mirror_on:Get() and "ON" or "OFF"
-    Render.Text(font_small, 12, mir_v, Vec2(x + 265, r1), ui.mirror_on:Get() and aa(acc, 230) or aa(dim, 155))
+    DrawShadowText(font_small, 11 * scale, mir_v, Vec2(x + 260 * scale, r1), ui.mirror_on:Get() and aa(acc, 230) or aa(dim, 155))
 
-    -- ── Grid Row 2 (DEFENSE + TIME) ─────────────────────────
-    local r2 = r1 + 18
-    Render.Text(font_small, 12, L("ЗАЩИТА:", "DEFENSE:"), Vec2(x + 12, r2), aa(dim, 180))
-    Render.Text(font_small, 12, pretty_def_reason(def.reason, d_now), Vec2(x + 80, r2), d_now and warn_c or ok_c)
+    local r2 = r1 + 18 * scale
+    DrawShadowText(font_small, 11 * scale, L("ЗАЩИТА:", "DEFENSE:"), Vec2(x + 12 * scale, r2), aa(dim, 180))
+    DrawShadowText(font_small, 11 * scale, pretty_def_reason(def.reason, d_now), Vec2(x + 78 * scale, r2), d_now and warn_c or ok_c)
     
     local time_txt = tostring(minute) .. ":" .. string.format("%02d", F(sec))
     local tsz_t = tsz(time_txt)
-    Render.Text(font_small, 12, time_txt, Vec2(x + W - tsz_t.x - 12, r2), aa(dim, 180))
+    DrawShadowText(font_small, 11 * scale, time_txt, Vec2(x + W - tsz_t.x - 12 * scale, r2), aa(dim, 180))
 
-    -- ── Grid Row 3 (CAMP + STACK) ───────────────────────────
-    local r3 = r2 + 18
-    Render.Text(font_small, 12, L("КЕМП:", "CAMP:"), Vec2(x + 12, r3), aa(dim, 180))
-    Render.Text(font_small, 12, trim_panel_text(cur_camp, 4), Vec2(x + 58, r3), txt_c)
+    local r3 = r2 + 18 * scale
+    DrawShadowText(font_small, 11 * scale, L("КЕМП:", "CAMP:"), Vec2(x + 12 * scale, r3), aa(dim, 180))
+    DrawShadowText(font_small, 11 * scale, trim_panel_text(cur_camp, 4), Vec2(x + 56 * scale, r3), txt_c)
 
-    local stk_c
+    local stk_c = aa(dim, 160)
     if stack_state == "PULL" or stack_state == "AGGRO" or stack_state == "APPROACH" or stack_state == "WAIT" then
         stk_c = Color(255, 200, 80, 255)
-    elseif stack_state == "DONE" then
+    elseif stack_state == "DONE" or stack_state == "READY" or stack_state == "ГОТОВ" then
         stk_c = ok_c
-    else
-        stk_c = aa(dim, 160)
     end
-    Render.Text(font_small, 12, L("СТАК:", "STACK:"), Vec2(x + 120, r3), aa(dim, 180))
-    Render.Text(font_small, 12, trim_panel_text(stack_state, 10), Vec2(x + 168, r3), stk_c)
+    DrawShadowText(font_small, 11 * scale, L("СТАК:", "STACK:"), Vec2(x + 115 * scale, r3), aa(dim, 180))
+    DrawShadowText(font_small, 11 * scale, trim_panel_text(stack_state, 10), Vec2(x + 165 * scale, r3), stk_c)
 
-    -- ── Grid Row 4 (TARGET) ─────────────────────────────────
-    local r4 = r3 + 18
+    local r4 = r3 + 18 * scale
     local tgt_lbl = ui.mirror_on:Get() and L("ЦЕЛЬ:", "TARGET:") or L("ЗЕРКАЛО:", "MIRROR:")
-    Render.Text(font_small, 12, tgt_lbl, Vec2(x + 12, r4), ui.mirror_on:Get() and aa(acc, 200) or aa(dim, 160))
+    DrawShadowText(font_small, 11 * scale, tgt_lbl, Vec2(x + 12 * scale, r4), ui.mirror_on:Get() and aa(acc, 200) or aa(dim, 160))
     
-    local tgt_val, tgt_vc
+    local tgt_val = L("нет цели", "no target")
+    local tgt_vc  = aa(dim, 140)
     if ui.mirror_on:Get() and mirror_tgt and alive(mirror_tgt) then
         tgt_val = pretty_unit_label(mirror_tgt)
         tgt_vc  = aa(acc, 240)
-    else
-        tgt_val = L("нет цели", "no target")
-        tgt_vc  = aa(dim, 140)
     end
-    Render.Text(font_small, 12, tgt_val, Vec2(x + 80, r4), tgt_vc)
+    DrawShadowText(font_small, 11 * scale, tgt_val, Vec2(x + 70 * scale, r4), tgt_vc)
 
-    -- ── Bear Inventory (Premium HUD) ───────────────────────
-    local inv_y = y + 135
-    local slot_w, slot_h = 44, 30
-    local start_x = x + 13
+    -- ── Bear Inventory Slots ────────────────────────────────
+    local inv_y = y + 135 * scale
+    local slot_w = 44 * scale
+    local slot_h = 30 * scale
+    local start_x = x + 13 * scale
 
     for i = 0, 5 do
-        local sx = start_x + i * 50
-        -- Draw empty slot placeholder
-        bp_rect(sx, inv_y, slot_w, slot_h, Color(0, 0, 0, 80), 4)
-        bp_border(sx, inv_y, slot_w, slot_h, Color(255, 255, 255, 12), 4)
-
+        local sx = start_x + i * 50 * scale
+        local hoverP = UIState.InvHoverProgress[i + 1] or 0.0
+        
+        -- Aspect ratio 44:30
+        local zoomW = 3 * scale * hoverP
+        local zoomH = zoomW * (30 / 44)
+        
+        local dx = sx - zoomW/2
+        local dy = inv_y - zoomH/2
+        local dw = slot_w + zoomW
+        local dh = slot_h + zoomH
+        
+        local r = 4 * scale
+        
+        -- Slot backdrop
+        pcall(Render.FilledRect, Vec2(dx, dy), Vec2(dx + dw, dy + dh), Color(0, 0, 0, 100), r)
+        
+        -- Active glow outline on hover
+        local borderCol = Color(255, 255, 255, 12 + F(30 * hoverP))
+        if hoverP > 0 then
+            local glowCol = Color(acc.r, acc.g, acc.b, F(70 * hoverP))
+            pcall(Render.Shadow, Vec2(dx, dy), Vec2(dx + dw, dy + dh), glowCol, 6 * scale, r, Enum.DrawFlags.ShadowCutOutShapeBackground)
+            borderCol = mix_color(borderCol, acc, hoverP)
+        end
+        pcall(Render.Rect, Vec2(dx, dy), Vec2(dx + dw, dy + dh), borderCol, r)
+        
         if bear and alive(bear) then
             local it = sc(NPC.GetItemByIndex, bear, i)
             if it then
@@ -1034,29 +1370,24 @@ local function draw_bear_panel(x, y, mode, aghs_ok, aghs_gate, hp_num, d_now, cu
                 if path then
                     local img = get_image_handle(path)
                     if img then
-                        -- Draw item image
-                        Render.Image(img, Vec2(sx, inv_y), Vec2(slot_w, slot_h), Color(255, 255, 255, 255), 4)
+                        pcall(Render.Image, img, Vec2(dx, dy), Vec2(dw, dh), Color(255, 255, 255, 255), r)
                     end
                 end
-
-                -- Draw cooldown if active
+                
                 local cd = sc(Ability.GetCooldown, it)
                 if cd and cd > 0 then
-                    -- Dark overlay
-                    bp_rect(sx, inv_y, slot_w, slot_h, Color(0, 0, 0, 150), 4)
-                    -- Centered white text for seconds remaining
+                    pcall(Render.FilledRect, Vec2(dx, dy), Vec2(dx + dw, dy + dh), Color(0, 0, 0, 150), r)
                     local cd_txt = tostring(math.ceil(cd))
                     local cd_sz = tsz(cd_txt)
-                    Render.Text(font_small, 12, cd_txt, Vec2(sx + (slot_w - cd_sz.x) / 2, inv_y + (slot_h - 14) / 2), Color(255, 255, 255, 255))
+                    Render.Text(font_small, 11 * scale, cd_txt, Vec2(dx + (dw - cd_sz.x) / 2, dy + (dh - 12 * scale) / 2), Color(255, 255, 255, 255))
                 end
             end
         end
     end
 
-    -- Drag mode indicator
-    if move_mode then
-        bp_rect(x, y + H - 2, W, 2, Color(90, 255, 140, 180), 0)
-    end
+    pcall(function()
+        Render.PopClip()
+    end)
 end
 
 
@@ -2802,15 +3133,27 @@ function ld.OnFrame()
     local mx, my = get_cursor()
     local is_down = is_lmb_down()
 
+    -- Update UI animations
+    local dt = GlobalVars.GetAbsFrameTime() or 0.016
+    if dt <= 0 or dt > 0.1 then
+        dt = 0.016
+    end
+    UpdateUIAnimations(dt, mx, my)
+
     -- =====================================================
     -- ОБНОВЛЕННАЯ СИСТЕМА ПЕРЕТАСКИВАНИЯ (БЕЗОПАСНАЯ)
     -- =====================================================
     if ui.drag_mode:Get() then
+        local scale = (Menu.Scale() or 100) / 100
+        local W = BEAR_PANEL_W * scale
+        local H = BEAR_PANEL_H * scale
+        local currentHeight = (30 * scale) + (H - 30 * scale) * UIState.HeightProgress
+
         if is_down and not drag_state.was_down then
             -- Проверка клика по основной панели
             if ui.show_panel:Get() then
                 local px, py = ui.panel_x:Get(), ui.panel_y:Get()
-                if mx and my and is_mouse_in_rect(mx, my, px, py, BEAR_PANEL_W, BEAR_PANEL_H) then
+                if mx and my and is_mouse_in_rect(mx, my, px, py, W, currentHeight) then
                     drag_state.main_active = true
                     drag_state.main_dx = mx - px
                     drag_state.main_dy = my - py
@@ -2825,7 +3168,9 @@ function ld.OnFrame()
 
             if show_warn then
                 local wx, wy = ui.aghs_x:Get(), ui.aghs_y:Get()
-                if mx and my and is_mouse_in_rect(mx, my, wx, wy, 360, 78) then
+                local sw = 360 * scale
+                local sh = 78 * scale
+                if mx and my and is_mouse_in_rect(mx, my, wx, wy, sw, sh) then
                     drag_state.aghs_active = true
                     drag_state.aghs_dx = mx - wx
                     drag_state.aghs_dy = my - wy
@@ -2866,20 +3211,40 @@ function ld.OnFrame()
 
     if clicked and not ui.drag_mode:Get() and mx and my then
         if ui.show_panel:Get() then
+            local scale = (Menu.Scale() or 100) / 100
             local px, py = ui.panel_x:Get(), ui.panel_y:Get()
+            local W = BEAR_PANEL_W * scale
             
-            -- Проверка клика по кнопке FARM
-            if is_mouse_in_rect(mx, my, px + BEAR_PANEL_W - 108, py + 8, 46, 17) then
-                local new_val = not ui.farm:Get()
-                ui.farm:Set(new_val)
-                if new_val then ui.push:Set(false) end
-            end
+            local btnY = py + 15 * scale
+            local btnR = 4.5 * scale
+            
+            local isOverClose = is_mouse_in_rect(mx, my, px + 15 * scale - btnR - 2*scale, py, btnR*2 + 4*scale, 30*scale)
+            local isOverCollapse = is_mouse_in_rect(mx, my, px + 30 * scale - btnR - 2*scale, py, btnR*2 + 4*scale, 30*scale)
+            local isOverReset = is_mouse_in_rect(mx, my, px + 45 * scale - btnR - 2*scale, py, btnR*2 + 4*scale, 30*scale)
+            
+            if isOverClose then
+                ui.show_panel:Set(false)
+            elseif isOverCollapse then
+                UIState.Collapsed = not UIState.Collapsed
+            elseif isOverReset then
+                ui.panel_x:Set(760)
+                ui.panel_y:Set(150)
+            else
+                if not UIState.Collapsed then
+                    -- Проверка клика по кнопке FARM
+                    if is_mouse_in_rect(mx, my, px + W - 108 * scale, py + 8 * scale, 46 * scale, 17 * scale) then
+                        local new_val = not ui.farm:Get()
+                        ui.farm:Set(new_val)
+                        if new_val then ui.push:Set(false) end
+                    end
 
-            -- Проверка клика по кнопке PUSH
-            if is_mouse_in_rect(mx, my, px + BEAR_PANEL_W - 56, py + 8, 46, 17) then
-                local new_val = not ui.push:Get()
-                ui.push:Set(new_val)
-                if new_val then ui.farm:Set(false) end
+                    -- Проверка клика по кнопке PUSH
+                    if is_mouse_in_rect(mx, my, px + W - 56 * scale, py + 8 * scale, 46 * scale, 17 * scale) then
+                        local new_val = not ui.push:Get()
+                        ui.push:Set(new_val)
+                        if new_val then ui.farm:Set(false) end
+                    end
+                end
             end
         end
     end

@@ -1,7 +1,14 @@
 --[[
-        ~ Drow Ranger Gust Control - Auto-silence and interrupt helper
-        ~ Designed for uc.zone Umbrella cheat for Dota 2
-        ~ Dynamic targeting, angle-sweep optimization, and horizontal cell-based HUD panel
+╭────────────────────────────────────────────────────────────╮
+│                                                            │
+│                D R O W   R A N G E R   G U S T             │
+│                                                            │
+│                     Script by Euphoria                     │
+│                                                            │
+├────────────────────────────────────────────────────────────┤
+│                        By Pidaras                          │
+│                           VibeCode                         │
+╰────────────────────────────────────────────────────────────╯
 --]]
 
 -- Unique instance tracking to prevent duplicate drawing on script reload
@@ -31,15 +38,18 @@ local PanelDrag = {
 
 -- Harmonious iOS-style / Screenshot matching colors
 local Colors = {
-    HeaderBg = Color(32, 28, 36, 245), -- Dark purple-gray matching screenshot
-    PanelBg = Color(21, 19, 24, 220),  -- Dark transparent panel body background
-    CellBg = Color(42, 38, 45, 255),   -- Dark cell background matching screenshot
+    HeaderBg = Color(32, 28, 36, 245),
+    PanelBg = Color(21, 19, 24, 220),
+    GroupBg = Color(13, 9, 19, 160),
+    GroupBorder = Color(255, 255, 255, 15),
+    CellBgDisabled = Color(42, 38, 45, 150),
+    CellBgNeeded = Color(46, 33, 64, 180),
+    CellBgAlways = Color(120, 160, 255, 220),
     TextHeader = Color(245, 247, 250, 255),
     BorderDisabled = Color(60, 60, 65, 255),
-    BorderAlways = Color(50, 220, 110, 255), -- Emerald green
-    BorderNeeded = Color(50, 160, 255, 255), -- Neon blue
-    BorderCasting = Color(255, 75, 75, 255), -- Crimson red
-    BorderPanel = Color(255, 255, 255, 12),  -- Subtle border for glassmorphism
+    BorderAlways = Color(50, 220, 110, 255),
+    BorderNeeded = Color(50, 160, 255, 255),
+    BorderPanel = Color(255, 255, 255, 25),
 }
 
 -- Helper function to fetch the current active theme colors from Menu.Style
@@ -55,7 +65,20 @@ local function GetThemeColor(name, defaultColor)
     if ok_tbl and type(tbl) == "table" and tbl[name] then
         local c = tbl[name]
         if c and type(c.r) == "number" then
-            return Color(c.r, c.g, c.b, c.a or 255)
+            local r = c.r
+            local g = c.g
+            local b = c.b
+            local a = c.a or 255
+
+            -- If the colors are in [0..1] range, scale them to [0..255]
+            if r <= 1.0 and g <= 1.0 and b <= 1.0 and (a <= 1.0 or not c.a) then
+                r = r * 255
+                g = g * 255
+                b = b * 255
+                if c.a then a = a * 255 else a = 255 end
+            end
+
+            return Color(math.floor(r), math.floor(g), math.floor(b), math.floor(a))
         end
     end
 
@@ -72,38 +95,63 @@ local function SyncColors()
     local primary = GetThemeColor("primary", Color(120, 160, 255, 255))
     local background = GetThemeColor("additional_background", Color(32, 28, 36, 245))
 
+    local popupBg = GetThemeColor("popup_background", Color(21, 19, 24, 220))
+    local popupBorder = GetThemeColor("popup_border", Color(255, 255, 255, 25))
+    local groupBg = GetThemeColor("group_background", Color(13, 9, 19, 115))
+    local groupOutline = GetThemeColor("group_outline", Color(0, 0, 0, 0))
+    local textHeader = GetThemeColor("primary_widgets_text", Color(245, 247, 250, 255))
+    local outline = GetThemeColor("outline", Color(60, 60, 65, 255))
+    local activeCol = GetThemeColor("indication_active", Color(50, 220, 110, 255))
+
+    -- Specific widget role colors from active theme
+    local disabledSwitchBg = GetThemeColor("disabled_switch_background", Color(64, 51, 82, 90))
+    local enabledSwitchBg = GetThemeColor("enabled_switch_background", Color(191, 140, 255, 115))
+    local comboFrame = GetThemeColor("combo_frame", Color(46, 33, 64, 165))
+    local comboItemActive = GetThemeColor("combo_item_active", Color(120, 160, 255, 255))
+
     local bgLuminance = GetLuminance(background)
 
     local finalTextColor
-    local cellBgColor
-    local borderDisabledColor
     local panelBorderColor
 
     if bgLuminance > 140 then
-        -- Light theme
+        -- Light theme overrides (for readability)
         finalTextColor = Color(20, 24, 33, 255)
-        cellBgColor = Color(background.r - 20, background.g - 20, background.b - 20, 255)
-        borderDisabledColor = Color(160, 160, 165, 255)
         panelBorderColor = Color(0, 0, 0, 35)
+
+        Colors.CellBgDisabled = Color(220, 220, 225, 150)
+        Colors.CellBgNeeded = Color(200, 210, 230, 180)
+        Colors.CellBgAlways = Color(primary.r, primary.g, primary.b, 80)
+        Colors.BorderDisabled = Color(160, 160, 165, 255)
+        Colors.GroupBg = Color(240, 240, 245, 160)
+        Colors.GroupBorder = Color(0, 0, 0, 25)
     else
-        -- Dark theme
-        finalTextColor = Color(245, 247, 250, 255)
-        cellBgColor = Color(background.r + 10, background.g + 10, background.b + 10, 255)
-        borderDisabledColor = Color(60, 60, 65, 255)
-        panelBorderColor = Color(255, 255, 255, 25)
+        -- Dark theme (map to theme widgets functions)
+        finalTextColor = textHeader
+        panelBorderColor = popupBorder
+
+        Colors.CellBgDisabled = Color(disabledSwitchBg.r, disabledSwitchBg.g, disabledSwitchBg.b, 120)
+        Colors.CellBgNeeded = Color(comboFrame.r, comboFrame.g, comboFrame.b, 150)
+        Colors.CellBgAlways = Color(enabledSwitchBg.r, enabledSwitchBg.g, enabledSwitchBg.b, 180)
+        Colors.BorderDisabled = outline
+
+        Colors.GroupBg = Color(groupBg.r, groupBg.g, groupBg.b, 160)
+        if groupOutline.a == 0 then
+            Colors.GroupBorder = Color(popupBorder.r, popupBorder.g, popupBorder.b, 15)
+        else
+            Colors.GroupBorder = groupOutline
+        end
     end
 
     Colors.HeaderBg = Color(background.r, background.g, background.b, 245)
-    Colors.PanelBg = Color(math.max(10, background.r - 11), math.max(10, background.g - 10),
-        math.max(10, background.b - 12), 220)
+    Colors.PanelBg = Color(popupBg.r, popupBg.g, popupBg.b, 220)
 
-    Colors.CellBg = cellBgColor
     Colors.TextHeader = finalTextColor
-    Colors.BorderDisabled = borderDisabledColor
     Colors.BorderPanel = panelBorderColor
 
-    -- Accent/primary color maps to "Needed" target outline
-    Colors.BorderNeeded = Color(primary.r, primary.g, primary.b, 255)
+    -- Functional borders alignment
+    Colors.BorderNeeded = Color(comboItemActive.r, comboItemActive.g, comboItemActive.b, 255)
+    Colors.BorderAlways = Color(activeCol.r, activeCol.g, activeCol.b, 255)
 end
 
 -- Initialize theme colors
@@ -140,7 +188,7 @@ local function InitializeUI()
     end
 
     -- Fallback tab if Drow Ranger menu isn't found
-    local fallbackTab = Menu.Create("General", "Drow Ranger Gust", "dr_gust")
+    local fallbackTab = Menu.Create("General", "Drow Ranger Gust", "dr_gust", L("Settings", "Настройки"))
     if fallbackTab and fallbackTab.Icon then
         fallbackTab:Icon("\u{f70c}")
     end
@@ -191,8 +239,8 @@ end
 
 local function SavePanelPosition()
     if panelX and panelY then
-        panelX:Set(PanelConfig.X)
-        panelY:Set(PanelConfig.Y)
+        panelX:Set(math.floor(PanelConfig.X + 0.5))
+        panelY:Set(math.floor(PanelConfig.Y + 0.5))
     end
 end
 
@@ -562,8 +610,10 @@ DRGust.OnUpdate = function()
     -- Priority 1: Auto-interrupt casting/channeling enemies
     if #castingEnemies > 0 then
         if not interruptOnlyInCombo:Get() or inCombo then
-            if dbg then Log.Write(string.format("[DrowGust] Casting auto-interrupt! Casting targets count: %d",
-                    #castingEnemies)) end
+            if dbg then
+                Log.Write(string.format("[DrowGust] Casting auto-interrupt! Casting targets count: %d",
+                    #castingEnemies))
+            end
             local bestScore = -1
             local bestCastPos = nil
             local bestCasterName = ""
@@ -693,17 +743,16 @@ DRGust.OnDraw = function()
     -- Design parameters matching screenshot
     local cellW = 44 * scale
     local cellH = 30 * scale
-    local cellSpacing = 6 * scale
-    local headerH = 24 * scale
-    local gap = 4 * scale
-    local padding = 8 * scale
+    local cellSpacing = 8 * scale
+    local padding = 10 * scale
+    local titleH = 30 * scale
 
-    local minW = 160 * scale
-    local W = padding * 2 + numEnemies * cellW + (numEnemies - 1) * cellSpacing
-    if W < minW then
-        W = minW
-    end
-    local panelHeight = headerH + gap + cellH
+    -- Nested sub-section dimensions
+    local secW = numEnemies * cellW + (numEnemies - 1) * cellSpacing + 20 * scale
+    local secH = cellH + 26 * scale
+
+    local W = secW + 20 * scale
+    local panelHeight = titleH + secH + 12 * scale
 
     -- Handle HUD dragging input
     local mx, my = GetMousePos()
@@ -719,7 +768,7 @@ DRGust.OnDraw = function()
     local y = math.max(0, math.min(screenSize.y - panelHeight, PanelConfig.Y))
 
     if dragMode:Get() then
-        local isOverHeader = isCursorValid and mx >= x and mx <= x + W and my >= y and my <= y + headerH
+        local isOverHeader = isCursorValid and mx >= x and mx <= x + W and my >= y and my <= y + titleH
 
         if isClicked and isOverHeader then
             PanelDrag.IsDragging = true
@@ -762,76 +811,121 @@ DRGust.OnDraw = function()
         statusColor = Color(150, 150, 150, 255)
     end
 
-    -- Header Icon & Text (Dynamic left/right states)
-    local headerIcon = "💨"
-    local titleText = L("Ready", "Готов")
+    -- Title Text config (Matches screenshot style)
+    local titleIcon = "💨"
+    local titleText = L("Gust Control", "Контроль Gust")
 
     if dragMode:Get() then
-        headerIcon = "🤚"
+        titleIcon = "🤚"
         titleText = L("DRAGGING", "ДВИЖЕНИЕ")
-    elseif cdValue > 0 then
-        headerIcon = "⏳"
-        titleText = L("Cooldown", "Перезарядка")
-    elseif statusText == "N/A" then
-        headerIcon = "💤"
-        titleText = L("Not Learned", "Не изучено")
     end
 
-    local titleFull = headerIcon .. "  " .. titleText
+    local titleFull = titleIcon .. "  " .. titleText
 
-    -- Draw blurred and shadowed panel backgrounds
-    Render.Blur(Vec2(x, y), Vec2(x + W, y + panelHeight), 2.5, 1.0, 6 * scale, Enum.DrawFlags.None)
-    Render.Shadow(Vec2(x, y), Vec2(x + W, y + panelHeight), Color(0, 0, 0, 110), 22, 6 * scale,
-        Enum.DrawFlags.ShadowCutOutShapeBackground, Vec2(1, 2))
-
-    -- Draw Panel Body background (to give cells area a dark iOS style background)
-    Render.FilledRect(Vec2(x, y), Vec2(x + W, y + panelHeight), Colors.PanelBg, 6 * scale)
-    Render.Rect(Vec2(x, y), Vec2(x + W, y + panelHeight), Colors.BorderPanel, 6 * scale, Enum.DrawFlags.None, 1)
-
-    -- Draw Header Bar
-    Render.FilledRect(Vec2(x, y), Vec2(x + W, y + headerH), Colors.HeaderBg, 6 * scale)
-    Render.Rect(Vec2(x, y), Vec2(x + W, y + headerH), Color(255, 255, 255, 20), 6 * scale)
-
-    -- Draw Header Text and Status
-    DrawShadowText(fontNormal, 11 * scale, titleFull, Vec2(x + 10 * scale, y + (headerH - 13 * scale) / 2),
-        Colors.TextHeader)
-
-    local statusSz = Render.TextSize(fontNormal, 11 * scale, statusText)
-    DrawShadowText(fontNormal, 11 * scale, statusText,
-        Vec2(x + W - statusSz.x - 10 * scale, y + (headerH - 13 * scale) / 2), statusColor)
-
-    -- Mouse click single check
+    -- Mouse click single check (consumed for buttons)
     local clickTriggered = false
     if isDown and not wasMousePressed then
         clickTriggered = true
     end
     wasMousePressed = isDown
 
-    -- 2. Draw Horizontal Row of Rounded Cells
-    local cellStartY = y + headerH + gap
+    -- Close Button logic (✕)
+    local closeX = x + W - 24 * scale
+    local closeY = y + 8 * scale
+    local closeW = 12 * scale
+    local closeH = 12 * scale
+    local isOverClose = isCursorValid and mx >= closeX - 4 * scale and mx <= closeX + closeW + 4 * scale and my >= y and
+    my <= y + titleH
+    if isOverClose and clickTriggered then
+        drawPanel:Set(false)
+        clickTriggered = false -- Consume click
+    end
+
+    -- Draw blurred and shadowed panel backgrounds (Single unified box)
+    Render.Blur(Vec2(x, y), Vec2(x + W, y + panelHeight), 2.5, 1.0, 8 * scale, Enum.DrawFlags.None)
+    Render.Shadow(Vec2(x, y), Vec2(x + W, y + panelHeight), Color(0, 0, 0, 110), 22, 8 * scale,
+        Enum.DrawFlags.ShadowCutOutShapeBackground, Vec2(1, 2))
+
+    -- Draw Panel Body background
+    Render.FilledRect(Vec2(x, y), Vec2(x + W, y + panelHeight), Colors.PanelBg, 8 * scale)
+    Render.Rect(Vec2(x, y), Vec2(x + W, y + panelHeight), Colors.BorderPanel, 8 * scale, Enum.DrawFlags.None, 1)
+
+    -- Draw Header Title (Dodger/Kill Stealer style - no separate bar background)
+    DrawShadowText(fontNormal, 11 * scale, titleFull, Vec2(x + 12 * scale, y + 8 * scale), Colors.TextHeader)
+
+    -- Draw Cooldown indicator on the right of title (if not ready)
+    if cdValue > 0 or statusText == "N/A" then
+        local statusSz = Render.TextSize(fontNormal, 10 * scale, statusText)
+        DrawShadowText(fontNormal, 10 * scale, statusText, Vec2(closeX - statusSz.x - 12 * scale, y + 9 * scale),
+            statusColor)
+    end
+
+    -- Draw Close Button
+    local closeCol = isOverClose and Color(255, 100, 110, 255) or
+    Color(Colors.TextHeader.r, Colors.TextHeader.g, Colors.TextHeader.b, 140)
+    DrawShadowText(fontNormal, 11 * scale, "✕", Vec2(closeX, closeY), closeCol)
+
+    -- Draw Nested Targets Group Panel (Dodger/Kill Stealer style)
+    local secBgX = x + 10 * scale
+    local secBgY = y + titleH
+    local secBgW = W - 20 * scale
+    local secBgH = secH
+
+    -- Draw nested container background & border
+    Render.FilledRect(Vec2(secBgX, secBgY), Vec2(secBgX + secBgW, secBgY + secBgH), Colors.GroupBg, 6 * scale)
+    Render.Rect(Vec2(secBgX, secBgY), Vec2(secBgX + secBgW, secBgY + secBgH), Colors.GroupBorder, 6 * scale,
+        Enum.DrawFlags.None, 1)
+
+    -- Draw Section Title ("Targets" / "Цели") centered inside the section header area
+    local secTitle = L("Targets", "Цели")
+    local titleSz = Render.TextSize(fontNormal, 10 * scale, secTitle)
+    DrawShadowText(fontNormal, 10 * scale, secTitle, Vec2(secBgX + (secBgW - titleSz.x) / 2, secBgY + 5 * scale),
+        Colors.TextHeader)
+
+    -- Draw Chevron on the right side of the section header
+    local chevX = secBgX + secBgW - 16 * scale
+    local chevY = secBgY + 5 * scale
+    DrawShadowText(fontNormal, 9 * scale, "▲", Vec2(chevX, chevY),
+        Color(Colors.TextHeader.r, Colors.TextHeader.g, Colors.TextHeader.b, 120))
+
+    -- Horizontal row coordinates inside container
+    local cellStartY = secBgY + 20 * scale
     local cellsTotalW = numEnemies * cellW + (numEnemies - 1) * cellSpacing
-    local cellsStartX = x + (W - cellsTotalW) / 2
+    local cellsStartX = secBgX + (secBgW - cellsTotalW) / 2
 
     for i, cleanName in ipairs(enemies) do
         local cellX = cellsStartX + (i - 1) * (cellW + cellSpacing)
         local enemyHero = enemyEntities[cleanName]
 
-        -- Base cell background
-        Render.FilledRect(Vec2(cellX, cellStartY), Vec2(cellX + cellW, cellStartY + cellH), Colors.CellBg, 5 * scale)
-
         -- Safely fetch/create the dynamic target menu reference
         local menuItem = GetOrCreateMenuItem(cleanName)
         local currentVal = menuItem and menuItem:Get() or 0
+
+        -- Determine background color and image opacity based on state
+        local cellBg = Colors.CellBgDisabled
+        local imgAlpha = 110
+        local isGrayscale = true
+
+        if currentVal == 1 then
+            cellBg = Colors.CellBgAlways
+            imgAlpha = 220
+            isGrayscale = false
+        elseif currentVal == 2 then
+            cellBg = Colors.CellBgNeeded
+            imgAlpha = 180
+            isGrayscale = false
+        end
+
+        -- Base cell background
+        Render.FilledRect(Vec2(cellX, cellStartY), Vec2(cellX + cellW, cellStartY + cellH), cellBg, 5 * scale)
 
         -- Load and draw Hero Portrait inside cell
         local heroNameRaw = enemyHero and NPC.GetUnitName(enemyHero) or ""
         local imgHandle = GetHeroIcon(heroNameRaw)
 
-        -- Gray out portrait if Disabled (index 0)
-        local isGrayscale = (currentVal == 0)
-
         if imgHandle then
-            Render.Image(imgHandle, Vec2(cellX, cellStartY), Vec2(cellW, cellH), Color(255, 255, 255, 255), 5 * scale,
+            Render.Image(imgHandle, Vec2(cellX, cellStartY), Vec2(cellW, cellH), Color(255, 255, 255, imgAlpha),
+                5 * scale,
                 Enum.DrawFlags.None, Vec2(0, 0), Vec2(1, 1), isGrayscale)
         end
 
@@ -870,7 +964,7 @@ DRGust.OnDraw = function()
 
         -- Cycle target state on click: Disabled (0) -> When casting/Needed (2) -> Always (1) -> Disabled (0)
         local isCellHovered = isCursorValid and mx >= cellX and mx <= cellX + cellW and my >= cellStartY and
-        my <= cellStartY + cellH
+            my <= cellStartY + cellH
         if isCellHovered and clickTriggered then
             local nextVal = 0
             if currentVal == 0 then
@@ -917,17 +1011,16 @@ DRGust.OnKeyEvent = function(data, key, event)
     local scale = (Menu.Scale() or 100) / 100
     local cellW = 44 * scale
     local cellH = 30 * scale
-    local cellSpacing = 6 * scale
-    local headerH = 24 * scale
-    local gap = 4 * scale
-    local padding = 8 * scale
+    local cellSpacing = 8 * scale
+    local padding = 10 * scale
+    local titleH = 30 * scale
 
-    local minW = 160 * scale
-    local W = padding * 2 + numEnemies * cellW + (numEnemies - 1) * cellSpacing
-    if W < minW then
-        W = minW
-    end
-    local panelHeight = headerH + gap + cellH
+    -- Nested sub-section dimensions
+    local secW = numEnemies * cellW + (numEnemies - 1) * cellSpacing + 20 * scale
+    local secH = cellH + 26 * scale
+
+    local W = secW + 20 * scale
+    local panelHeight = titleH + secH + 12 * scale
 
     local screenSize = Render.ScreenSize()
     if not screenSize or screenSize.x <= 1 or screenSize.y <= 1 then return end

@@ -1,3 +1,10 @@
+﻿--[[
+╭────────────────────────────────────────────────────────────╮
+|                       Cosmic Menu by Euphoria              │
+│                        By Pidaras                          │
+|                             VibeCode                       │                     
+╰────────────────────────────────────────────────────────────╯
+]]
 local CONSTANTS = {
     DT_DEFAULT = 0.016,
     ANIMATION_DT_MIN = 0.001,
@@ -937,7 +944,13 @@ script.OnScriptsLoaded = function()
     initPool(shootingStarPool, createShootingStar, 10)
     initPool(ambientStreakPool, createAmbientStreak, 16)
 
-    local tab = Menu.Create("General", "Main", "CosmicMenu")
+    local changerSection = Menu.Find("Changer", "Main")
+    local tab
+    if changerSection and changerSection.Create then
+        tab = changerSection:Create("CosmicMenu")
+    else
+        tab = Menu.Create("General", "Main", "CosmicMenu")
+    end
     local main = tab:Create(L("Minimal", "Минимал"))
 
     if tab and tab.Icon then
