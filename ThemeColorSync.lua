@@ -5,9 +5,6 @@
 │                                                            │
 │                     Script by Euphoria                     │
 │                                                            │
-├────────────────────────────────────────────────────────────┤
-│                        By Pidaras                          │
-│                           VibeCode                         │
 ╰────────────────────────────────────────────────────────────╯
 --]]
 
@@ -15,12 +12,163 @@
 
 local ThemeColorSync = {}
 
-local THEME_SYNC_DELAY = 0.12
+local ThemeUtils = (function()
+    local U = {}
+
+    local function readMember(value, key)
+        local ok, result = pcall(function()
+            return value[key]
+        end)
+        if ok then return result end
+        return nil
+    end
+
+    function U.clampByte(value, fallback)
+        if type(value) ~= "number" then return fallback or 0 end
+        if value <= 1 and value >= 0 then
+            value = value * 255
+        end
+        if value < 0 then return 0 end
+        if value > 255 then return 255 end
+        return math.floor(value + 0.5)
+    end
+
+    function U.makeColor(r, g, b, a)
+        return Color(U.clampByte(r), U.clampByte(g), U.clampByte(b), U.clampByte(a, 255))
+    end
+
+    function U.normalizeColor(value)
+        local valueType = type(value)
+        if valueType ~= "table" and valueType ~= "userdata" then return nil end
+
+        local function channel(keys, fallback)
+            for _, key in ipairs(keys) do
+                local raw = readMember(value, key)
+                if type(raw) == "number" then
+                    return raw
+                end
+                if type(raw) == "function" then
+                    local ok, result = pcall(raw, value)
+                    if ok and type(result) == "number" then
+                        return result
+                    end
+                end
+            end
+            return fallback
+        end
+
+        local r = channel({"r", "R", "red", "Red", "GetR", "GetRed", 1}, nil)
+        local g = channel({"g", "G", "green", "Green", "GetG", "GetGreen", 2}, nil)
+        local b = channel({"b", "B", "blue", "Blue", "GetB", "GetBlue", 3}, nil)
+        local a = channel({"a", "A", "alpha", "Alpha", "GetA", "GetAlpha", 4}, 255)
+
+        if type(r) == "number" and type(g) == "number" and type(b) == "number" then
+            return U.makeColor(r, g, b, a)
+        end
+
+        return nil
+    end
+
+    function U.colorWithAlpha(color, alpha)
+        if not color then return U.makeColor(255, 255, 255, alpha or 255) end
+        return U.makeColor(color.r or 255, color.g or 255, color.b or 255, alpha or color.a or 255)
+    end
+
+    function U.colorTable(color)
+        return {
+            r = U.clampByte(color and color.r, 255),
+            g = U.clampByte(color and color.g, 255),
+            b = U.clampByte(color and color.b, 255),
+            a = U.clampByte(color and color.a, 255)
+        }
+    end
+
+    function U.mixColors(colorA, colorB, t, alpha)
+        t = math.max(0, math.min(1, t or 0.5))
+        return U.makeColor(
+            (colorA.r or 0) + ((colorB.r or 0) - (colorA.r or 0)) * t,
+            (colorA.g or 0) + ((colorB.g or 0) - (colorA.g or 0)) * t,
+            (colorA.b or 0) + ((colorB.b or 0) - (colorA.b or 0)) * t,
+            alpha or ((colorA.a or 255) + ((colorB.a or 255) - (colorA.a or 255)) * t)
+        )
+    end
+
+    function U.colorsSimilar(colorA, colorB)
+        if not colorA or not colorB then return true end
+        local dr = (colorA.r or 0) - (colorB.r or 0)
+        local dg = (colorA.g or 0) - (colorB.g or 0)
+        local db = (colorA.b or 0) - (colorB.b or 0)
+        return dr * dr + dg * dg + db * db < 32 * 32
+    end
+
+    function U.colorsMatch(colorA, colorB)
+        if not colorA or not colorB then return false end
+        local dr = math.abs((colorA.r or 0) - (colorB.r or 0))
+        local dg = math.abs((colorA.g or 0) - (colorB.g or 0))
+        local db = math.abs((colorA.b or 0) - (colorB.b or 0))
+        local da = math.abs((colorA.a or 255) - (colorB.a or 255))
+        return dr <= 3 and dg <= 3 and db <= 3 and da <= 4
+    end
+
+    function U.luminance(color)
+        if not color then return 0 end
+        return (color.r or 0) * 0.299 + (color.g or 0) * 0.587 + (color.b or 0) * 0.114
+    end
+
+    function U.styleTable()
+        if not Menu or not Menu.Style then return nil end
+        local ok, result = pcall(Menu.Style)
+        if ok and type(result) == "table" then return result end
+        return nil
+    end
+
+    function U.styleColor(name)
+        if not Menu or not Menu.Style or not name then return nil end
+
+        local ok, direct = pcall(Menu.Style, name)
+        local normalized = ok and U.normalizeColor(direct)
+        if normalized then return normalized end
+
+        local tableValue = U.styleTable()
+        if tableValue then
+            normalized = U.normalizeColor(tableValue[name])
+            if normalized then return normalized end
+        end
+
+        return nil
+    end
+
+    function U.styleColorAny(names, fallback)
+        for _, name in ipairs(names) do
+            local color = U.styleColor(name)
+            if color then return color end
+        end
+        return fallback
+    end
+
+    return U
+end)()
+
+local makeColor = ThemeUtils.makeColor
+local colorWithAlpha = ThemeUtils.colorWithAlpha
+local colorTable = ThemeUtils.colorTable
+local mixColors = ThemeUtils.mixColors
+local colorsSimilar = ThemeUtils.colorsSimilar
+local colorsMatch = ThemeUtils.colorsMatch
+local luminance = ThemeUtils.luminance
+local normalizeColor = ThemeUtils.normalizeColor
+local styleColorAny = ThemeUtils.styleColorAny
+
 local EVENT_RETRY_DELAY = 0.75
+local DEFAULT_SYNC_INTERVAL = 4
 
 local unpackArgs = table.unpack or unpack
+local log = Logger and Logger("ThemeColorSync") or nil
 local ui = {}
 local restoreOriginalColors
+local syncEvent
+local queueSync
+
 local state = {
     menuCreated = false,
     syncPending = false,
@@ -30,7 +178,10 @@ local state = {
     debugFullNext = true,
     debugWasEnabled = false,
     lastDebugSignature = nil,
-    stats = {applied = 0, missing = 0, skipped = 0, failed = 0}
+    lastPalettePrimary = nil,
+    lastPaletteSecondary = nil,
+    stats = {applied = 0, missing = 0, skipped = 0, failed = 0},
+    statusText = "Last sync: not run yet"
 }
 
 local targets = {}
@@ -42,14 +193,328 @@ local function sc(fn, ...)
     return nil
 end
 
-local function addTarget(group, role, path, alpha)
-    targets[#targets + 1] = {
+local function logInfo(message)
+    message = tostring(message)
+    if log and log.info then
+        local ok = pcall(log.info, log, message)
+        if not ok then
+            print("[ThemeColorSync] " .. message)
+        end
+    else
+        print("[ThemeColorSync] " .. message)
+    end
+end
+
+local function logDebug(message)
+    message = tostring(message)
+    if log and log.debug then
+        local ok = pcall(log.debug, log, message)
+        if not ok then
+            print("[ThemeColorSync] " .. message)
+        end
+    else
+        print("[ThemeColorSync] " .. message)
+    end
+end
+
+local function addTarget(group, role, path, alpha, alternatePaths)
+    local entry = {
         group = group,
         role = role,
         path = path,
         alpha = alpha
     }
+    if type(alternatePaths) == "table" and #alternatePaths > 0 then
+        entry.alternatePaths = alternatePaths
+    end
+    targets[#targets + 1] = entry
 end
+
+local function registerTargets(addTarget)
+    local LHH = {"Creeps", "Main", "[v2]Last Hit Helper", "Main"}
+
+    local function heroPath(hero, ...)
+        local path = {"Heroes", "Hero List", hero, "Main Settings"}
+        for i = 1, select("#", ...) do
+            path[#path + 1] = select(i, ...)
+        end
+        return path
+    end
+
+    local function heroTabPath(hero, ...)
+        local path = {"Heroes", "Hero List", hero}
+        for i = 1, select("#", ...) do
+            path[#path + 1] = select(i, ...)
+        end
+        return path
+    end
+
+    local function lhhPath(...)
+        local path = {}
+        for i = 1, #LHH do
+            path[i] = LHH[i]
+        end
+        for i = 1, select("#", ...) do
+            path[#path + 1] = select(i, ...)
+        end
+        return path
+    end
+
+    local function radiusPaths(...)
+        local tail = {...}
+        local general = {"General", "Main", "Radius", "Main"}
+        local info = {"Info Screen", "Main", "Radius", "Main"}
+        local paths = {}
+        for _, base in ipairs({general, info}) do
+            local path = {}
+            for i = 1, #base do
+                path[i] = base[i]
+            end
+            for i = 1, #tail do
+                path[#path + 1] = tail[i]
+            end
+            paths[#paths + 1] = path
+        end
+        return paths[1], {paths[2]}
+    end
+
+    local function lhhParticlePath(...)
+        local nested = lhhPath(...)
+        local args = {...}
+        local alternates = {}
+
+        if args[1] == "Global Settings" and args[2] == "Work Radius" and args[3] == "Work Radius" then
+            if args[4] == "Attack Range Particle" and args[5] == "Color" then
+                alternates[#alternates + 1] = lhhPath(
+                    "Global Settings", "Attack Range Particle", "Attack Range Particle", "Color"
+                )
+            elseif args[4] == "Work Radius Particle" and args[5] == "1234" then
+                alternates[#alternates + 1] = lhhPath(
+                    "Global Settings", "Work Radius", "Work Radius Particle", "1234"
+                )
+            end
+        end
+
+        if #alternates == 0 then
+            return nested, nil
+        end
+        return nested, alternates
+    end
+
+    local function addHeroInfo(hero, feature, primaryAlternates, secondaryAlternates)
+        addTarget("heroes", "primary", heroPath(hero, feature, "Show Info", "Show Info", "Color"), nil, primaryAlternates)
+        addTarget("heroes", "secondary", heroPath(hero, feature, "Show Info", "Show Info", "Color##1"), nil, secondaryAlternates)
+    end
+
+    local function addHeroDrawBest(hero, feature, primaryAlternates, mutedAlternates)
+        addTarget("heroes", "primary", heroPath(hero, feature, "Draw Best Position", "Draw Best Position", "Color"), nil, primaryAlternates)
+        addTarget("heroes", "muted", heroPath(hero, feature, "Draw Best Count", "Draw Best Count", "Color"), nil, mutedAlternates)
+    end
+
+    local function addHeroDrawBestHeroSettings(hero)
+        addTarget("heroes", "primary", heroPath(hero, "Hero Settings", "Draw Best Position", "Draw Best Position", "Color"))
+    end
+
+    local function addHeroParticle(hero, ...)
+        addTarget("heroes", "particle", heroPath(hero, ...))
+    end
+
+    local function addHeroColor(hero, role, ...)
+        addTarget("heroes", role, heroPath(hero, ...))
+    end
+
+    addTarget("general", "primary", {"General", "Main", "FailSwitch", "Main", "General", "Indication", "Settings", "Color"})
+    addTarget("general", "primary", {"General", "Beta", "FailSwitch", "Main", "General", "Indication", "Settings", "Color"})
+    addTarget("general", "primary", {"General", "Main", "Procast Damage", "Main", "Indication Settings", "Default Color"})
+    addTarget("general", "warn", {"General", "Main", "Procast Damage", "Main", "Indication Settings", "Warn Color"})
+    addTarget("general", "lethal", {"General", "Main", "Procast Damage", "Main", "Indication Settings", "Lethal Color"})
+    addTarget("general", "warn", {"General", "Main", "Procast Damage", "Main", "Chams & Glow Settings", "Warn Color"})
+    addTarget("general", "lethal", {"General", "Main", "Procast Damage", "Main", "Chams & Glow Settings", "Lethal Color"})
+    addTarget("general", "particle", {"Heroes", "", "Settings", "General", "Target Selection", "Draw Particle", "Draw Particle", "Particle Color"})
+    addTarget("general", "soft", {"Info Screen", "Main", "Aggro Drawer", "Main", "Aggro Drawer", "Aura Color"})
+    addTarget("general", "warn", {"Info Screen", "Main", "Info Overlay", "Main", "Top Overlay Settings", "What to Show", "Extra settings", "Coins Color"})
+    addTarget("general", "primary", {"Info Screen", "Main", "Show Me More", "Main", "Units", "Show Illusions", "Illusions", "Original Color"})
+    addTarget("general", "secondary", {"Info Screen", "Main", "Show Me More", "Main", "Units", "Show Illusions", "Illusions", "Illusion Color"})
+    addTarget("general", "primary", {"Info Screen", "Main", "Visible Settings", "VBE", "Visible by Enemy", "Primary Color"})
+
+    do
+        local primary, alt = radiusPaths("Others Settings", "Enemy Gem Radius", "Enemy Gem Radius", "Color")
+        addTarget("general", "particle", primary, nil, alt)
+    end
+    do
+        local primary, alt = radiusPaths("Others Settings", "Smoke Radius", "Smoke Radius", "Color")
+        addTarget("general", "soft", primary, nil, alt)
+    end
+    do
+        local primary, alt = radiusPaths("Structures Settings", "Towers Radius", "Towers Radius", "Color")
+        addTarget("general", "primary", primary, nil, alt)
+    end
+    do
+        local primary, alt = radiusPaths("Structures Settings", "Towers Radius", "Towers Radius", "Color##1")
+        addTarget("general", "secondary", primary, nil, alt)
+    end
+    do
+        local primary, alt = radiusPaths("Structures Settings", "Watchers Radius", "Watchers Radius", "Color")
+        addTarget("general", "muted", primary, nil, alt)
+    end
+
+    do
+        local primary, alt = lhhParticlePath("Global Settings", "Work Radius", "Work Radius", "Work Radius Particle", "1234")
+        addTarget("creeps", "particle", primary, nil, alt)
+    end
+    do
+        local primary, alt = lhhParticlePath("Global Settings", "Work Radius", "Work Radius", "Attack Range Particle", "Color")
+        addTarget("creeps", "secondary", primary, nil, alt)
+    end
+    do
+        local primary, alt = lhhParticlePath("Global Settings", "Work Radius", "Work Radius", "Creep Aggro Range Particle", "Color")
+        addTarget("creeps", "danger", primary, nil, alt)
+    end
+    addTarget("creeps", "primary", lhhPath("Global Settings", "Key", "Key", "Color 1"), nil, {
+        lhhPath("Global Settings", "Key", "Color 1")
+    })
+    addTarget("creeps", "secondary", lhhPath("Global Settings", "Key", "Key", "Color 2"), nil, {
+        lhhPath("Global Settings", "Key", "Color 2")
+    })
+    addTarget("creeps", "primary", lhhPath("Visual Settings", "Work Indication", "Work Indication", "Color 1"))
+    addTarget("creeps", "secondary", lhhPath("Visual Settings", "Work Indication", "Work Indication", "Color 2"))
+    addTarget("creeps", "separator", lhhPath("Visual Settings", "HP Bars", "HP Bars", "Separator Color"))
+    addTarget("creeps", "muted", lhhPath("Visual Settings", "HP Bars", "HP Bars", "Minify Color"))
+    addTarget("creeps", "lethal", lhhPath("Visual Settings", "Lethal Marker", "Lethal Marker", "Lethal"))
+    addTarget("creeps", "warn", lhhPath("Visual Settings", "Lethal Marker", "Lethal Marker", "Nearby Lethal"))
+    addTarget("creeps", "ally", lhhPath("Visual Settings", "Lethal Marker", "Lethal Marker", "Ally Lethal"))
+    addTarget("creeps", "secondary", lhhPath("Visual Settings", "Lethal Marker", "Lethal Marker", "Ally Nearby Lethal"))
+    addTarget("creeps", "primary", lhhPath("Visual Settings", "Attacks to Kill", "Attacks to Kill", "Color"))
+    addTarget("creeps", "ally", lhhPath("Visual Settings", "Attacks to Kill", "Attacks to Kill", "Ally Color"))
+    addTarget("creeps", "primary", lhhPath("Visual Settings", "Kill Marker", "Kill Marker", "My Hero Color"))
+    addTarget("creeps", "danger", lhhPath("Visual Settings", "Kill Marker", "Kill Marker", "Enemy Heroes Color"))
+    addTarget("creeps", "ally", lhhPath("Visual Settings", "Kill Marker", "Kill Marker", "Ally Heroes Color"))
+    addTarget("creeps", "primary", lhhPath("Visual Settings", "Under Tower Helper", "Under Tower Helper", "Color"), nil, {
+        lhhPath("Visual Settings", "Under Tower Helper ", "Under Tower Helper ", "Color"),
+        lhhPath("Visual Settings", "Under Tower Helper    ", "Under Tower Helper    ", "Color")
+    })
+    addTarget("creeps", "ally", lhhPath("Visual Settings", "Under Tower Helper", "Under Tower Helper", "Ally Color"), nil, {
+        lhhPath("Visual Settings", "Under Tower Helper ", "Under Tower Helper ", "Ally Color"),
+        lhhPath("Visual Settings", "Under Tower Helper    ", "Under Tower Helper    ", "Ally Color")
+    })
+    addTarget("creeps", "lethal", lhhPath("Skill Damage Indication", "Enable", "Enable", "Lethal"))
+    addTarget("creeps", "warn", lhhPath("Skill Damage Indication", "Enable", "Enable", "Nearby Lethal"))
+    addTarget("changer", "ally", {"Changer", "Main", "Color Changer", "Main", "Colors", "Ally Creep Color"})
+    addTarget("changer", "enemy", {"Changer", "Main", "Color Changer", "Main", "Colors", "Enemy Creep Color"})
+    addTarget("changer", "tree1", {"Changer", "Main", "Tree Changer", "Main", "Color Settings", "Tree Color 1"})
+    addTarget("changer", "tree2", {"Changer", "Main", "Tree Changer", "Main", "Color Settings", "Tree Color 2"})
+    addTarget("changer", "worldLight", {"Changer", "Main", "World", "Main", "World", "Light Color"})
+    addTarget("changer", "worldAmbient", {"Changer", "Main", "World", "Main", "World", "Ambient Color"})
+    addTarget("changer", "worldFow", {"Changer", "Main", "World", "Main", "World", "Fow Color"})
+    addTarget("changer", "primary", {"Changer", "Main", "Watermark", "Main", "Color Settings", "Background", "Color"})
+    addTarget("changer", "secondary", {"Changer", "Main", "Watermark", "Main", "Color Settings", "Text", "Color"})
+    addTarget("changer", "particle", {"Changer", "Main", "Watermark", "Main", "Color Settings", "Icons", "Color"})
+    addTarget("changer", "soft", {"Changer", "Main", "Watermark", "Main", "Color Settings", "Logo", "Color"})
+    addTarget("changer", "active", {"Changer", "Main", "Watermark", "Main", "Color Settings", "Icon Hover", "Color"})
+    addTarget("changer", "muted", {"Changer", "Main", "Watermark", "Main", "Color Settings", "Alternative", "Color"})
+    addTarget("changer", "warn", {"Changer", "Main", "Watermark", "Main", "Color Settings", "Pre Alternative", "Color"})
+
+    local heroInfoFeatures = {
+        {"Axe", "Berserker's Call Information"},
+        {"Crystal Maiden", "Freezing Field Information"},
+        {"Dark Seer", "Vacuum Information"},
+        {"Disruptor", "Static Storm Information"},
+        {"Earthshaker", "Echo Slam Information"},
+        {"Enigma", "Black Hole Information"},
+        {"Faceless Void", "Chronosphere Information"},
+        {"Magnus", "Reverse Polarity Information"},
+        {"Mars", "Arena of Blood Information"},
+        {"Outworld Destroyer", "Sanity's Eclipse Information"},
+        {"Puck", "Dream Coil Information"},
+        {"Rubick", "Berserker's Call Information"},
+        {"Rubick", "Reverse Polarity Information"},
+        {"Tidehunter", "Ravage Information"},
+        {"Treant Protector", "Overgrowth Information"},
+        {"Warlock", "Chaotic Offering Information"},
+    }
+
+    for _, entry in ipairs(heroInfoFeatures) do
+        local hero, feature = entry[1], entry[2]
+        local primaryAlternates = nil
+        local secondaryAlternates = nil
+        if hero == "Rubick" and feature == "Reverse Polarity Information" then
+            primaryAlternates = {
+                heroPath(hero, feature, "Show Info##1", "Show Info", "Color")
+            }
+            secondaryAlternates = {
+                heroPath(hero, feature, "Show Info##1", "Show Info", "Color##1")
+            }
+        elseif hero == "Mars" and feature == "Arena of Blood Information" then
+            primaryAlternates = {
+                heroPath("Mars", "Arena Of Blood Information", "Show Info", "Show Info", "Color")
+            }
+            secondaryAlternates = {
+                heroPath("Mars", "Arena Of Blood Information", "Show Info", "Show Info", "Color##1")
+            }
+        end
+        addHeroInfo(hero, feature, primaryAlternates, secondaryAlternates)
+    end
+
+    local heroDrawBestFeatures = {
+        {"Crystal Maiden", "Freezing Field Information"},
+        {"Crystal Maiden", "Hero Settings"},
+        {"Dark Seer", "Vacuum Information"},
+        {"Dark Seer", "Hero Settings"},
+        {"Disruptor", "Static Storm Information"},
+        {"Disruptor", "Hero Settings"},
+        {"Faceless Void", "Chronosphere Information"},
+        {"Faceless Void", "Hero Settings"},
+        {"Magnus", "Reverse Polarity Information"},
+        {"Magnus", "Hero Settings"},
+        {"Mars", "Arena of Blood Information"},
+        {"Puck", "Dream Coil Information"},
+        {"Puck", "Hero Settings"},
+        {"Tidehunter", "Hero Settings"},
+        {"Warlock", "Hero Settings"},
+    }
+
+    for _, entry in ipairs(heroDrawBestFeatures) do
+        if entry[2] == "Hero Settings" then
+            addHeroDrawBestHeroSettings(entry[1])
+        else
+            local primaryAlternates = nil
+            local mutedAlternates = nil
+            if entry[1] == "Mars" and entry[2] == "Arena of Blood Information" then
+                primaryAlternates = {
+                    heroPath("Mars", "Arena Of Blood Information", "Draw Best Position", "Draw Best Position", "Color")
+                }
+                mutedAlternates = {
+                    heroPath("Mars", "Arena Of Blood Information", "Draw Best Count", "Draw Best Count", "Color")
+                }
+            end
+            addHeroDrawBest(entry[1], entry[2], primaryAlternates, mutedAlternates)
+        end
+    end
+
+    addHeroParticle("Broodmother", "Web Settings", "Particle", "Particlecolor")
+    addHeroColor("Dawnbreaker", "primary", "Hero Settings", "Draw Meeting Point", "Draw Meeting Point", "Color")
+    addHeroParticle("Disruptor", "Glimpse Helper", "Draw Trajectory Line", "Draw Trajectory Linecolor")
+    addHeroColor("Elder Titan", "primary", "Spirit Settings", "Draw Collected Buffs Info", "Draw Collected Buffs Info", "Color")
+    addTarget("heroes", "particle", heroTabPath("Invoker", "Auto Usage", "Sun Strike Indication", "Predict Indication", "Predict Indication", "Color"), nil, {
+        heroTabPath("Invoker", "Auto Usage", "SunStrike Indication", "Predict Indication", "Predict Indication", "Color")
+    })
+    addHeroParticle("Keeper Of The Light", "Hero Settings", "Show Illuminate Radius", "Show Illuminate Radiuscolor")
+    addHeroParticle("Kunkka", "Hero Settings", "Draw Tidebringer Range", "Draw Tidebringer Rangecolor")
+    addHeroColor("Magnus", "primary", "Skewer Combo Settings", "Skewer Set Position", "Skewer Set Position", "Color")
+    addHeroColor("Pudge", "primary", "Misc Settings", "Draw Specific Positions", "Draw Specific Positions", "Color")
+    addHeroColor("Shadow Fiend", "muted", "Razes Settings", "Show Radiuses", "Show Radiuses", "Reloading")
+    addHeroColor("Shadow Fiend", "active", "Razes Settings", "Show Radiuses", "Show Radiuses", "Castable")
+    addHeroColor("Shadow Fiend", "danger", "Razes Settings", "Show Radiuses", "Show Radiuses", "Enemy in Radius")
+    addHeroParticle("Techies", "Hero Settings", "Draw Radius", "Draw Radius", "Color")
+    addHeroParticle("Templar Assassin", "Psionic Trap Radius", "Particle", "Particlecolor")
+    addHeroParticle("Weaver", "Hero Settings", "Show Info", "Show Info", "Line Color")
+    addHeroParticle("Windranger", "Shackleshot Indication", "Line Particle", "Line Particlecolor")
+    addHeroColor("Arc Warden", "particle", "Utility", "Drawings", "Drawings", "Rune Capture Radius", "Color")
+    addHeroColor("Arc Warden", "primary", "Utility", "Drawings", "Drawings", "Spark Wraith Radius", "Color")
+    addHeroColor("Arc Warden", "muted", "Utility", "Drawings", "Drawings", "Spark Wraith Timer", "Color")
+end
+
+registerTargets(addTarget)
 
 local function widgetGet(widget, fallback)
     if not widget or type(widget.Get) ~= "function" then return fallback end
@@ -58,18 +523,12 @@ local function widgetGet(widget, fallback)
     return value
 end
 
-local function clampByte(value, fallback)
-    if type(value) ~= "number" then return fallback or 0 end
-    if value <= 1 and value >= 0 then
-        value = value * 255
+local function syncDelaySeconds()
+    local tenths = widgetGet(ui.syncInterval, DEFAULT_SYNC_INTERVAL)
+    if type(tenths) ~= "number" then
+        tenths = DEFAULT_SYNC_INTERVAL
     end
-    if value < 0 then return 0 end
-    if value > 255 then return 255 end
-    return math.floor(value + 0.5)
-end
-
-local function makeColor(r, g, b, a)
-    return Color(clampByte(r), clampByte(g), clampByte(b), clampByte(a, 255))
+    return math.max(0.05, tenths * 0.1)
 end
 
 local function readMember(value, key)
@@ -78,115 +537,6 @@ local function readMember(value, key)
     end)
     if ok then return result end
     return nil
-end
-
-local function normalizeColor(value)
-    local valueType = type(value)
-    if valueType ~= "table" and valueType ~= "userdata" then return nil end
-
-    local function channel(keys, fallback)
-        for _, key in ipairs(keys) do
-            local raw = readMember(value, key)
-            if type(raw) == "number" then
-                return raw
-            end
-            if type(raw) == "function" then
-                local ok, result = pcall(raw, value)
-                if ok and type(result) == "number" then
-                    return result
-                end
-            end
-        end
-        return fallback
-    end
-
-    local r = channel({"r", "R", "red", "Red", "GetR", "GetRed", 1}, nil)
-    local g = channel({"g", "G", "green", "Green", "GetG", "GetGreen", 2}, nil)
-    local b = channel({"b", "B", "blue", "Blue", "GetB", "GetBlue", 3}, nil)
-    local a = channel({"a", "A", "alpha", "Alpha", "GetA", "GetAlpha", 4}, 255)
-
-    if type(r) == "number" and type(g) == "number" and type(b) == "number" then
-        return makeColor(r, g, b, a)
-    end
-
-    return nil
-end
-
-local function colorWithAlpha(color, alpha)
-    if not color then return makeColor(255, 255, 255, alpha or 255) end
-    return makeColor(color.r or 255, color.g or 255, color.b or 255, alpha or color.a or 255)
-end
-
-local function colorTable(color)
-    return {
-        r = clampByte(color and color.r, 255),
-        g = clampByte(color and color.g, 255),
-        b = clampByte(color and color.b, 255),
-        a = clampByte(color and color.a, 255)
-    }
-end
-
-local function mixColors(colorA, colorB, t, alpha)
-    t = math.max(0, math.min(1, t or 0.5))
-    return makeColor(
-        (colorA.r or 0) + ((colorB.r or 0) - (colorA.r or 0)) * t,
-        (colorA.g or 0) + ((colorB.g or 0) - (colorA.g or 0)) * t,
-        (colorA.b or 0) + ((colorB.b or 0) - (colorA.b or 0)) * t,
-        alpha or ((colorA.a or 255) + ((colorB.a or 255) - (colorA.a or 255)) * t)
-    )
-end
-
-local function colorsSimilar(colorA, colorB)
-    if not colorA or not colorB then return true end
-    local dr = (colorA.r or 0) - (colorB.r or 0)
-    local dg = (colorA.g or 0) - (colorB.g or 0)
-    local db = (colorA.b or 0) - (colorB.b or 0)
-    return dr * dr + dg * dg + db * db < 32 * 32
-end
-
-local function colorsMatch(colorA, colorB)
-    if not colorA or not colorB then return false end
-    local dr = math.abs((colorA.r or 0) - (colorB.r or 0))
-    local dg = math.abs((colorA.g or 0) - (colorB.g or 0))
-    local db = math.abs((colorA.b or 0) - (colorB.b or 0))
-    local da = math.abs((colorA.a or 255) - (colorB.a or 255))
-    return dr <= 3 and dg <= 3 and db <= 3 and da <= 4
-end
-
-local function luminance(color)
-    if not color then return 0 end
-    return (color.r or 0) * 0.299 + (color.g or 0) * 0.587 + (color.b or 0) * 0.114
-end
-
-local function styleTable()
-    if not Menu or not Menu.Style then return nil end
-    local ok, result = pcall(Menu.Style)
-    if ok and type(result) == "table" then return result end
-    return nil
-end
-
-local function styleColor(name)
-    if not Menu or not Menu.Style or not name then return nil end
-
-    local ok, direct = pcall(Menu.Style, name)
-    local normalized = ok and normalizeColor(direct)
-    if normalized then return normalized end
-
-    local tableValue = styleTable()
-    if tableValue then
-        normalized = normalizeColor(tableValue[name])
-        if normalized then return normalized end
-    end
-
-    return nil
-end
-
-local function styleColorAny(names, fallback)
-    for _, name in ipairs(names) do
-        local color = styleColor(name)
-        if color then return color end
-    end
-    return fallback
 end
 
 local function deriveSecondary(primary)
@@ -242,6 +592,22 @@ local function buildPalette()
         worldAmbient = mixColors(secondary, makeColor(130, 138, 150, 255), 0.35, 255),
         worldFow = makeColor((primary.r or 0) * 0.28, (primary.g or 0) * 0.28, (primary.b or 0) * 0.28, 255)
     }
+end
+
+local function paletteChanged(palette)
+    if not palette then return true end
+    if not state.lastPalettePrimary or not colorsMatch(state.lastPalettePrimary, palette.primary) then
+        return true
+    end
+    if not state.lastPaletteSecondary or not colorsMatch(state.lastPaletteSecondary, palette.secondary) then
+        return true
+    end
+    return false
+end
+
+local function rememberPalette(palette)
+    state.lastPalettePrimary = palette and palette.primary or nil
+    state.lastPaletteSecondary = palette and palette.secondary or nil
 end
 
 local function colorForTarget(target, palette)
@@ -304,6 +670,30 @@ local function withTooltip(widget, text)
     return widget
 end
 
+local function updateStatusLabel(text)
+    state.statusText = text or state.statusText
+    if ui.statusLabel and ui.statusLabel.ForceLocalization then
+        sc(ui.statusLabel.ForceLocalization, ui.statusLabel, state.statusText)
+    end
+end
+
+local function formatSyncStats(stats)
+    return string.format(
+        "Last sync: applied=%d missing=%d skipped=%d failed=%d",
+        stats.applied or 0,
+        stats.missing or 0,
+        stats.skipped or 0,
+        stats.failed or 0
+    )
+end
+
+local function bindSyncCallback(widget)
+    if not widget or not widget.SetCallback then return end
+    sc(widget.SetCallback, widget, function()
+        queueSync(0)
+    end)
+end
+
 local function ensureMenu()
     if state.menuCreated or not Menu then return end
 
@@ -321,6 +711,17 @@ local function ensureMenu()
         main and main.Switch and main:Switch("Enable", true, "\u{f011}"),
         "Synchronizes supported visual color pickers with the current cheat theme."
     )
+    ui.syncNow = withTooltip(
+        main and main.Button and main:Button("Sync now", function()
+            if syncEvent then
+                syncEvent()
+            end
+        end, true, 1.0),
+        "Runs theme color synchronization immediately."
+    )
+    if ui.syncNow and ui.syncNow.Icon then
+        sc(ui.syncNow.Icon, ui.syncNow, "\u{f021}")
+    end
     ui.restoreOriginal = withTooltip(
         main and main.Button and main:Button("Restore original colors", function()
             if restoreOriginalColors then
@@ -332,6 +733,8 @@ local function ensureMenu()
     if ui.restoreOriginal and ui.restoreOriginal.Icon then
         sc(ui.restoreOriginal.Icon, ui.restoreOriginal, "\u{f2ea}")
     end
+    ui.statusLabel = main and main.Label and main:Label(state.statusText)
+
     ui.syncGeneral = withTooltip(
         groups and groups.Switch and groups:Switch("General / Info Screen", true, "\u{f05a}"),
         "FailSwitch, procast damage, target particle and info screen colors."
@@ -346,7 +749,7 @@ local function ensureMenu()
     )
     ui.syncChanger = withTooltip(
         groups and groups.Switch and groups:Switch("Changer / World", true, "\u{f1fc}"),
-        "Creep color changer, tree colors and world colors."
+        "Creep color changer, tree colors, world colors and watermark."
     )
     ui.preserveDangerRed = withTooltip(
         tuning and tuning.Switch and tuning:Switch("Preserve danger red", true, "\u{f071}"),
@@ -356,6 +759,22 @@ local function ensureMenu()
         tuning and tuning.Switch and tuning:Switch("Retry missing once", true, "\u{f021}"),
         "Runs one delayed retry only for widgets that were missing or failed during the sync."
     )
+    ui.restoreOnDisable = withTooltip(
+        tuning and tuning.Switch and tuning:Switch("Restore on disable", false, "\u{f0e2}"),
+        "Restores captured original colors when Enable is turned off."
+    )
+    ui.restoreRespectsGroups = withTooltip(
+        tuning and tuning.Switch and tuning:Switch("Restore respects groups", true, "\u{f0c8}"),
+        "Only restores widgets from enabled sync groups."
+    )
+    ui.notifyRestore = withTooltip(
+        tuning and tuning.Switch and tuning:Switch("Notify on restore", true, "\u{f0f3}"),
+        "Shows a centered notification after restore completes."
+    )
+    ui.syncInterval = withTooltip(
+        tuning and tuning.Slider and tuning:Slider("Sync interval", 1, 10, DEFAULT_SYNC_INTERVAL, function(v) return v .. " (×0.1s)" end),
+        "Delay before sync after theme change, in tenths of a second (4 = 0.4s)."
+    )
     ui.debug = withTooltip(
         tuning and tuning.Switch and tuning:Switch("Debug log", false, "\u{f120}"),
         "Prints a compact sync report after each pass."
@@ -364,6 +783,25 @@ local function ensureMenu()
         tuning and tuning.Switch and tuning:Switch("Verbose debug list", false, "\u{f03a}"),
         "Also prints the full list of successfully applied color widgets."
     )
+
+    bindSyncCallback(ui.syncGeneral)
+    bindSyncCallback(ui.syncCreeps)
+    bindSyncCallback(ui.syncHeroes)
+    bindSyncCallback(ui.syncChanger)
+    bindSyncCallback(ui.preserveDangerRed)
+    bindSyncCallback(ui.syncInterval)
+
+    if ui.enabled and ui.enabled.SetCallback then
+        sc(ui.enabled.SetCallback, ui.enabled, function()
+            if not widgetGet(ui.enabled, true) and widgetGet(ui.restoreOnDisable, false) then
+                if restoreOriginalColors then
+                    restoreOriginalColors()
+                end
+            else
+                queueSync(0)
+            end
+        end)
+    end
 
     state.menuCreated = tab ~= nil
 end
@@ -376,14 +814,166 @@ local function groupEnabled(group)
     return true
 end
 
+local function widgetLooksLikeColorPicker(widget)
+    if not widget then return false end
+
+    local getFn = readMember(widget, "Get")
+    if type(getFn) ~= "function" then return true end
+
+    local ok, value = pcall(getFn, widget)
+    if not ok then
+        ok, value = pcall(getFn)
+    end
+    if not ok then return true end
+    if type(value) == "boolean" then return false end
+    return normalizeColor(value) ~= nil or value == nil
+end
+
+local function tryMenuFind(...)
+    if not Menu or not Menu.Find then return nil end
+    local ok, result = pcall(Menu.Find, ...)
+    if ok then return result end
+    return nil
+end
+
+local function callWidgetMethod(widget, method, ...)
+    if not widget then return nil end
+    local fn = readMember(widget, method)
+    if type(fn) ~= "function" then return nil end
+    local ok, result = pcall(fn, widget, ...)
+    if ok then return result end
+    ok, result = pcall(fn, ...)
+    if ok then return result end
+    return nil
+end
+
+local function openWidget(widget)
+    callWidgetMethod(widget, "Open")
+end
+
+local function slicePath(path, fromIdx, toIdx)
+    local out = {}
+    for i = fromIdx, toIdx do
+        out[#out + 1] = path[i]
+    end
+    return out
+end
+
+local function resolveThroughGear(widget, names, index)
+    if not widget or not names then return nil end
+    index = index or 1
+
+    if index > #names then
+        return widgetLooksLikeColorPicker(widget) and widget or nil
+    end
+
+    openWidget(widget)
+
+    local child = callWidgetMethod(widget, "Find", names[index])
+    if not child then return nil end
+
+    if index == #names then
+        if widgetLooksLikeColorPicker(child) then return child end
+        openWidget(child)
+        for _, colorName in ipairs({"Color", names[index]}) do
+            local nested = callWidgetMethod(child, "Find", colorName)
+            if nested and widgetLooksLikeColorPicker(nested) then
+                return nested
+            end
+        end
+        return nil
+    end
+
+    return resolveThroughGear(child, names, index + 1)
+end
+
+local function findWidgetDeep(path)
+    local n = #path
+    if n == 0 then return nil end
+
+    if n <= 8 then
+        local widget = tryMenuFind(unpackArgs(path))
+        if widget and widgetLooksLikeColorPicker(widget) then
+            return widget
+        end
+    end
+
+    if n > 8 then
+        local parent = tryMenuFind(unpackArgs(slicePath(path, 1, 8)))
+        local found = resolveThroughGear(parent, slicePath(path, 9, n))
+        if found then return found end
+    end
+
+    for peel = 1, math.min(4, n - 1) do
+        local prefixLen = n - peel
+        if prefixLen >= 1 and prefixLen <= 8 then
+            local parent = tryMenuFind(unpackArgs(slicePath(path, 1, prefixLen)))
+            local found = resolveThroughGear(parent, slicePath(path, prefixLen + 1, n))
+            if found then return found end
+        end
+    end
+
+    if n >= 7 then
+        local parent = tryMenuFind(unpackArgs(slicePath(path, 1, 7)))
+        local found = resolveThroughGear(parent, slicePath(path, 8, n))
+        if found then return found end
+    end
+
+    return nil
+end
+
+local warmedMenus = {}
+
+local function warmMenuOnce(key, ...)
+    if warmedMenus[key] then return end
+    warmedMenus[key] = true
+    openWidget(tryMenuFind(...))
+end
+
+local function warmMenusForSync()
+    if widgetGet(ui.syncGeneral, true) then
+        warmMenuOnce("radius-general", "General", "Main", "Radius", "Main")
+        warmMenuOnce("radius-info", "Info Screen", "Main", "Radius", "Main")
+        warmMenuOnce("beta", "General", "Beta")
+    end
+    if widgetGet(ui.syncCreeps, true) then
+        warmMenuOnce("lhh", "Creeps", "Main", "[v2]Last Hit Helper", "Main")
+    end
+    if not widgetGet(ui.syncHeroes, true) then return end
+
+    local seen = {}
+    for _, target in ipairs(targets) do
+        if target.group == "heroes" and target.path[1] == "Heroes" and target.path[2] == "Hero List" then
+            local hero = target.path[3]
+            if hero and not seen[hero] then
+                seen[hero] = true
+                warmMenuOnce("hero:" .. hero, "Heroes", "Hero List", hero)
+                warmMenuOnce("hero-main:" .. hero, "Heroes", "Hero List", hero, "Main Settings")
+            end
+        end
+    end
+end
+
 local function findWidget(target)
     if target.widget then return target.widget end
-    if not Menu or not Menu.Find or not target.path then return nil end
+    if not Menu or not Menu.Find then return nil end
 
-    local ok, widget = pcall(Menu.Find, unpackArgs(target.path))
-    if ok and widget then
-        target.widget = widget
-        return widget
+    local candidates = {target.path}
+    if type(target.alternatePaths) == "table" then
+        for _, path in ipairs(target.alternatePaths) do
+            candidates[#candidates + 1] = path
+        end
+    end
+
+    for _, path in ipairs(candidates) do
+        if path then
+            local widget = findWidgetDeep(path)
+            if widget then
+                target.widget = widget
+                target.path = path
+                return widget
+            end
+        end
     end
 
     return nil
@@ -454,10 +1044,10 @@ local function rememberOriginalColor(target, widget)
     if target.originalCaptured then return end
 
     local color = currentWidgetColor(widget)
+    if not color then return end
+
     target.originalCaptured = true
-    if color then
-        target.originalColor = colorWithAlpha(color, color.a or 255)
-    end
+    target.originalColor = colorWithAlpha(color, color.a or 255)
 end
 
 local function trySetterCall(methodName, fn, widget, color)
@@ -512,6 +1102,11 @@ local function setWidgetColor(widget, color)
         if ok and type(value) == "boolean" then
             return nil, "skipped boolean switch: nested color widget is not exposed by Menu.Find"
         end
+
+        local currentColor = ok and normalizeColor(value) or currentWidgetColor(widget)
+        if currentColor and colorsMatch(currentColor, color) then
+            return nil, "skipped already matches target color"
+        end
     end
 
     local lastError = "no supported setter"
@@ -555,19 +1150,19 @@ end
 local function printDebugList(title, list, limit)
     if not list or #list == 0 then return end
 
-    print(string.format("[ThemeColorSync] %s (%d):", title, #list))
+    logDebug(string.format("%s (%d):", title, #list))
     limit = limit or #list
     for i = 1, math.min(#list, limit) do
-        print("[ThemeColorSync]   " .. list[i])
+        logDebug("  " .. list[i])
     end
     if #list > limit then
-        print(string.format("[ThemeColorSync]   ... +%d more", #list - limit))
+        logDebug(string.format("  ... +%d more", #list - limit))
     end
 end
 
 local function printDebugReport(stats, includeApplied)
-    print(string.format(
-        "[ThemeColorSync] sync report: applied=%d missing=%d skipped=%d failed=%d",
+    logInfo(string.format(
+        "sync report: applied=%d missing=%d skipped=%d failed=%d",
         stats.applied or 0,
         stats.missing or 0,
         stats.skipped or 0,
@@ -583,8 +1178,8 @@ local function printDebugReport(stats, includeApplied)
 end
 
 local function printRestoreReport(stats)
-    print(string.format(
-        "[ThemeColorSync] restore report: restored=%d missing_original=%d missing=%d skipped=%d failed=%d",
+    logInfo(string.format(
+        "restore report: restored=%d missing_original=%d missing=%d skipped=%d failed=%d",
         stats.restored or 0,
         stats.missingOriginal or 0,
         stats.missing or 0,
@@ -598,10 +1193,21 @@ local function printRestoreReport(stats)
     printDebugList("restore failed", stats.failedList, 120)
 end
 
+local function showRestoreNotification(stats)
+    if not widgetGet(ui.notifyRestore, true) then return end
+    if not Render or not Render.CenteredNotification then return end
+
+    sc(Render.CenteredNotification, string.format(
+        "Theme Color Sync: restored %d colors",
+        stats.restored or 0
+    ), 2.5)
+end
+
 restoreOriginalColors = function()
     ensureMenu()
 
     local debugEnabled = widgetGet(ui.debug, false)
+    local respectGroups = widgetGet(ui.restoreRespectsGroups, true)
     local stats = {
         restored = 0,
         missingOriginal = 0,
@@ -615,9 +1221,12 @@ restoreOriginalColors = function()
     }
 
     state.syncPending = false
-    state.retryPending = false
 
     for _, target in ipairs(targets) do
+        if respectGroups and not groupEnabled(target.group) then
+            goto continue_restore
+        end
+
         if target.originalColor then
             local widget = findWidget(target)
             if widget then
@@ -645,24 +1254,38 @@ restoreOriginalColors = function()
             stats.missingOriginal = stats.missingOriginal + 1
             appendDebugLine(stats.missingOriginalList, target)
         end
+
+        ::continue_restore::
     end
 
     state.debugFullNext = true
     state.lastDebugSignature = nil
+    updateStatusLabel(string.format(
+        "Last restore: restored=%d missing=%d failed=%d",
+        stats.restored or 0,
+        stats.missing or 0,
+        stats.failed or 0
+    ))
 
     if debugEnabled then
         printRestoreReport(stats)
     end
+
+    showRestoreNotification(stats)
 end
 
 local function syncTargets(force, retryOnly)
     ensureMenu()
     if not widgetGet(ui.enabled, true) then
         state.stats = {applied = 0, missing = 0, skipped = 0, failed = 0}
+        updateStatusLabel("Last sync: disabled")
         return state.stats
     end
 
     local palette = buildPalette()
+    rememberPalette(palette)
+    warmMenusForSync()
+
     local debugEnabled = widgetGet(ui.debug, false)
     local stats = {
         applied = 0,
@@ -713,6 +1336,7 @@ local function syncTargets(force, retryOnly)
     end
 
     state.stats = stats
+    updateStatusLabel(formatSyncStats(stats))
 
     if debugEnabled then
         local signature = debugSignature(stats)
@@ -741,97 +1365,18 @@ local function scheduleRetry(stats)
     end
 end
 
-local function syncEvent()
+syncEvent = function()
     local stats = syncTargets(true, false)
     scheduleRetry(stats)
 end
 
-local function queueSync(delay)
+queueSync = function(delay)
+    local at = os.clock() + (delay or 0)
+    if not state.syncPending or at < (state.syncAt or 0) then
+        state.syncAt = at
+    end
     state.syncPending = true
-    state.syncAt = os.clock() + (delay or 0)
-    state.retryPending = false
 end
-
-addTarget("general", "primary", {"General", "Main", "FailSwitch", "Main", "General", "Indication", "Settings", "Color"})
-addTarget("general", "primary", {"General", "Main", "Procast Damage", "Main", "Indication Settings", "Default Color"})
-addTarget("general", "warn", {"General", "Main", "Procast Damage", "Main", "Indication Settings", "Warn Color"})
-addTarget("general", "lethal", {"General", "Main", "Procast Damage", "Main", "Indication Settings", "Lethal Color"})
-addTarget("general", "warn", {"General", "Main", "Procast Damage", "Main", "Chams & Glow Settings", "Warn Color"})
-addTarget("general", "lethal", {"General", "Main", "Procast Damage", "Main", "Chams & Glow Settings", "Lethal Color"})
-addTarget("general", "particle", {"Heroes", "", "Settings", "General", "Target Selection", "Draw Particle", "Draw Particle", "Particle Color"})
-addTarget("general", "soft", {"Info Screen", "Main", "Aggro Drawer", "Main", "Aggro Drawer", "Aura Color"})
-addTarget("general", "warn", {"Info Screen", "Main", "Info Overlay", "Main", "Top Overlay Settings", "What to Show", "Extra settings", "Coins Color"})
-addTarget("general", "primary", {"Info Screen", "Main", "Show Me More", "Main", "Units", "Show Illusions", "Illusions", "Original Color"})
-addTarget("general", "secondary", {"Info Screen", "Main", "Show Me More", "Main", "Units", "Show Illusions", "Illusions", "Illusion Color"})
-addTarget("general", "primary", {"Info Screen", "Main", "Visible Settings", "VBE", "Visible by Enemy", "Primary Color"})
-
-addTarget("creeps", "particle", {"Creeps", "Main", "[v2]Last Hit Helper", "Main", "Global Settings", "Work Radius", "Work Radius", "Work Radius Particle", "1234"})
-addTarget("creeps", "secondary", {"Creeps", "Main", "[v2]Last Hit Helper", "Main", "Global Settings", "Work Radius", "Work Radius", "Attack Range Particle", "Color"})
-addTarget("creeps", "danger", {"Creeps", "Main", "[v2]Last Hit Helper", "Main", "Global Settings", "Work Radius", "Work Radius", "Creep Aggro Range Particle", "Color"})
-addTarget("creeps", "primary", {"Creeps", "Main", "[v2]Last Hit Helper", "Main", "Visual Settings", "Work Indication", "Work Indication", "Color 1"})
-addTarget("creeps", "secondary", {"Creeps", "Main", "[v2]Last Hit Helper", "Main", "Visual Settings", "Work Indication", "Work Indication", "Color 2"})
-addTarget("creeps", "separator", {"Creeps", "Main", "[v2]Last Hit Helper", "Main", "Visual Settings", "HP Bars", "HP Bars", "Separator Color"})
-addTarget("creeps", "lethal", {"Creeps", "Main", "[v2]Last Hit Helper", "Main", "Visual Settings", "Lethal Marker", "Lethal Marker", "Lethal"})
-addTarget("creeps", "warn", {"Creeps", "Main", "[v2]Last Hit Helper", "Main", "Visual Settings", "Lethal Marker", "Lethal Marker", "Nearby Lethal"})
-addTarget("creeps", "ally", {"Creeps", "Main", "[v2]Last Hit Helper", "Main", "Visual Settings", "Lethal Marker", "Lethal Marker", "Ally Lethal"})
-addTarget("creeps", "secondary", {"Creeps", "Main", "[v2]Last Hit Helper", "Main", "Visual Settings", "Lethal Marker", "Lethal Marker", "Ally Nearby Lethal"})
-addTarget("creeps", "lethal", {"Creeps", "Main", "[v2]Last Hit Helper", "Main", "Skill Damage Indication", "Enable", "Enable", "Lethal"})
-addTarget("creeps", "warn", {"Creeps", "Main", "[v2]Last Hit Helper", "Main", "Skill Damage Indication", "Enable", "Enable", "Nearby Lethal"})
-
-addTarget("changer", "ally", {"Changer", "Main", "Color Changer", "Main", "Colors", "Ally Creep Color"})
-addTarget("changer", "enemy", {"Changer", "Main", "Color Changer", "Main", "Colors", "Enemy Creep Color"})
-addTarget("changer", "tree1", {"Changer", "Main", "Tree Changer", "Main", "Color Settings", "Tree Color 1"})
-addTarget("changer", "tree2", {"Changer", "Main", "Tree Changer", "Main", "Color Settings", "Tree Color 2"})
-addTarget("changer", "worldLight", {"Changer", "Main", "World", "Main", "World", "Light Color"})
-addTarget("changer", "worldAmbient", {"Changer", "Main", "World", "Main", "World", "Ambient Color"})
-addTarget("changer", "worldFow", {"Changer", "Main", "World", "Main", "World", "Fow Color"})
-
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Axe", "Main Settings", "Berserker's Call Information", "Show Info", "Show Info", "Color"})
-addTarget("heroes", "secondary", {"Heroes", "Hero List", "Axe", "Main Settings", "Berserker's Call Information", "Show Info", "Show Info", "Color##1"})
-addTarget("heroes", "particle", {"Heroes", "Hero List", "Broodmother", "Main Settings", "Web Settings", "Particle", "Particlecolor"})
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Crystal Maiden", "Main Settings", "Freezing Field Information", "Show Info", "Show Info", "Color"})
-addTarget("heroes", "secondary", {"Heroes", "Hero List", "Crystal Maiden", "Main Settings", "Freezing Field Information", "Show Info", "Show Info", "Color##1"})
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Dark Seer", "Main Settings", "Vacuum Information", "Show Info", "Show Info", "Color"})
-addTarget("heroes", "secondary", {"Heroes", "Hero List", "Dark Seer", "Main Settings", "Vacuum Information", "Show Info", "Show Info", "Color##1"})
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Dawnbreaker", "Main Settings", "Hero Settings", "Draw Meeting Point", "Draw Meeting Point", "Color"})
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Disruptor", "Main Settings", "Static Storm Information", "Show Info", "Show Info", "Color"})
-addTarget("heroes", "secondary", {"Heroes", "Hero List", "Disruptor", "Main Settings", "Static Storm Information", "Show Info", "Show Info", "Color##1"})
-addTarget("heroes", "particle", {"Heroes", "Hero List", "Disruptor", "Main Settings", "Glimpse Helper", "Draw Trajectory Line", "Draw Trajectory Linecolor"})
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Earthshaker", "Main Settings", "Echo Slam Information", "Show Info", "Show Info", "Color"})
-addTarget("heroes", "secondary", {"Heroes", "Hero List", "Earthshaker", "Main Settings", "Echo Slam Information", "Show Info", "Show Info", "Color##1"})
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Elder Titan", "Main Settings", "Spirit Settings", "Draw Collected Buffs Info", "Draw Collected Buffs Info", "Color"})
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Enigma", "Main Settings", "Black Hole Information", "Show Info", "Show Info", "Color"})
-addTarget("heroes", "secondary", {"Heroes", "Hero List", "Enigma", "Main Settings", "Black Hole Information", "Show Info", "Show Info", "Color##1"})
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Faceless Void", "Main Settings", "Chronosphere Information", "Show Info", "Show Info", "Color"})
-addTarget("heroes", "secondary", {"Heroes", "Hero List", "Faceless Void", "Main Settings", "Chronosphere Information", "Show Info", "Show Info", "Color##1"})
-addTarget("heroes", "particle", {"Heroes", "Hero List", "Invoker", "Auto Usage", "Sun Strike Indication", "Predict Indication", "Predict Indication", "Color"})
-addTarget("heroes", "particle", {"Heroes", "Hero List", "Keeper Of The Light", "Main Settings", "Hero Settings", "Show Illuminate Radius", "Show Illuminate Radiuscolor"})
-addTarget("heroes", "particle", {"Heroes", "Hero List", "Kunkka", "Main Settings", "Hero Settings", "Draw Tidebringer Range", "Draw Tidebringer Rangecolor"})
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Magnus", "Main Settings", "Skewer Combo Settings", "Skewer Set Position", "Skewer Set Position", "Color"})
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Magnus", "Main Settings", "Reverse Polarity Information", "Show Info", "Show Info", "Color"})
-addTarget("heroes", "secondary", {"Heroes", "Hero List", "Magnus", "Main Settings", "Reverse Polarity Information", "Show Info", "Show Info", "Color##1"})
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Mars", "Main Settings", "Arena of Blood Information", "Show Info", "Show Info", "Color"})
-addTarget("heroes", "secondary", {"Heroes", "Hero List", "Mars", "Main Settings", "Arena of Blood Information", "Show Info", "Show Info", "Color##1"})
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Outworld Destroyer", "Main Settings", "Sanity's Eclipse Information", "Show Info", "Show Info", "Color"})
-addTarget("heroes", "secondary", {"Heroes", "Hero List", "Outworld Destroyer", "Main Settings", "Sanity's Eclipse Information", "Show Info", "Show Info", "Color##1"})
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Puck", "Main Settings", "Dream Coil Information", "Show Info", "Show Info", "Color"})
-addTarget("heroes", "secondary", {"Heroes", "Hero List", "Puck", "Main Settings", "Dream Coil Information", "Show Info", "Show Info", "Color##1"})
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Pudge", "Main Settings", "Misc Settings", "Draw Specific Positions", "Draw Specific Positions", "Color"})
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Rubick", "Main Settings", "Berserker's Call Information", "Show Info", "Show Info", "Color"})
-addTarget("heroes", "secondary", {"Heroes", "Hero List", "Rubick", "Main Settings", "Berserker's Call Information", "Show Info", "Show Info", "Color##1"})
-addTarget("heroes", "muted", {"Heroes", "Hero List", "Shadow Fiend", "Main Settings", "Razes Settings", "Show Radiuses", "Show Radiuses", "Reloading"})
-addTarget("heroes", "active", {"Heroes", "Hero List", "Shadow Fiend", "Main Settings", "Razes Settings", "Show Radiuses", "Show Radiuses", "Castable"})
-addTarget("heroes", "danger", {"Heroes", "Hero List", "Shadow Fiend", "Main Settings", "Razes Settings", "Show Radiuses", "Show Radiuses", "Enemy in Radius"})
-addTarget("heroes", "particle", {"Heroes", "Hero List", "Techies", "Main Settings", "Hero Settings", "Draw Radius", "Draw Radius", "Color"})
-addTarget("heroes", "particle", {"Heroes", "Hero List", "Templar Assassin", "Main Settings", "Psionic Trap Radius", "Particle", "Particlecolor"})
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Tidehunter", "Main Settings", "Ravage Information", "Show Info", "Show Info", "Color"})
-addTarget("heroes", "secondary", {"Heroes", "Hero List", "Tidehunter", "Main Settings", "Ravage Information", "Show Info", "Show Info", "Color##1"})
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Treant Protector", "Main Settings", "Overgrowth Information", "Show Info", "Show Info", "Color"})
-addTarget("heroes", "secondary", {"Heroes", "Hero List", "Treant Protector", "Main Settings", "Overgrowth Information", "Show Info", "Show Info", "Color##1"})
-addTarget("heroes", "primary", {"Heroes", "Hero List", "Warlock", "Main Settings", "Chaotic Offering Information", "Show Info", "Show Info", "Color"})
-addTarget("heroes", "secondary", {"Heroes", "Hero List", "Warlock", "Main Settings", "Chaotic Offering Information", "Show Info", "Show Info", "Color##1"})
-addTarget("heroes", "particle", {"Heroes", "Hero List", "Weaver", "Main Settings", "Hero Settings", "Show Info", "Show Info", "Line Color"})
-addTarget("heroes", "particle", {"Heroes", "Hero List", "Windranger", "Main Settings", "Shackleshot Indication", "Line Particle", "Line Particlecolor"})
 
 function ThemeColorSync.OnScriptsLoaded()
     ensureMenu()
@@ -839,11 +1384,21 @@ function ThemeColorSync.OnScriptsLoaded()
 end
 
 function ThemeColorSync.OnThemeUpdate()
-    queueSync(THEME_SYNC_DELAY)
+    ensureMenu()
+
+    local palette = buildPalette()
+    if not paletteChanged(palette) then
+        return
+    end
+
+    rememberPalette(palette)
+    queueSync(syncDelaySeconds())
 end
 
 function ThemeColorSync.OnUpdate()
-    ensureMenu()
+    if not state.menuCreated then
+        ensureMenu()
+    end
 
     local debugEnabled = widgetGet(ui.debug, false)
     if debugEnabled and not state.debugWasEnabled then
