@@ -1,24 +1,69 @@
 --[[
-╭────────────────────────────────────────────────────────────╮
-│                                                            │
-│                 T H E M E   C O L O R   S Y N C            │
-│                                                            │
-│                     Script by Euphoria                     │
-│                                                            │
-╰────────────────────────────────────────────────────────────╯
+    Theme Color Sync
+    Keeps cheat menu color pickers aligned with Menu.Style() theme colors.
+    Syncs on theme change, supports restore, grouped toggles, and debug reports.
+    Script by Euphoria
 --]]
 
 ---@diagnostic disable: undefined-global, param-type-mismatch
 
-local ThemeColorSync = {}
+local Script = {}
+
+--#region Constants
+
+local LOG_PREFIX = "[ThemeColorSync] "
+local EVENT_RETRY_DELAY = 0.75
+local DEFAULT_SYNC_INTERVAL = 4
+
+local Icons = {
+    tab      = "\u{f53f}", -- palette
+    enable   = "\u{f011}", -- power
+    sync     = "\u{f021}", -- rotate
+    restore  = "\u{f2ea}", -- undo
+    general  = "\u{f05a}", -- info
+    creeps   = "\u{f1b0}", -- paw
+    heroes   = "\u{f007}", -- user
+    changer  = "\u{f1fc}", -- brush
+    danger   = "\u{f071}", -- warning
+    retry    = "\u{f021}", -- rotate
+    undo     = "\u{f0e2}", -- undo
+    groups   = "\u{f0c8}", -- checkbox
+    notify   = "\u{f0f3}", -- bell
+    debug    = "\u{f120}", -- terminal
+    verbose  = "\u{f03a}", -- list
+}
+
+--#endregion
+
+--#region State
+
+local State = {
+    menuCreated = false,
+    syncPending = false,
+    syncAt = 0,
+    retryPending = false,
+    retryAt = 0,
+    debugFullNext = true,
+    debugWasEnabled = false,
+    lastDebugSignature = nil,
+    lastPalettePrimary = nil,
+    lastPaletteSecondary = nil,
+    stats = {applied = 0, missing = 0, skipped = 0, failed = 0},
+    statusText = "Last sync: not run yet",
+}
+
+local UI = {}
+local Targets = {}
+
+--#endregion
+
+--#region Color utils
 
 local ThemeUtils = (function()
     local U = {}
 
-    local function readMember(value, key)
-        local ok, result = pcall(function()
-            return value[key]
-        end)
+    function U.readMember(value, key)
+        local ok, result = pcall(function() return value[key] end)
         if ok then return result end
         return nil
     end
@@ -43,7 +88,7 @@ local ThemeUtils = (function()
 
         local function channel(keys, fallback)
             for _, key in ipairs(keys) do
-                local raw = readMember(value, key)
+                local raw = U.readMember(value, key)
                 if type(raw) == "number" then
                     return raw
                 end
@@ -149,75 +194,33 @@ local ThemeUtils = (function()
     return U
 end)()
 
-local makeColor = ThemeUtils.makeColor
-local colorWithAlpha = ThemeUtils.colorWithAlpha
-local colorTable = ThemeUtils.colorTable
-local mixColors = ThemeUtils.mixColors
-local colorsSimilar = ThemeUtils.colorsSimilar
-local colorsMatch = ThemeUtils.colorsMatch
-local luminance = ThemeUtils.luminance
-local normalizeColor = ThemeUtils.normalizeColor
-local styleColorAny = ThemeUtils.styleColorAny
+local T = ThemeUtils
+local unpackArgs = table.unpack
+local LoggerInstance = Logger and Logger("ThemeColorSync") or nil
 
-local EVENT_RETRY_DELAY = 0.75
-local DEFAULT_SYNC_INTERVAL = 4
+--#endregion
 
-local unpackArgs = table.unpack or unpack
-local log = Logger and Logger("ThemeColorSync") or nil
-local ui = {}
-local restoreOriginalColors
-local syncEvent
-local queueSync
+--#region Targets
 
-local state = {
-    menuCreated = false,
-    syncPending = false,
-    syncAt = 0,
-    retryPending = false,
-    retryAt = 0,
-    debugFullNext = true,
-    debugWasEnabled = false,
-    lastDebugSignature = nil,
-    lastPalettePrimary = nil,
-    lastPaletteSecondary = nil,
-    stats = {applied = 0, missing = 0, skipped = 0, failed = 0},
-    statusText = "Last sync: not run yet"
-}
-
-local targets = {}
-
-local function sc(fn, ...)
+local function SafeCall(fn, ...)
     if type(fn) ~= "function" then return nil end
     local ok, result = pcall(fn, ...)
     if ok then return result end
     return nil
 end
 
-local function logInfo(message)
+local function Log(level, message)
     message = tostring(message)
-    if log and log.info then
-        local ok = pcall(log.info, log, message)
-        if not ok then
-            print("[ThemeColorSync] " .. message)
-        end
-    else
-        print("[ThemeColorSync] " .. message)
+    if LoggerInstance and LoggerInstance[level] then
+        if pcall(LoggerInstance[level], LoggerInstance, message) then return end
     end
+    print(LOG_PREFIX .. message)
 end
 
-local function logDebug(message)
-    message = tostring(message)
-    if log and log.debug then
-        local ok = pcall(log.debug, log, message)
-        if not ok then
-            print("[ThemeColorSync] " .. message)
-        end
-    else
-        print("[ThemeColorSync] " .. message)
-    end
-end
+local function LogInfo(message) Log("info", message) end
+local function LogDebug(message) Log("debug", message) end
 
-local function addTarget(group, role, path, alpha, alternatePaths)
+local function AddTarget(group, role, path, alpha, alternatePaths)
     local entry = {
         group = group,
         role = role,
@@ -227,10 +230,10 @@ local function addTarget(group, role, path, alpha, alternatePaths)
     if type(alternatePaths) == "table" and #alternatePaths > 0 then
         entry.alternatePaths = alternatePaths
     end
-    targets[#targets + 1] = entry
+    Targets[#Targets + 1] = entry
 end
 
-local function registerTargets(addTarget)
+local function RegisterTargets(addTarget)
     local LHH = {"Creeps", "Main", "[v2]Last Hit Helper", "Main"}
 
     local function heroPath(hero, ...)
@@ -514,33 +517,29 @@ local function registerTargets(addTarget)
     addHeroColor("Arc Warden", "muted", "Utility", "Drawings", "Drawings", "Spark Wraith Timer", "Color")
 end
 
-registerTargets(addTarget)
+RegisterTargets(AddTarget)
 
-local function widgetGet(widget, fallback)
+--#endregion
+
+--#region Palette
+
+local function WidgetGet(widget, fallback)
     if not widget or type(widget.Get) ~= "function" then return fallback end
-    local value = sc(widget.Get, widget)
+    local value = SafeCall(widget.Get, widget)
     if value == nil then return fallback end
     return value
 end
 
-local function syncDelaySeconds()
-    local tenths = widgetGet(ui.syncInterval, DEFAULT_SYNC_INTERVAL)
+local function SyncDelaySeconds()
+    local tenths = WidgetGet(UI.syncInterval, DEFAULT_SYNC_INTERVAL)
     if type(tenths) ~= "number" then
         tenths = DEFAULT_SYNC_INTERVAL
     end
     return math.max(0.05, tenths * 0.1)
 end
 
-local function readMember(value, key)
-    local ok, result = pcall(function()
-        return value[key]
-    end)
-    if ok then return result end
-    return nil
-end
-
-local function deriveSecondary(primary)
-    return makeColor(
+local function DeriveSecondary(primary)
+    return T.makeColor(
         (primary.g or 0) * 0.58 + (primary.b or 0) * 0.42,
         (primary.b or 0) * 0.58 + (primary.r or 0) * 0.42,
         (primary.r or 0) * 0.58 + (primary.g or 0) * 0.42,
@@ -548,108 +547,116 @@ local function deriveSecondary(primary)
     )
 end
 
-local function buildPalette()
-    local primary = styleColorAny(
+local function BuildPalette()
+    local primary = T.styleColorAny(
         {"primary", "accent", "combo_item_active", "indication_active", "highlight"},
-        makeColor(125, 190, 255, 255)
+        T.makeColor(125, 190, 255, 255)
     )
-    local secondary = styleColorAny(
+    local secondary = T.styleColorAny(
         {"secondary", "accent", "combo_item_active", "enabled_switch_background", "highlight"},
         nil
     )
 
-    if not secondary or colorsSimilar(primary, secondary) then
-        secondary = deriveSecondary(primary)
+    if not secondary or T.colorsSimilar(primary, secondary) then
+        secondary = DeriveSecondary(primary)
     end
 
-    local text = styleColorAny({"primary_widgets_text", "primary_text", "text", "section_group_text"}, makeColor(210, 218, 230, 255))
-    local active = styleColorAny({"indication_active", "combo_item_active", "active", "primary"}, makeColor(90, 235, 145, 255))
-    local preserveDanger = widgetGet(ui.preserveDangerRed, true)
+    local text = T.styleColorAny({"primary_widgets_text", "primary_text", "text", "section_group_text"}, T.makeColor(210, 218, 230, 255))
+    local active = T.styleColorAny({"indication_active", "combo_item_active", "active", "primary"}, T.makeColor(90, 235, 145, 255))
+    local preserveDanger = WidgetGet(UI.preserveDangerRed, true)
 
-    local dangerBase = makeColor(255, 82, 96, 255)
-    local warnBase = makeColor(255, 205, 85, 255)
-    local danger = preserveDanger and dangerBase or mixColors(primary, dangerBase, 0.52, 255)
-    local warn = preserveDanger and mixColors(primary, warnBase, 0.68, 255) or mixColors(primary, warnBase, 0.45, 255)
-    local muted = mixColors(text, makeColor(95, 100, 112, 255), 0.55, 255)
-    local lightTheme = luminance(styleColorAny({"popup_background", "additional_background", "background"}, makeColor(24, 26, 32, 255))) > 145
+    local dangerBase = T.makeColor(255, 82, 96, 255)
+    local warnBase = T.makeColor(255, 205, 85, 255)
+    local danger = preserveDanger and dangerBase or T.mixColors(primary, dangerBase, 0.52, 255)
+    local warn = preserveDanger and T.mixColors(primary, warnBase, 0.68, 255) or T.mixColors(primary, warnBase, 0.45, 255)
+    local muted = T.mixColors(text, T.makeColor(95, 100, 112, 255), 0.55, 255)
+    local lightTheme = T.luminance(T.styleColorAny({"popup_background", "additional_background", "background"}, T.makeColor(24, 26, 32, 255))) > 145
 
     return {
-        primary = colorWithAlpha(primary, 255),
-        secondary = colorWithAlpha(secondary, 255),
-        particle = colorWithAlpha(primary, 230),
-        soft = colorWithAlpha(mixColors(primary, secondary, 0.35, 255), 210),
+        primary = T.colorWithAlpha(primary, 255),
+        secondary = T.colorWithAlpha(secondary, 255),
+        particle = T.colorWithAlpha(primary, 230),
+        soft = T.colorWithAlpha(T.mixColors(primary, secondary, 0.35, 255), 210),
         warn = warn,
         lethal = danger,
         danger = danger,
-        active = colorWithAlpha(active, 255),
+        active = T.colorWithAlpha(active, 255),
         muted = muted,
-        separator = lightTheme and makeColor(45, 50, 60, 180) or colorWithAlpha(muted, 190),
-        ally = colorWithAlpha(active, 255),
+        separator = lightTheme and T.makeColor(45, 50, 60, 180) or T.colorWithAlpha(muted, 190),
+        ally = T.colorWithAlpha(active, 255),
         enemy = danger,
-        tree1 = mixColors(primary, makeColor(70, 160, 95, 255), 0.32, 255),
-        tree2 = mixColors(secondary, makeColor(65, 125, 105, 255), 0.38, 255),
-        worldLight = mixColors(primary, makeColor(255, 255, 255, 255), 0.45, 255),
-        worldAmbient = mixColors(secondary, makeColor(130, 138, 150, 255), 0.35, 255),
-        worldFow = makeColor((primary.r or 0) * 0.28, (primary.g or 0) * 0.28, (primary.b or 0) * 0.28, 255)
+        tree1 = T.mixColors(primary, T.makeColor(70, 160, 95, 255), 0.32, 255),
+        tree2 = T.mixColors(secondary, T.makeColor(65, 125, 105, 255), 0.38, 255),
+        worldLight = T.mixColors(primary, T.makeColor(255, 255, 255, 255), 0.45, 255),
+        worldAmbient = T.mixColors(secondary, T.makeColor(130, 138, 150, 255), 0.35, 255),
+        worldFow = T.makeColor((primary.r or 0) * 0.28, (primary.g or 0) * 0.28, (primary.b or 0) * 0.28, 255)
     }
 end
 
-local function paletteChanged(palette)
+local function PaletteChanged(palette)
     if not palette then return true end
-    if not state.lastPalettePrimary or not colorsMatch(state.lastPalettePrimary, palette.primary) then
+    if not State.lastPalettePrimary or not T.colorsMatch(State.lastPalettePrimary, palette.primary) then
         return true
     end
-    if not state.lastPaletteSecondary or not colorsMatch(state.lastPaletteSecondary, palette.secondary) then
+    if not State.lastPaletteSecondary or not T.colorsMatch(State.lastPaletteSecondary, palette.secondary) then
         return true
     end
     return false
 end
 
-local function rememberPalette(palette)
-    state.lastPalettePrimary = palette and palette.primary or nil
-    state.lastPaletteSecondary = palette and palette.secondary or nil
+local function RememberPalette(palette)
+    State.lastPalettePrimary = palette and palette.primary or nil
+    State.lastPaletteSecondary = palette and palette.secondary or nil
 end
 
-local function colorForTarget(target, palette)
+local function ColorForTarget(target, palette)
     local color = palette[target.role] or palette.primary
     if target.alpha then
-        return colorWithAlpha(color, target.alpha)
+        return T.colorWithAlpha(color, target.alpha)
     end
     return color
 end
 
-local function createTab()
-    local section = sc(Menu.Find, "Changer", "Main")
+--#endregion
+
+--#region Menu
+
+local SyncEvent
+local QueueSync
+local RestoreOriginalColors
+
+local function CreateTab()
+    local section = SafeCall(Menu.Find, "Changer", "Main")
     if not (section and section.Create) then
-        section = sc(Menu.Find, "Changer")
+        section = SafeCall(Menu.Find, "Changer")
     end
 
-    local tab = section and section.Create and sc(section.Create, section, "Theme Color Sync")
+    local tab = section and section.Create and SafeCall(section.Create, section, "Theme Color Sync")
     if tab then return tab end
 
-    tab = sc(Menu.Create, "Changer", "Main", "Theme Color Sync")
+    tab = SafeCall(Menu.Create, "Changer", "Main", "Theme Color Sync")
     if tab then return tab end
 
-    return sc(Menu.Create, "General", "Main", "Theme Color Sync")
+    return SafeCall(Menu.Create, "General", "Main", "Theme Color Sync")
 end
 
-local function makePage(tab, name)
+local function MakePage(tab, name)
     if tab and tab.Create then
-        local page = sc(tab.Create, tab, name)
+        local page = SafeCall(tab.Create, tab, name)
         if page then return page end
     end
-    return sc(Menu.Create, "Changer", "Main", "Theme Color Sync", name)
+    return SafeCall(Menu.Create, "Changer", "Main", "Theme Color Sync", name)
 end
 
-local function makeControlGroup(parent, name)
+local function MakeControlGroup(parent, name)
     if parent and parent.Create then
-        local group = sc(parent.Create, parent, name)
+        local group = SafeCall(parent.Create, parent, name)
         if group and group.Switch then
             return group
         end
 
         if group and group.Create then
-            local inner = sc(group.Create, group, name)
+            local inner = SafeCall(group.Create, group, name)
             if inner and inner.Switch then
                 return inner
             end
@@ -660,24 +667,26 @@ local function makeControlGroup(parent, name)
         end
     end
 
-    return sc(Menu.Create, "Changer", "Main", "Theme Color Sync", "Settings", name)
+    return SafeCall(Menu.Create, "Changer", "Main", "Theme Color Sync", "Settings", name)
 end
 
-local function withTooltip(widget, text)
+local function WithTooltip(widget, text)
     if widget and widget.ToolTip then
-        sc(widget.ToolTip, widget, text)
+        SafeCall(widget.ToolTip, widget, text)
     end
     return widget
 end
 
-local function updateStatusLabel(text)
-    state.statusText = text or state.statusText
-    if ui.statusLabel and ui.statusLabel.ForceLocalization then
-        sc(ui.statusLabel.ForceLocalization, ui.statusLabel, state.statusText)
+local function UpdateStatusLabel(text)
+    State.statusText = text or State.statusText
+    local label = UI.statusLabel
+    local forceLocalization = label and T.readMember(label, "ForceLocalization")
+    if type(forceLocalization) == "function" then
+        SafeCall(forceLocalization, label, State.statusText)
     end
 end
 
-local function formatSyncStats(stats)
+local function FormatSyncStats(stats)
     return string.format(
         "Last sync: applied=%d missing=%d skipped=%d failed=%d",
         stats.applied or 0,
@@ -687,137 +696,135 @@ local function formatSyncStats(stats)
     )
 end
 
-local function bindSyncCallback(widget)
+local function BindSyncCallback(widget)
     if not widget or not widget.SetCallback then return end
-    sc(widget.SetCallback, widget, function()
-        queueSync(0)
+    SafeCall(widget.SetCallback, widget, function()
+        QueueSync(0)
     end)
 end
 
-local function ensureMenu()
-    if state.menuCreated or not Menu then return end
+local function EnsureMenu()
+    if State.menuCreated or not Menu then return end
 
-    local tab = createTab()
-    local page = makePage(tab, "Settings")
-    local main = makeControlGroup(page, "Main")
-    local groups = makeControlGroup(page, "Groups")
-    local tuning = makeControlGroup(page, "Tuning")
+    local tab = CreateTab()
+    local page = MakePage(tab, "Settings")
+    local main = MakeControlGroup(page, "Main")
+    local groups = MakeControlGroup(page, "Groups")
+    local tuning = MakeControlGroup(page, "Tuning")
 
     if tab and tab.Icon then
-        sc(tab.Icon, tab, "\u{f53f}")
+        SafeCall(tab.Icon, tab, Icons.tab)
     end
 
-    ui.enabled = withTooltip(
-        main and main.Switch and main:Switch("Enable", true, "\u{f011}"),
+    UI.enabled = WithTooltip(
+        main and main.Switch and main:Switch("Enable", true, Icons.enable),
         "Synchronizes supported visual color pickers with the current cheat theme."
     )
-    ui.syncNow = withTooltip(
+    UI.syncNow = WithTooltip(
         main and main.Button and main:Button("Sync now", function()
-            if syncEvent then
-                syncEvent()
-            end
+            SyncEvent()
         end, true, 1.0),
         "Runs theme color synchronization immediately."
     )
-    if ui.syncNow and ui.syncNow.Icon then
-        sc(ui.syncNow.Icon, ui.syncNow, "\u{f021}")
+    if UI.syncNow and UI.syncNow.Icon then
+        SafeCall(UI.syncNow.Icon, UI.syncNow, Icons.sync)
     end
-    ui.restoreOriginal = withTooltip(
+    UI.restoreOriginal = WithTooltip(
         main and main.Button and main:Button("Restore original colors", function()
-            if restoreOriginalColors then
-                restoreOriginalColors()
-            end
+            RestoreOriginalColors()
         end, true, 1.0),
         "Restores the colors captured before Theme Color Sync changed them."
     )
-    if ui.restoreOriginal and ui.restoreOriginal.Icon then
-        sc(ui.restoreOriginal.Icon, ui.restoreOriginal, "\u{f2ea}")
+    if UI.restoreOriginal and UI.restoreOriginal.Icon then
+        SafeCall(UI.restoreOriginal.Icon, UI.restoreOriginal, Icons.restore)
     end
-    ui.statusLabel = main and main.Label and main:Label(state.statusText)
+    UI.statusLabel = main and main.Label and main:Label(State.statusText)
 
-    ui.syncGeneral = withTooltip(
-        groups and groups.Switch and groups:Switch("General / Info Screen", true, "\u{f05a}"),
+    UI.syncGeneral = WithTooltip(
+        groups and groups.Switch and groups:Switch("General / Info Screen", true, Icons.general),
         "FailSwitch, procast damage, target particle and info screen colors."
     )
-    ui.syncCreeps = withTooltip(
-        groups and groups.Switch and groups:Switch("Creeps", true, "\u{f1b0}"),
+    UI.syncCreeps = WithTooltip(
+        groups and groups.Switch and groups:Switch("Creeps", true, Icons.creeps),
         "Last Hit Helper and creep visual colors."
     )
-    ui.syncHeroes = withTooltip(
-        groups and groups.Switch and groups:Switch("Heroes", true, "\u{f007}"),
+    UI.syncHeroes = WithTooltip(
+        groups and groups.Switch and groups:Switch("Heroes", true, Icons.heroes),
         "Hero script radius, particle and info colors."
     )
-    ui.syncChanger = withTooltip(
-        groups and groups.Switch and groups:Switch("Changer / World", true, "\u{f1fc}"),
+    UI.syncChanger = WithTooltip(
+        groups and groups.Switch and groups:Switch("Changer / World", true, Icons.changer),
         "Creep color changer, tree colors, world colors and watermark."
     )
-    ui.preserveDangerRed = withTooltip(
-        tuning and tuning.Switch and tuning:Switch("Preserve danger red", true, "\u{f071}"),
+    UI.preserveDangerRed = WithTooltip(
+        tuning and tuning.Switch and tuning:Switch("Preserve danger red", true, Icons.danger),
         "Keeps lethal and danger indicators readable instead of fully tinting them into the theme color."
     )
-    ui.retryMissing = withTooltip(
-        tuning and tuning.Switch and tuning:Switch("Retry missing once", true, "\u{f021}"),
+    UI.retryMissing = WithTooltip(
+        tuning and tuning.Switch and tuning:Switch("Retry missing once", true, Icons.retry),
         "Runs one delayed retry only for widgets that were missing or failed during the sync."
     )
-    ui.restoreOnDisable = withTooltip(
-        tuning and tuning.Switch and tuning:Switch("Restore on disable", false, "\u{f0e2}"),
+    UI.restoreOnDisable = WithTooltip(
+        tuning and tuning.Switch and tuning:Switch("Restore on disable", false, Icons.undo),
         "Restores captured original colors when Enable is turned off."
     )
-    ui.restoreRespectsGroups = withTooltip(
-        tuning and tuning.Switch and tuning:Switch("Restore respects groups", true, "\u{f0c8}"),
+    UI.restoreRespectsGroups = WithTooltip(
+        tuning and tuning.Switch and tuning:Switch("Restore respects groups", true, Icons.groups),
         "Only restores widgets from enabled sync groups."
     )
-    ui.notifyRestore = withTooltip(
-        tuning and tuning.Switch and tuning:Switch("Notify on restore", true, "\u{f0f3}"),
+    UI.notifyRestore = WithTooltip(
+        tuning and tuning.Switch and tuning:Switch("Notify on restore", true, Icons.notify),
         "Shows a centered notification after restore completes."
     )
-    ui.syncInterval = withTooltip(
+    UI.syncInterval = WithTooltip(
         tuning and tuning.Slider and tuning:Slider("Sync interval", 1, 10, DEFAULT_SYNC_INTERVAL, function(v) return v .. " (×0.1s)" end),
         "Delay before sync after theme change, in tenths of a second (4 = 0.4s)."
     )
-    ui.debug = withTooltip(
-        tuning and tuning.Switch and tuning:Switch("Debug log", false, "\u{f120}"),
+    UI.debug = WithTooltip(
+        tuning and tuning.Switch and tuning:Switch("Debug log", false, Icons.debug),
         "Prints a compact sync report after each pass."
     )
-    ui.verboseDebug = withTooltip(
-        tuning and tuning.Switch and tuning:Switch("Verbose debug list", false, "\u{f03a}"),
+    UI.verboseDebug = WithTooltip(
+        tuning and tuning.Switch and tuning:Switch("Verbose debug list", false, Icons.verbose),
         "Also prints the full list of successfully applied color widgets."
     )
 
-    bindSyncCallback(ui.syncGeneral)
-    bindSyncCallback(ui.syncCreeps)
-    bindSyncCallback(ui.syncHeroes)
-    bindSyncCallback(ui.syncChanger)
-    bindSyncCallback(ui.preserveDangerRed)
-    bindSyncCallback(ui.syncInterval)
+    BindSyncCallback(UI.syncGeneral)
+    BindSyncCallback(UI.syncCreeps)
+    BindSyncCallback(UI.syncHeroes)
+    BindSyncCallback(UI.syncChanger)
+    BindSyncCallback(UI.preserveDangerRed)
+    BindSyncCallback(UI.syncInterval)
 
-    if ui.enabled and ui.enabled.SetCallback then
-        sc(ui.enabled.SetCallback, ui.enabled, function()
-            if not widgetGet(ui.enabled, true) and widgetGet(ui.restoreOnDisable, false) then
-                if restoreOriginalColors then
-                    restoreOriginalColors()
-                end
+    if UI.enabled and UI.enabled.SetCallback then
+        SafeCall(UI.enabled.SetCallback, UI.enabled, function()
+            if not WidgetGet(UI.enabled, true) and WidgetGet(UI.restoreOnDisable, false) then
+                RestoreOriginalColors()
             else
-                queueSync(0)
+                QueueSync(0)
             end
         end)
     end
 
-    state.menuCreated = tab ~= nil
+    State.menuCreated = tab ~= nil
 end
 
-local function groupEnabled(group)
-    if group == "general" then return widgetGet(ui.syncGeneral, true) end
-    if group == "creeps" then return widgetGet(ui.syncCreeps, true) end
-    if group == "heroes" then return widgetGet(ui.syncHeroes, true) end
-    if group == "changer" then return widgetGet(ui.syncChanger, true) end
+--#endregion
+
+--#region Widget lookup
+
+local function GroupEnabled(group)
+    if group == "general" then return WidgetGet(UI.syncGeneral, true) end
+    if group == "creeps" then return WidgetGet(UI.syncCreeps, true) end
+    if group == "heroes" then return WidgetGet(UI.syncHeroes, true) end
+    if group == "changer" then return WidgetGet(UI.syncChanger, true) end
     return true
 end
 
-local function widgetLooksLikeColorPicker(widget)
+local function WidgetLooksLikeColorPicker(widget)
     if not widget then return false end
 
-    local getFn = readMember(widget, "Get")
+    local getFn = T.readMember(widget, "Get")
     if type(getFn) ~= "function" then return true end
 
     local ok, value = pcall(getFn, widget)
@@ -826,19 +833,19 @@ local function widgetLooksLikeColorPicker(widget)
     end
     if not ok then return true end
     if type(value) == "boolean" then return false end
-    return normalizeColor(value) ~= nil or value == nil
+    return T.normalizeColor(value) ~= nil or value == nil
 end
 
-local function tryMenuFind(...)
+local function TryMenuFind(...)
     if not Menu or not Menu.Find then return nil end
     local ok, result = pcall(Menu.Find, ...)
     if ok then return result end
     return nil
 end
 
-local function callWidgetMethod(widget, method, ...)
+local function CallWidgetMethod(widget, method, ...)
     if not widget then return nil end
-    local fn = readMember(widget, method)
+    local fn = T.readMember(widget, method)
     if type(fn) ~= "function" then return nil end
     local ok, result = pcall(fn, widget, ...)
     if ok then return result end
@@ -847,11 +854,7 @@ local function callWidgetMethod(widget, method, ...)
     return nil
 end
 
-local function openWidget(widget)
-    callWidgetMethod(widget, "Open")
-end
-
-local function slicePath(path, fromIdx, toIdx)
+local function SlicePath(path, fromIdx, toIdx)
     local out = {}
     for i = fromIdx, toIdx do
         out[#out + 1] = path[i]
@@ -859,102 +862,67 @@ local function slicePath(path, fromIdx, toIdx)
     return out
 end
 
-local function resolveThroughGear(widget, names, index)
+local function ResolveThroughGear(widget, names, index)
     if not widget or not names then return nil end
     index = index or 1
 
     if index > #names then
-        return widgetLooksLikeColorPicker(widget) and widget or nil
+        return WidgetLooksLikeColorPicker(widget) and widget or nil
     end
 
-    openWidget(widget)
-
-    local child = callWidgetMethod(widget, "Find", names[index])
+    local child = CallWidgetMethod(widget, "Find", names[index])
     if not child then return nil end
 
     if index == #names then
-        if widgetLooksLikeColorPicker(child) then return child end
-        openWidget(child)
+        if WidgetLooksLikeColorPicker(child) then return child end
         for _, colorName in ipairs({"Color", names[index]}) do
-            local nested = callWidgetMethod(child, "Find", colorName)
-            if nested and widgetLooksLikeColorPicker(nested) then
+            local nested = CallWidgetMethod(child, "Find", colorName)
+            if nested and WidgetLooksLikeColorPicker(nested) then
                 return nested
             end
         end
         return nil
     end
 
-    return resolveThroughGear(child, names, index + 1)
+    return ResolveThroughGear(child, names, index + 1)
 end
 
-local function findWidgetDeep(path)
+local function FindWidgetDeep(path)
     local n = #path
     if n == 0 then return nil end
 
     if n <= 8 then
-        local widget = tryMenuFind(unpackArgs(path))
-        if widget and widgetLooksLikeColorPicker(widget) then
+        local widget = TryMenuFind(unpackArgs(path))
+        if widget and WidgetLooksLikeColorPicker(widget) then
             return widget
         end
     end
 
     if n > 8 then
-        local parent = tryMenuFind(unpackArgs(slicePath(path, 1, 8)))
-        local found = resolveThroughGear(parent, slicePath(path, 9, n))
+        local parent = TryMenuFind(unpackArgs(SlicePath(path, 1, 8)))
+        local found = ResolveThroughGear(parent, SlicePath(path, 9, n))
         if found then return found end
     end
 
     for peel = 1, math.min(4, n - 1) do
         local prefixLen = n - peel
         if prefixLen >= 1 and prefixLen <= 8 then
-            local parent = tryMenuFind(unpackArgs(slicePath(path, 1, prefixLen)))
-            local found = resolveThroughGear(parent, slicePath(path, prefixLen + 1, n))
+            local parent = TryMenuFind(unpackArgs(SlicePath(path, 1, prefixLen)))
+            local found = ResolveThroughGear(parent, SlicePath(path, prefixLen + 1, n))
             if found then return found end
         end
     end
 
     if n >= 7 then
-        local parent = tryMenuFind(unpackArgs(slicePath(path, 1, 7)))
-        local found = resolveThroughGear(parent, slicePath(path, 8, n))
+        local parent = TryMenuFind(unpackArgs(SlicePath(path, 1, 7)))
+        local found = ResolveThroughGear(parent, SlicePath(path, 8, n))
         if found then return found end
     end
 
     return nil
 end
 
-local warmedMenus = {}
-
-local function warmMenuOnce(key, ...)
-    if warmedMenus[key] then return end
-    warmedMenus[key] = true
-    openWidget(tryMenuFind(...))
-end
-
-local function warmMenusForSync()
-    if widgetGet(ui.syncGeneral, true) then
-        warmMenuOnce("radius-general", "General", "Main", "Radius", "Main")
-        warmMenuOnce("radius-info", "Info Screen", "Main", "Radius", "Main")
-        warmMenuOnce("beta", "General", "Beta")
-    end
-    if widgetGet(ui.syncCreeps, true) then
-        warmMenuOnce("lhh", "Creeps", "Main", "[v2]Last Hit Helper", "Main")
-    end
-    if not widgetGet(ui.syncHeroes, true) then return end
-
-    local seen = {}
-    for _, target in ipairs(targets) do
-        if target.group == "heroes" and target.path[1] == "Heroes" and target.path[2] == "Hero List" then
-            local hero = target.path[3]
-            if hero and not seen[hero] then
-                seen[hero] = true
-                warmMenuOnce("hero:" .. hero, "Heroes", "Hero List", hero)
-                warmMenuOnce("hero-main:" .. hero, "Heroes", "Hero List", hero, "Main Settings")
-            end
-        end
-    end
-end
-
-local function findWidget(target)
+local function FindWidget(target)
     if target.widget then return target.widget end
     if not Menu or not Menu.Find then return nil end
 
@@ -967,7 +935,7 @@ local function findWidget(target)
 
     for _, path in ipairs(candidates) do
         if path then
-            local widget = findWidgetDeep(path)
+            local widget = FindWidgetDeep(path)
             if widget then
                 target.widget = widget
                 target.path = path
@@ -979,11 +947,11 @@ local function findWidget(target)
     return nil
 end
 
-local function describeValue(value)
+local function DescribeValue(value)
     if value == nil then return "nil" end
 
     local valueType = type(value)
-    local normalized = normalizeColor(value)
+    local normalized = T.normalizeColor(value)
     if normalized then
         return string.format(
             "color(%d,%d,%d,%d)",
@@ -1001,22 +969,22 @@ local function describeValue(value)
     return valueType .. ":" .. text
 end
 
-local function failedWidgetInfo(widget, lastError)
+local function FailedWidgetInfo(widget, lastError)
     local methods = {}
     for _, name in ipairs({"Get", "Set", "SetColor", "Color", "SetValue", "SetRGBA", "SetVector"}) do
-        if type(readMember(widget, name)) == "function" then
+        if type(T.readMember(widget, name)) == "function" then
             methods[#methods + 1] = name
         end
     end
 
     local getInfo = "none"
-    local getFn = readMember(widget, "Get")
+    local getFn = T.readMember(widget, "Get")
     if type(getFn) == "function" then
         local ok, value = pcall(getFn, widget)
         if not ok then
             ok, value = pcall(getFn)
         end
-        getInfo = ok and describeValue(value) or "error:" .. tostring(value)
+        getInfo = ok and DescribeValue(value) or "error:" .. tostring(value)
     end
 
     return string.format(
@@ -1028,8 +996,8 @@ local function failedWidgetInfo(widget, lastError)
     )
 end
 
-local function currentWidgetColor(widget)
-    local getFn = readMember(widget, "Get")
+local function CurrentWidgetColor(widget)
+    local getFn = T.readMember(widget, "Get")
     if type(getFn) ~= "function" then return nil end
 
     local ok, value = pcall(getFn, widget)
@@ -1037,21 +1005,21 @@ local function currentWidgetColor(widget)
         ok, value = pcall(getFn)
     end
 
-    return ok and normalizeColor(value) or nil
+    return ok and T.normalizeColor(value) or nil
 end
 
-local function rememberOriginalColor(target, widget)
+local function RememberOriginalColor(target, widget)
     if target.originalCaptured then return end
 
-    local color = currentWidgetColor(widget)
+    local color = CurrentWidgetColor(widget)
     if not color then return end
 
     target.originalCaptured = true
-    target.originalColor = colorWithAlpha(color, color.a or 255)
+    target.originalColor = T.colorWithAlpha(color, color.a or 255)
 end
 
-local function trySetterCall(methodName, fn, widget, color)
-    local rgba = colorTable(color)
+local function TrySetterCall(methodName, fn, widget, color)
+    local rgba = T.colorTable(color)
     local attempts = {
         {methodName .. "(self, Color)", function() return fn(widget, color) end},
         {methodName .. "(Color)", function() return fn(color) end},
@@ -1068,14 +1036,14 @@ local function trySetterCall(methodName, fn, widget, color)
             if result == false then
                 lastError = attempt[1] .. ": returned false"
             else
-                local resultColor = normalizeColor(result)
-                if resultColor and colorsMatch(resultColor, color) then
+                local resultColor = T.normalizeColor(result)
+                if resultColor and T.colorsMatch(resultColor, color) then
                     return true, attempt[1], result
                 end
 
-                local currentColor = currentWidgetColor(widget)
-                if currentColor and not colorsMatch(currentColor, color) then
-                    lastError = attempt[1] .. ": current value stayed " .. describeValue(currentColor)
+                local currentColor = CurrentWidgetColor(widget)
+                if currentColor and not T.colorsMatch(currentColor, color) then
+                    lastError = attempt[1] .. ": current value stayed " .. DescribeValue(currentColor)
                 elseif methodName == "Color" then
                     lastError = attempt[1] .. ": unverified Color() method"
                 else
@@ -1090,10 +1058,10 @@ local function trySetterCall(methodName, fn, widget, color)
     return false, lastError
 end
 
-local function setWidgetColor(widget, color)
+local function SetWidgetColor(widget, color)
     if not widget then return false, "widget is nil" end
 
-    local getFn = readMember(widget, "Get")
+    local getFn = T.readMember(widget, "Get")
     if type(getFn) == "function" then
         local ok, value = pcall(getFn, widget)
         if not ok then
@@ -1103,17 +1071,17 @@ local function setWidgetColor(widget, color)
             return nil, "skipped boolean switch: nested color widget is not exposed by Menu.Find"
         end
 
-        local currentColor = ok and normalizeColor(value) or currentWidgetColor(widget)
-        if currentColor and colorsMatch(currentColor, color) then
+        local currentColor = ok and T.normalizeColor(value) or CurrentWidgetColor(widget)
+        if currentColor and T.colorsMatch(currentColor, color) then
             return nil, "skipped already matches target color"
         end
     end
 
     local lastError = "no supported setter"
     for _, methodName in ipairs({"Set", "SetColor", "SetValue", "SetRGBA", "SetVector", "Color"}) do
-        local fn = readMember(widget, methodName)
+        local fn = T.readMember(widget, methodName)
         if type(fn) == "function" then
-            local ok, usedOrError = trySetterCall(methodName, fn, widget, color)
+            local ok, usedOrError = TrySetterCall(methodName, fn, widget, color)
             if ok then
                 return true, usedOrError
             end
@@ -1121,20 +1089,24 @@ local function setWidgetColor(widget, color)
         end
     end
 
-    return false, failedWidgetInfo(widget, lastError)
+    return false, FailedWidgetInfo(widget, lastError)
 end
 
-local function pathLabel(path)
+--#endregion
+
+--#region Debug
+
+local function PathLabel(path)
     return table.concat(path or {}, " > ")
 end
 
-local function appendDebugLine(list, target)
+local function AppendDebugLine(list, target)
     if not list then return end
     local extra = target.debugInfo and (" | " .. target.debugInfo) or ""
-    list[#list + 1] = string.format("[%s/%s] %s%s", target.group or "?", target.role or "?", pathLabel(target.path), extra)
+    list[#list + 1] = string.format("[%s/%s] %s%s", target.group or "?", target.role or "?", PathLabel(target.path), extra)
 end
 
-local function debugSignature(stats)
+local function DebugSignature(stats)
     return string.format(
         "a:%d|m:%d:%s|s:%d:%s|f:%d:%s",
         stats.applied or 0,
@@ -1147,21 +1119,21 @@ local function debugSignature(stats)
     )
 end
 
-local function printDebugList(title, list, limit)
+local function PrintDebugList(title, list, limit)
     if not list or #list == 0 then return end
 
-    logDebug(string.format("%s (%d):", title, #list))
+    LogDebug(string.format("%s (%d):", title, #list))
     limit = limit or #list
     for i = 1, math.min(#list, limit) do
-        logDebug("  " .. list[i])
+        LogDebug("  " .. list[i])
     end
     if #list > limit then
-        logDebug(string.format("  ... +%d more", #list - limit))
+        LogDebug(string.format("  ... +%d more", #list - limit))
     end
 end
 
-local function printDebugReport(stats, includeApplied)
-    logInfo(string.format(
+local function PrintDebugReport(stats, includeApplied)
+    LogInfo(string.format(
         "sync report: applied=%d missing=%d skipped=%d failed=%d",
         stats.applied or 0,
         stats.missing or 0,
@@ -1170,15 +1142,15 @@ local function printDebugReport(stats, includeApplied)
     ))
 
     if includeApplied then
-        printDebugList("applied", stats.appliedList, 120)
+        PrintDebugList("applied", stats.appliedList, 120)
     end
-    printDebugList("missing", stats.missingList, 120)
-    printDebugList("skipped", stats.skippedList, 120)
-    printDebugList("failed", stats.failedList, 120)
+    PrintDebugList("missing", stats.missingList, 120)
+    PrintDebugList("skipped", stats.skippedList, 120)
+    PrintDebugList("failed", stats.failedList, 120)
 end
 
-local function printRestoreReport(stats)
-    logInfo(string.format(
+local function PrintRestoreReport(stats)
+    LogInfo(string.format(
         "restore report: restored=%d missing_original=%d missing=%d skipped=%d failed=%d",
         stats.restored or 0,
         stats.missingOriginal or 0,
@@ -1187,27 +1159,31 @@ local function printRestoreReport(stats)
         stats.failed or 0
     ))
 
-    printDebugList("restore missing original", stats.missingOriginalList, 120)
-    printDebugList("restore missing", stats.missingList, 120)
-    printDebugList("restore skipped", stats.skippedList, 120)
-    printDebugList("restore failed", stats.failedList, 120)
+    PrintDebugList("restore missing original", stats.missingOriginalList, 120)
+    PrintDebugList("restore missing", stats.missingList, 120)
+    PrintDebugList("restore skipped", stats.skippedList, 120)
+    PrintDebugList("restore failed", stats.failedList, 120)
 end
 
-local function showRestoreNotification(stats)
-    if not widgetGet(ui.notifyRestore, true) then return end
+local function ShowRestoreNotification(stats)
+    if not WidgetGet(UI.notifyRestore, true) then return end
     if not Render or not Render.CenteredNotification then return end
 
-    sc(Render.CenteredNotification, string.format(
+    SafeCall(Render.CenteredNotification, string.format(
         "Theme Color Sync: restored %d colors",
         stats.restored or 0
     ), 2.5)
 end
 
-restoreOriginalColors = function()
-    ensureMenu()
+--#endregion
 
-    local debugEnabled = widgetGet(ui.debug, false)
-    local respectGroups = widgetGet(ui.restoreRespectsGroups, true)
+--#region Sync
+
+RestoreOriginalColors = function()
+    EnsureMenu()
+
+    local debugEnabled = WidgetGet(UI.debug, false)
+    local respectGroups = WidgetGet(UI.restoreRespectsGroups, true)
     local stats = {
         restored = 0,
         missingOriginal = 0,
@@ -1220,47 +1196,47 @@ restoreOriginalColors = function()
         failedList = debugEnabled and {} or nil
     }
 
-    state.syncPending = false
+    State.syncPending = false
 
-    for _, target in ipairs(targets) do
-        if respectGroups and not groupEnabled(target.group) then
+    for _, target in ipairs(Targets) do
+        if respectGroups and not GroupEnabled(target.group) then
             goto continue_restore
         end
 
         if target.originalColor then
-            local widget = findWidget(target)
+            local widget = FindWidget(target)
             if widget then
-                local ok, debugInfo = setWidgetColor(widget, target.originalColor)
+                local ok, debugInfo = SetWidgetColor(widget, target.originalColor)
                 target.debugInfo = nil
                 if ok == true then
                     stats.restored = stats.restored + 1
                 elseif ok == nil then
                     stats.skipped = stats.skipped + 1
                     target.debugInfo = debugInfo
-                    appendDebugLine(stats.skippedList, target)
+                    AppendDebugLine(stats.skippedList, target)
                     target.debugInfo = nil
                 else
                     target.widget = nil
                     stats.failed = stats.failed + 1
                     target.debugInfo = debugInfo
-                    appendDebugLine(stats.failedList, target)
+                    AppendDebugLine(stats.failedList, target)
                     target.debugInfo = nil
                 end
             else
                 stats.missing = stats.missing + 1
-                appendDebugLine(stats.missingList, target)
+                AppendDebugLine(stats.missingList, target)
             end
         else
             stats.missingOriginal = stats.missingOriginal + 1
-            appendDebugLine(stats.missingOriginalList, target)
+            AppendDebugLine(stats.missingOriginalList, target)
         end
 
         ::continue_restore::
     end
 
-    state.debugFullNext = true
-    state.lastDebugSignature = nil
-    updateStatusLabel(string.format(
+    State.debugFullNext = true
+    State.lastDebugSignature = nil
+    UpdateStatusLabel(string.format(
         "Last restore: restored=%d missing=%d failed=%d",
         stats.restored or 0,
         stats.missing or 0,
@@ -1268,25 +1244,24 @@ restoreOriginalColors = function()
     ))
 
     if debugEnabled then
-        printRestoreReport(stats)
+        PrintRestoreReport(stats)
     end
 
-    showRestoreNotification(stats)
+    ShowRestoreNotification(stats)
 end
 
-local function syncTargets(force, retryOnly)
-    ensureMenu()
-    if not widgetGet(ui.enabled, true) then
-        state.stats = {applied = 0, missing = 0, skipped = 0, failed = 0}
-        updateStatusLabel("Last sync: disabled")
-        return state.stats
+local function SyncTargets(force, retryOnly)
+    EnsureMenu()
+    if not WidgetGet(UI.enabled, true) then
+        State.stats = {applied = 0, missing = 0, skipped = 0, failed = 0}
+        UpdateStatusLabel("Last sync: disabled")
+        return State.stats
     end
 
-    local palette = buildPalette()
-    rememberPalette(palette)
-    warmMenusForSync()
+    local palette = BuildPalette()
+    RememberPalette(palette)
 
-    local debugEnabled = widgetGet(ui.debug, false)
+    local debugEnabled = WidgetGet(UI.debug, false)
     local stats = {
         applied = 0,
         missing = 0,
@@ -1298,12 +1273,12 @@ local function syncTargets(force, retryOnly)
         failedList = debugEnabled and {} or nil
     }
 
-    for _, target in ipairs(targets) do
-        if groupEnabled(target.group) and (not retryOnly or target.needsRetry) then
-            local widget = findWidget(target)
+    for _, target in ipairs(Targets) do
+        if GroupEnabled(target.group) and (not retryOnly or target.needsRetry) then
+            local widget = FindWidget(target)
             if widget then
-                rememberOriginalColor(target, widget)
-                local ok, debugInfo = setWidgetColor(widget, colorForTarget(target, palette))
+                RememberOriginalColor(target, widget)
+                local ok, debugInfo = SetWidgetColor(widget, ColorForTarget(target, palette))
                 target.debugInfo = nil
                 if ok == true then
                     target.needsRetry = false
@@ -1311,112 +1286,118 @@ local function syncTargets(force, retryOnly)
                     if debugInfo and debugInfo ~= "Set(self, Color)" then
                         target.debugInfo = "setter=" .. tostring(debugInfo)
                     end
-                    appendDebugLine(stats.appliedList, target)
+                    AppendDebugLine(stats.appliedList, target)
                     target.debugInfo = nil
                 elseif ok == nil then
                     target.needsRetry = false
                     stats.skipped = stats.skipped + 1
                     target.debugInfo = debugInfo
-                    appendDebugLine(stats.skippedList, target)
+                    AppendDebugLine(stats.skippedList, target)
                     target.debugInfo = nil
                 else
                     target.needsRetry = true
                     target.widget = nil
                     stats.failed = stats.failed + 1
                     target.debugInfo = debugInfo
-                    appendDebugLine(stats.failedList, target)
+                    AppendDebugLine(stats.failedList, target)
                     target.debugInfo = nil
                 end
             else
                 target.needsRetry = true
                 stats.missing = stats.missing + 1
-                appendDebugLine(stats.missingList, target)
+                AppendDebugLine(stats.missingList, target)
             end
         end
     end
 
-    state.stats = stats
-    updateStatusLabel(formatSyncStats(stats))
+    State.stats = stats
+    UpdateStatusLabel(FormatSyncStats(stats))
 
     if debugEnabled then
-        local signature = debugSignature(stats)
-        local full = force or state.debugFullNext or state.lastDebugSignature ~= signature
+        local signature = DebugSignature(stats)
+        local full = force or State.debugFullNext or State.lastDebugSignature ~= signature
         if full then
-            printDebugReport(stats, widgetGet(ui.verboseDebug, false))
-            state.lastDebugSignature = signature
-            state.debugFullNext = false
+            PrintDebugReport(stats, WidgetGet(UI.verboseDebug, false))
+            State.lastDebugSignature = signature
+            State.debugFullNext = false
         end
     end
 
     return stats
 end
 
-local function scheduleRetry(stats)
-    if not widgetGet(ui.retryMissing, true) then
-        state.retryPending = false
+local function ScheduleRetry(stats)
+    if not WidgetGet(UI.retryMissing, true) then
+        State.retryPending = false
         return
     end
 
     if stats and ((stats.missing or 0) > 0 or (stats.failed or 0) > 0) then
-        state.retryPending = true
-        state.retryAt = os.clock() + EVENT_RETRY_DELAY
+        State.retryPending = true
+        State.retryAt = os.clock() + EVENT_RETRY_DELAY
     else
-        state.retryPending = false
+        State.retryPending = false
     end
 end
 
-syncEvent = function()
-    local stats = syncTargets(true, false)
-    scheduleRetry(stats)
+SyncEvent = function()
+    local stats = SyncTargets(true, false)
+    ScheduleRetry(stats)
 end
 
-queueSync = function(delay)
+QueueSync = function(delay)
     local at = os.clock() + (delay or 0)
-    if not state.syncPending or at < (state.syncAt or 0) then
-        state.syncAt = at
+    if not State.syncPending or at < (State.syncAt or 0) then
+        State.syncAt = at
     end
-    state.syncPending = true
+    State.syncPending = true
 end
 
-function ThemeColorSync.OnScriptsLoaded()
-    ensureMenu()
-    syncEvent()
+--#endregion
+
+--#region Lifecycle
+
+function Script.OnScriptsLoaded()
+    EnsureMenu()
+    SyncEvent()
 end
 
-function ThemeColorSync.OnThemeUpdate()
-    ensureMenu()
+function Script.OnThemeUpdate()
+    EnsureMenu()
 
-    local palette = buildPalette()
-    if not paletteChanged(palette) then
+    local palette = BuildPalette()
+    if not PaletteChanged(palette) then
         return
     end
 
-    rememberPalette(palette)
-    queueSync(syncDelaySeconds())
+    RememberPalette(palette)
+    QueueSync(SyncDelaySeconds())
 end
 
-function ThemeColorSync.OnUpdate()
-    if not state.menuCreated then
-        ensureMenu()
+function Script.OnUpdate()
+    if not State.menuCreated then
+        EnsureMenu()
     end
 
-    local debugEnabled = widgetGet(ui.debug, false)
-    if debugEnabled and not state.debugWasEnabled then
-        state.debugFullNext = true
-        syncEvent()
+    local debugEnabled = WidgetGet(UI.debug, false)
+    if debugEnabled and not State.debugWasEnabled then
+        State.debugFullNext = true
+        SyncEvent()
     end
-    state.debugWasEnabled = debugEnabled
+    State.debugWasEnabled = debugEnabled
 
-    if state.syncPending and os.clock() >= (state.syncAt or 0) then
-        state.syncPending = false
-        syncEvent()
+    if State.syncPending and os.clock() >= (State.syncAt or 0) then
+        State.syncPending = false
+        SyncEvent()
         return
     end
 
-    if state.retryPending and os.clock() >= (state.retryAt or 0) then
-        state.retryPending = false
-        syncTargets(false, true)
+    if State.retryPending and os.clock() >= (State.retryAt or 0) then
+        State.retryPending = false
+        SyncTargets(false, true)
     end
 end
 
-return ThemeColorSync
+--#endregion
+
+return Script

@@ -1,4 +1,3 @@
----@diagnostic disable: undefined-global, param-type-mismatch, inject-field
 local ld = {}
 
 -- =========================================================
@@ -1483,7 +1482,8 @@ local function draw_bear_panel(x, y, mode, aghs_ok, aghs_gate, hp_num, d_now, cu
         if hoverP > 0 then
             local glowCol = Color(acc.r, acc.g, acc.b, F(70 * hoverP))
             pcall(Render.Shadow, Vec2(dx, dy), Vec2(dx + dw, dy + dh), glowCol, 6 * scale, r, Enum.DrawFlags.ShadowCutOutShapeBackground)
-            borderCol = mix_color(borderCol, acc, hoverP)
+            local mixed = mix_color(borderCol, acc, hoverP)
+            if mixed then borderCol = mixed end
         end
         pcall(Render.Rect, Vec2(dx, dy), Vec2(dx + dw, dy + dh), borderCol, r)
         
@@ -2449,7 +2449,8 @@ local function juggle_tower_aggro(bpos)
                     else
                         local retreat_pos = base_pos()
                         if hero and alive(hero) then
-                            retreat_pos = gp(hero)
+                            local hero_pos = gp(hero)
+                            if hero_pos then retreat_pos = hero_pos end
                         end
                         bm_force(retreat_pos, "tower_retreat")
                         return true

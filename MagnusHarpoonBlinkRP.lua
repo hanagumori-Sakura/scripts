@@ -1,7 +1,8 @@
 ﻿--[[
     Magnus — Harpoon + Blink + Reverse Polarity combo
     Hold combo key: approach → harpoon → blink behind cluster → RP
---]]
+    Script by Euphoria
+    --]]
 
 local Script = {}
 

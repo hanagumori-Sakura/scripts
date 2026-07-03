@@ -12,8 +12,6 @@
 ╰────────────────────────────────────────────────────────────╯
 --]]
 
----@diagnostic disable: undefined-global, param-type-mismatch
-
 local MeepoJunglePack = {}
 
 local SCRIPT_ID = "meepo_auto_farm_v2"
@@ -178,7 +176,9 @@ local state = {
     mapCampsAncients = nil
 }
 
-local function sc(fn, ...)
+---@param fn function
+---@return any
+local function SafeCall(fn, ...)
     if type(fn) ~= "function" then return nil end
     local ok, result = pcall(fn, ...)
     if ok then return result end
@@ -186,15 +186,15 @@ local function sc(fn, ...)
 end
 
 local function now()
-    return sc(GameRules.GetGameTime) or os.clock()
+    return SafeCall(GameRules.GetGameTime) or os.clock()
 end
 
 local function dotaClock()
-    local dota = sc(GameRules.GetDOTATime, false, true)
+    local dota = SafeCall(GameRules.GetDOTATime, false, true)
     if type(dota) == "number" then return dota end
 
     local gameNow = now()
-    local startTime = sc(GameRules.GetGameStartTime) or 0
+    local startTime = SafeCall(GameRules.GetGameStartTime) or 0
     return gameNow - startTime
 end
 
@@ -208,7 +208,7 @@ end
 
 local function widgetGet(widget, fallback)
     if not widget or type(widget.Get) ~= "function" then return fallback end
-    local value = sc(widget.Get, widget)
+    local value = widget:Get()
     if value == nil then return fallback end
     return value
 end
@@ -220,7 +220,7 @@ local function languageWidget()
     end
 
     state.languageLookupAt = t + 1.0
-    state.languageWidget = Menu and Menu.Find and sc(Menu.Find, "SettingsHidden", "", "", "", "Main", "Language") or nil
+    state.languageWidget = Menu and Menu.Find and Menu.Find("SettingsHidden", "", "", "", "Main", "Language") or nil
     return state.languageWidget
 end
 
@@ -393,7 +393,7 @@ end
 local function multiEnabled(widget, item)
     if not widget or not widget.ListEnabled then return false end
 
-    local enabled = sc(widget.ListEnabled, widget)
+    local enabled = widget:ListEnabled()
     if type(enabled) ~= "table" then return false end
 
     local accepted = {}
@@ -410,29 +410,33 @@ local function multiEnabled(widget, item)
     return false
 end
 
-local statusFont = Render and Render.LoadFont and sc(
-    Render.LoadFont,
-    "Arial",
-    Enum.FontCreate and Enum.FontCreate.FONTFLAG_ANTIALIAS or 0,
-    Enum.FontWeight and Enum.FontWeight.NORMAL or 400
-)
+local statusFont = nil
+if Render and Render.LoadFont then
+    statusFont = Render.LoadFont(
+        "Arial",
+        Enum.FontCreate and Enum.FontCreate.FONTFLAG_ANTIALIAS or 0,
+        Enum.FontWeight and Enum.FontWeight.NORMAL or 400
+    )
+end
 if not statusFont and Render and Render.LoadFont then
-    statusFont = sc(Render.LoadFont, "Verdana", 12, 400)
+    statusFont = Render.LoadFont("Verdana", 12, 400)
 end
 
-local saveManaImage = Render and Render.LoadSvgString and sc(
-    Render.LoadSvgString,
-    [[<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+local saveManaImage = nil
+if Render and Render.LoadSvgString then
+    saveManaImage = Render.LoadSvgString(
+        [[<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
 <path fill="#6BB8FF" d="M9 2h6v2l-1 .9V10l5.1 8.3A2.5 2.5 0 0 1 17 22H7a2.5 2.5 0 0 1-2.1-3.7L10 10V4.9L9 4V2Zm2.4 9L7 18.2a.8.8 0 0 0 .7 1.2h8.6a.8.8 0 0 0 .7-1.2L12.6 11h-1.2Zm-1.6 4h4.4l1.2 2H8.6l1.2-2Z"/>
 </svg>]],
-    Vec2(18, 18),
-    SCRIPT_ID .. ".save_mana_icon"
-)
+        Vec2(18, 18),
+        SCRIPT_ID .. ".save_mana_icon"
+    )
+end
 
 local pushCreepImage = nil
 if Render and Render.LoadImage then
     for _, path in ipairs(PUSH_ICON_CANDIDATES) do
-        local handle = sc(Render.LoadImage, path)
+        local handle = Render.LoadImage(path)
         if type(handle) == "number" and handle > 0 then
             pushCreepImage = handle
             break
@@ -461,27 +465,27 @@ local setupLanguageReloadCallback
 
 do
 local function withTooltip(widget, text)
-    if widget and widget.ToolTip then sc(widget.ToolTip, widget, text) end
+    if widget and widget.ToolTip then widget:ToolTip(text) end
     return widget
 end
 
 local function makeGear(widget, name)
     if widget and widget.Gear then
-        return sc(widget.Gear, widget, name, "\u{f013}", true)
+        return widget:Gear(name, "\u{f013}", true)
     end
     return nil
 end
 
 local function displayName(widget, text)
     if widget and widget.ForceLocalization then
-        sc(widget.ForceLocalization, widget, text)
+        widget:ForceLocalization(text)
     end
     return widget
 end
 
 local function applyWidgetImage(widget, imagePath)
     if widget and imagePath and type(widget.Image) == "function" then
-        sc(widget.Image, widget, imagePath)
+        widget:Image(imagePath)
     end
 end
 
@@ -496,7 +500,7 @@ local function applyMenuVisual(widget, visual)
     if isMenuImagePath(visual) then
         applyWidgetImage(widget, visual)
     elseif type(widget.Icon) == "function" then
-        sc(widget.Icon, widget, visual)
+        widget:Icon(visual)
     end
 end
 
@@ -505,7 +509,7 @@ local function applyWidgetImageHandleOrIcon(widget, imageHandle, visual)
     if not widget then return end
 
     if imageHandle and type(widget.ImageHandle) == "function" then
-        sc(widget.ImageHandle, widget, imageHandle)
+        widget:ImageHandle(imageHandle)
         return
     end
 
@@ -513,24 +517,24 @@ local function applyWidgetImageHandleOrIcon(widget, imageHandle, visual)
 end
 
 local function createTab()
-    local section = sc(Menu.Find, "Heroes", "Hero List", "Meepo")
+    local section = Menu.Find("Heroes", "Hero List", "Meepo")
     if not section then
-        section = sc(Menu.Create, "Heroes", "Hero List", "Meepo")
+        section = Menu.Create("Heroes", "Hero List", "Meepo")
     end
 
-    local tab = section and section.Create and sc(section.Create, section, "AutoFarm V2")
+    local tab = section and section.Create and section.Create(section, "AutoFarm V2")
     if tab then return tab end
 
-    tab = sc(Menu.Create, "General", "Meepo AutoFarm V2", SCRIPT_ID, "AutoFarm V2")
+    tab = Menu.Create("General", "Meepo AutoFarm V2", SCRIPT_ID, "AutoFarm V2")
     return tab
 end
 
 local function createGroup(tab, name)
     if tab and tab.Create then
-        local group = sc(tab.Create, tab, name)
+        local group = tab.Create(tab, name)
         if group then return group end
     end
-    return sc(Menu.Create, "General", "Meepo AutoFarm V2", SCRIPT_ID, "AutoFarm V2", name)
+    return Menu.Create("General", "Meepo AutoFarm V2", SCRIPT_ID, "AutoFarm V2", name)
 end
 
 local menuNodes = {}
@@ -584,22 +588,22 @@ displayName(ui.mapKey, "Map")
 menuNodes.scriptGear = makeGear(ui.enabled, "Script timing")
 menuNodes.hudGear = makeGear(ui.mapKey, "HUD")
 if ui.farmKey and ui.farmKey.Properties then
-    sc(ui.farmKey.Properties, ui.farmKey, "Meepo AutoFarm V2", "toggle", true)
+    ui.farmKey:Properties("Meepo AutoFarm V2", "toggle", true)
 end
 if ui.pushKey and ui.pushKey.Properties then
-    sc(ui.pushKey.Properties, ui.pushKey, "Meepo Auto Push", "toggle", true)
+    ui.pushKey:Properties("Meepo Auto Push", "toggle", true)
 end
 if ui.mapKey and ui.mapKey.Properties then
-    sc(ui.mapKey.Properties, ui.mapKey, "Meepo AutoFarm V2 map", "toggle", true)
+    ui.mapKey:Properties("Meepo AutoFarm V2 map", "toggle", true)
 end
 if ui.farmActive and ui.farmActive.SetCallback and ui.farmKey and ui.farmKey.SetToggled then
-    sc(ui.farmActive.SetCallback, ui.farmActive, function()
-        sc(ui.farmKey.SetToggled, ui.farmKey, widgetGet(ui.farmActive, false))
+    ui.farmActive:SetCallback(function()
+        ui.farmKey:SetToggled(widgetGet(ui.farmActive, false))
     end, true)
 end
 if ui.autoPush and ui.autoPush.SetCallback and ui.pushKey and ui.pushKey.SetToggled then
-    sc(ui.autoPush.SetCallback, ui.autoPush, function()
-        sc(ui.pushKey.SetToggled, ui.pushKey, widgetGet(ui.autoPush, false))
+    ui.autoPush:SetCallback(function()
+        ui.pushKey:SetToggled(widgetGet(ui.autoPush, false))
     end, true)
 end
 ui.orderDelay = menuNodes.scriptGear and menuNodes.scriptGear.Slider and menuNodes.scriptGear:Slider("Order delay", 120, 900, 320, function(v) return v .. " ms" end)
@@ -627,7 +631,7 @@ ui.farmers = withTooltip(
 )
 displayName(ui.farmers, "Farmers")
 if ui.farmers and ui.farmers.Image then
-    sc(ui.farmers.Image, ui.farmers, DOTA_ICON.meepo)
+    ui.farmers:Image(DOTA_ICON.meepo)
 end
 menuNodes.farmersGear = makeGear(ui.farmers, "Camp logic")
 ui.poofUsage = withTooltip(
@@ -636,7 +640,7 @@ ui.poofUsage = withTooltip(
 )
 displayName(ui.poofUsage, "Poof")
 if ui.poofUsage and ui.poofUsage.Image then
-    sc(ui.poofUsage.Image, ui.poofUsage, DOTA_ICON.poof)
+    ui.poofUsage:Image(DOTA_ICON.poof)
 end
 menuNodes.poofGear = makeGear(ui.poofUsage, "Poof tuning")
 ui.saveMana = menuNodes.farm and menuNodes.farm.Slider and menuNodes.farm:Slider("Save Mana", 0, 90, 40, function(v) return v .. "%" end)
@@ -803,7 +807,7 @@ applyMenuVisual(ui.manualPause, FA_ICON.pause)
 
 local function setTooltip(widget, key)
     if widget and widget.ToolTip then
-        sc(widget.ToolTip, widget, L(key))
+        widget:ToolTip(L(key))
     end
 end
 
@@ -826,7 +830,7 @@ local function updateComboItems(widget, keys, fallbackIndex)
     local index = widgetGet(widget, fallbackIndex or 0)
     if type(index) ~= "number" then index = fallbackIndex or 0 end
 
-    sc(widget.Update, widget, localizedItems(keys), index)
+    widget:Update(localizedItems(keys), index)
 end
 
 local function updateMultiComboItems(widget, keys)
@@ -839,7 +843,7 @@ local function updateMultiComboItems(widget, keys)
         end
     end
 
-    sc(widget.Update, widget, localizedItems(keys), enabled)
+    widget:Update(localizedItems(keys), enabled)
 end
 
 applyLocalization = function(force)
@@ -923,10 +927,10 @@ applyLocalization = function(force)
     updateMultiComboItems(ui.poofUsage, {"poof_move", "poof_damage"})
 
     if ui.farmKey and ui.farmKey.Properties then
-        sc(ui.farmKey.Properties, ui.farmKey, L("bind_farm"), L("bind_toggle"), true)
+        ui.farmKey:Properties(L("bind_farm"), L("bind_toggle"), true)
     end
     if ui.mapKey and ui.mapKey.Properties then
-        sc(ui.mapKey.Properties, ui.mapKey, L("bind_map"), L("bind_toggle"), true)
+        ui.mapKey:Properties(L("bind_map"), L("bind_toggle"), true)
     end
 end
 
@@ -938,7 +942,7 @@ setupLanguageReloadCallback = function()
 
     state.languageCallbackSet = true
     local previous = widgetGet(widget, "en")
-    sc(widget.SetCallback, widget, function(ctrl)
+    widget:SetCallback(function(ctrl)
         local current = widgetGet(ctrl or widget, "en")
         if current == previous then return end
         previous = current
@@ -953,6 +957,8 @@ end
 applyLocalization(true)
 setupLanguageReloadCallback()
 
+local isPlayingMeepo
+
 local function isEnabled()
     return widgetGet(ui.enabled, false)
 end
@@ -966,13 +972,13 @@ local function isPushActive()
 end
 
 local function hasActiveMode()
-    return isFarmActive() or isPushActive()
+    return isPlayingMeepo() and (isFarmActive() or isPushActive())
 end
 
 local function setMapOpen(open)
     state.mapOpen = open == true
     if ui.mapKey and ui.mapKey.SetToggled then
-        sc(ui.mapKey.SetToggled, ui.mapKey, state.mapOpen)
+        ui.mapKey:SetToggled(state.mapOpen)
     end
 end
 
@@ -1013,10 +1019,10 @@ local function syncModeWidgets()
 
     if farm and push then
         if state.lastMode == "push" then
-            if ui.farmActive and ui.farmActive.Set then sc(ui.farmActive.Set, ui.farmActive, false) end
+            if ui.farmActive and ui.farmActive.Set then ui.farmActive:Set(false) end
             farm = false
         else
-            if ui.autoPush and ui.autoPush.Set then sc(ui.autoPush.Set, ui.autoPush, false) end
+            if ui.autoPush and ui.autoPush.Set then ui.autoPush:Set(false) end
             push = false
         end
     end
@@ -1030,10 +1036,10 @@ local function syncModeWidgets()
     end
 
     if ui.farmKey and ui.farmKey.SetToggled then
-        sc(ui.farmKey.SetToggled, ui.farmKey, farm)
+        ui.farmKey:SetToggled(farm)
     end
     if ui.pushKey and ui.pushKey.SetToggled then
-        sc(ui.pushKey.SetToggled, ui.pushKey, push)
+        ui.pushKey:SetToggled(push)
     end
 end
 
@@ -1050,19 +1056,19 @@ local function purgeUnitStateById(id)
 
     for index = #state.statusList, 1, -1 do
         local entry = state.statusList[index]
-        local entryId = entry and entry.unit and (sc(Entity.GetIndex, entry.unit) or 0) or 0
+        local entryId = entry and entry.unit and (Entity.GetIndex(entry.unit) or 0) or 0
         if entryId == id then
             table.remove(state.statusList, index)
         end
     end
 
-    if state.localHero and (sc(Entity.GetIndex, state.localHero) or 0) == id then
+    if state.localHero and (Entity.GetIndex(state.localHero) or 0) == id then
         state.localHero = nil
     end
 end
 
 local function purgeUnitState(entity)
-    purgeUnitStateById(sc(Entity.GetIndex, entity) or 0)
+    purgeUnitStateById(Entity.GetIndex(entity) or 0)
 end
 
 local function getTickCache(t)
@@ -1076,46 +1082,46 @@ local function getTickCache(t)
 end
 
 local function checkFarmToggleBind()
-    if not isEnabled() or not ui.farmKey or not ui.farmKey.IsPressed then
+    if not isEnabled() or not isPlayingMeepo() or not ui.farmKey or not ui.farmKey.IsPressed then
         state.farmBindPrev = false
         return
     end
 
-    local pressed = sc(ui.farmKey.IsPressed, ui.farmKey) == true
+    local pressed = ui.farmKey:IsPressed() == true
     if pressed and not state.farmBindPrev and ui.farmActive and ui.farmActive.Set then
         local nextState = not widgetGet(ui.farmActive, false)
-        sc(ui.farmActive.Set, ui.farmActive, nextState)
+        ui.farmActive:Set(nextState)
         if nextState and ui.autoPush and ui.autoPush.Set then
-            sc(ui.autoPush.Set, ui.autoPush, false)
+            ui.autoPush:Set(false)
         end
     end
     state.farmBindPrev = pressed
 end
 
 local function checkPushToggleBind()
-    if not isEnabled() or not ui.pushKey or not ui.pushKey.IsPressed then
+    if not isEnabled() or not isPlayingMeepo() or not ui.pushKey or not ui.pushKey.IsPressed then
         state.pushBindPrev = false
         return
     end
 
-    local pressed = sc(ui.pushKey.IsPressed, ui.pushKey) == true
+    local pressed = ui.pushKey:IsPressed() == true
     if pressed and not state.pushBindPrev and ui.autoPush and ui.autoPush.Set then
         local nextState = not widgetGet(ui.autoPush, false)
-        sc(ui.autoPush.Set, ui.autoPush, nextState)
+        ui.autoPush:Set(nextState)
         if nextState and ui.farmActive and ui.farmActive.Set then
-            sc(ui.farmActive.Set, ui.farmActive, false)
+            ui.farmActive:Set(false)
         end
     end
     state.pushBindPrev = pressed
 end
 
 local function checkMapToggleBind()
-    if not isEnabled() or not ui.mapKey or not ui.mapKey.IsPressed then
+    if not isEnabled() or not isPlayingMeepo() or not ui.mapKey or not ui.mapKey.IsPressed then
         state.mapBindPrev = false
         return
     end
 
-    local pressed = sc(ui.mapKey.IsPressed, ui.mapKey) == true
+    local pressed = ui.mapKey:IsPressed() == true
     if pressed and not state.mapBindPrev then
         setMapOpen(not state.mapOpen)
     end
@@ -1130,8 +1136,7 @@ local function comboKeyWidget(t)
     end
 
     state.comboKeyLookupAt = t + 1.0
-    state.comboKeyWidget = sc(
-        Menu.Find,
+    state.comboKeyWidget = Menu.Find(
         "Heroes",
         "Hero List",
         "Meepo",
@@ -1147,33 +1152,42 @@ local function comboKeyActive(t)
     local bind = comboKeyWidget(t)
     if not bind or not bind.IsDown then return false end
 
-    return sc(bind.IsDown, bind) == true
+    return bind.IsDown(bind) == true
 end
 
 local function alive(entity)
-    return entity ~= nil and sc(Entity.IsAlive, entity) == true
+    return entity ~= nil and Entity.IsAlive(entity) == true
 end
 
 local function dormant(entity)
-    return Entity.IsDormant and sc(Entity.IsDormant, entity) == true
+    return Entity.IsDormant and Entity.IsDormant(entity) == true
 end
 
 local function visible(entity)
-    local isVisible = Entity.IsVisible and sc(Entity.IsVisible, entity)
+    local isVisible = Entity.IsVisible and Entity.IsVisible(entity)
     if isVisible ~= nil then return isVisible == true end
     return not dormant(entity)
 end
 
 local function unitName(unit)
-    return sc(NPC.GetUnitName, unit) or ""
+    return NPC.GetUnitName(unit) or ""
+end
+
+isPlayingMeepo = function()
+    if Engine and Engine.IsInGame and Engine.IsInGame() ~= true then
+        return false
+    end
+
+    local hero = Heroes.GetLocal and Heroes.GetLocal() or nil
+    return hero ~= nil and unitName(hero) == MEEPO_NAME
 end
 
 local function unitId(unit)
-    return sc(Entity.GetIndex, unit) or 0
+    return Entity.GetIndex(unit) or 0
 end
 
 local function origin(unit)
-    return sc(Entity.GetAbsOrigin, unit)
+    return Entity.GetAbsOrigin(unit)
 end
 
 local function vecX(value)
@@ -1221,15 +1235,15 @@ local function isWithin2D(a, b, radius)
 end
 
 local function hpPct(unit)
-    local hp = sc(Entity.GetHealth, unit) or 0
-    local maxHp = sc(Entity.GetMaxHealth, unit) or 1
+    local hp = Entity.GetHealth(unit) or 0
+    local maxHp = Entity.GetMaxHealth(unit) or 1
     if maxHp <= 0 then return 100 end
     return (hp / maxHp) * 100
 end
 
 local function manaPct(unit)
-    local mana = sc(NPC.GetMana, unit) or 0
-    local maxMana = sc(NPC.GetMaxMana, unit) or 1
+    local mana = NPC.GetMana(unit) or 0
+    local maxMana = NPC.GetMaxMana(unit) or 1
     if maxMana <= 0 then return 100 end
     return (mana / maxMana) * 100
 end
@@ -1244,28 +1258,28 @@ end
 local function isControllable(unit, playerId)
     if not unit or not playerId or playerId < 0 then return false end
 
-    local byNpc = sc(NPC.IsControllableByPlayer, unit, playerId)
+    local byNpc = NPC.IsControllableByPlayer(unit, playerId)
     if byNpc ~= nil then return byNpc == true end
 
-    local byEntity = sc(Entity.IsControllableByPlayer, unit, playerId)
+    local byEntity = Entity.IsControllableByPlayer(unit, playerId)
     if byEntity ~= nil then return byEntity == true end
 
     return true
 end
 
 local function isMeepo(unit)
-    return unit and unitName(unit) == MEEPO_NAME and sc(NPC.IsIllusion, unit) ~= true
+    return unit and unitName(unit) == MEEPO_NAME and NPC.IsIllusion(unit) ~= true
 end
 
 local function isCloneMeepo(unit, localHero)
     if not isMeepo(unit) then return false end
-    if sc(NPC.IsMeepoClone, unit) == true then return true end
+    if NPC.IsMeepoClone(unit) == true then return true end
     return localHero ~= nil and unitId(unit) ~= unitId(localHero)
 end
 
 local function buildSelectedIds(player)
     local selectedIds = {}
-    local selected = player and Player.GetSelectedUnits and sc(Player.GetSelectedUnits, player) or {}
+    local selected = player and Player.GetSelectedUnits and Player.GetSelectedUnits(player) or {}
 
     for _, unit in ipairs(selected) do
         selectedIds[unitId(unit)] = true
@@ -1315,7 +1329,7 @@ end
 
 local function isMegameepoActive(hero)
     if not hero then return false end
-    if NPC.HasModifier and sc(NPC.HasModifier, hero, "modifier_meepo_megameepo") == true then return true end
+    if NPC.HasModifier and NPC.HasModifier(hero, "modifier_meepo_megameepo") == true then return true end
     return false
 end
 
@@ -1365,7 +1379,7 @@ end
 
 local function addMeepo(list, seen, unit, playerId, team, localHero, selectedIds)
     if not isMeepo(unit) or not alive(unit) or dormant(unit) then return end
-    if sc(Entity.GetTeamNum, unit) ~= team then return end
+    if Entity.GetTeamNum(unit) ~= team then return end
     if not isControllable(unit, playerId) then return end
 
     local id = unitId(unit)
@@ -1388,12 +1402,12 @@ local function getControllableMeepos(localHero, player, playerId, team, t)
         cache.selectedIds = selectedIds
     end
 
-    local heroes = sc(Heroes.GetAll) or {}
+    local heroes = Heroes.GetAll() or {}
     for _, hero in ipairs(heroes) do
         addMeepo(result, seen, hero, playerId, team, localHero, selectedIds)
     end
 
-    local npcs = sc(NPCs.GetAll) or {}
+    local npcs = NPCs.GetAll() or {}
     for _, npc in ipairs(npcs) do
         addMeepo(result, seen, npc, playerId, team, localHero, selectedIds)
     end
@@ -1487,9 +1501,9 @@ local function pushTargetLabel(unit, fallback)
 
     local name = unitName(unit)
     if name ~= "" then return name end
-    if sc(NPC.IsFort, unit) == true then return "fort" end
-    if sc(NPC.IsBarracks, unit) == true then return "barracks" end
-    if sc(NPC.IsTower, unit) == true then return "tower" end
+    if NPC.IsFort(unit) == true then return "fort" end
+    if NPC.IsBarracks(unit) == true then return "barracks" end
+    if NPC.IsTower(unit) == true then return "tower" end
     return fallback or "target"
 end
 
@@ -1517,20 +1531,20 @@ local function collectLaneCreeps(team, t)
     end
 
     local allied, enemy = {}, {}
-    local npcs = sc(NPCs.GetAll) or {}
+    local npcs = NPCs.GetAll() or {}
 
     for _, npc in ipairs(npcs) do
-        if alive(npc) and not dormant(npc) and sc(NPC.IsLaneCreep, npc) == true then
+        if alive(npc) and not dormant(npc) and NPC.IsLaneCreep(npc) == true then
             local pos = origin(npc)
             if pos then
                 local entry = {
                     unit = npc,
                     pos = pos,
                     name = unitName(npc),
-                    hp = sc(Entity.GetHealth, npc) or 1
+                    hp = Entity.GetHealth(npc) or 1
                 }
 
-                if sc(Entity.GetTeamNum, npc) == team then
+                if Entity.GetTeamNum(npc) == team then
                     allied[#allied + 1] = entry
                 else
                     enemy[#enemy + 1] = entry
@@ -1549,12 +1563,12 @@ local function collectPushStructures(team, t)
     if cache.pushStructures then return cache.pushStructures end
 
     local result = {}
-    local towers = sc(Towers.GetAll) or {}
+    local towers = Towers.GetAll() or {}
     for _, tower in ipairs(towers) do
         if alive(tower)
             and not dormant(tower)
-            and sc(Entity.GetTeamNum, tower) ~= team
-            and sc(NPC.IsInvulnerable, tower) ~= true then
+            and Entity.GetTeamNum(tower) ~= team
+            and NPC.IsInvulnerable(tower) ~= true then
             local pos = origin(tower)
             if pos then
                 result[#result + 1] = {unit = tower, pos = pos, kind = "tower"}
@@ -1562,16 +1576,16 @@ local function collectPushStructures(team, t)
         end
     end
 
-    local npcs = sc(NPCs.GetAll) or {}
+    local npcs = NPCs.GetAll() or {}
     for _, npc in ipairs(npcs) do
         if alive(npc)
             and not dormant(npc)
-            and sc(Entity.GetTeamNum, npc) ~= team
-            and sc(NPC.IsInvulnerable, npc) ~= true then
+            and Entity.GetTeamNum(npc) ~= team
+            and NPC.IsInvulnerable(npc) ~= true then
             local kind = nil
-            if sc(NPC.IsBarracks, npc) == true then
+            if NPC.IsBarracks(npc) == true then
                 kind = "barracks"
-            elseif sc(NPC.IsFort, npc) == true then
+            elseif NPC.IsFort(npc) == true then
                 kind = "fort"
             end
 
@@ -1660,12 +1674,12 @@ end
 
 local function collectEnemyAwarenessImpl(team, t)
     local result = {}
-    local heroes = sc(Heroes.GetAll) or {}
+    local heroes = Heroes.GetAll() or {}
     local useMaphack = pushMaphackEnabled()
     local maxAge = pushMaphackMemory()
 
     for _, hero in ipairs(heroes) do
-        if alive(hero) and sc(Entity.GetTeamNum, hero) ~= team and sc(NPC.IsIllusion, hero) ~= true then
+        if alive(hero) and Entity.GetTeamNum(hero) ~= team and NPC.IsIllusion(hero) ~= true then
             local pos = nil
             local visibleNow = visible(hero)
             local age = 0
@@ -1673,8 +1687,8 @@ local function collectEnemyAwarenessImpl(team, t)
             if visibleNow then
                 pos = origin(hero)
             elseif useMaphack then
-                pos = sc(Hero.GetLastMaphackPos, hero)
-                local lastVisible = sc(Hero.GetLastVisibleTime, hero)
+                pos = Hero.GetLastMaphackPos(hero)
+                local lastVisible = Hero.GetLastVisibleTime(hero)
                 if pos and type(lastVisible) == "number" then
                     age = math.max(0, t - lastVisible)
                 else
@@ -1713,14 +1727,14 @@ end
 
 local function buildLaneBuckets(team, t)
     local allied, enemy = collectLaneCreeps(team, t)
-    local structures = collectPushStructures(team, t)
+    local structures = collectPushStructures(team, t) or {}
     local buckets = {
         top = newLaneBucket("top"),
         mid = newLaneBucket("mid"),
         bot = newLaneBucket("bot"),
     }
 
-    for _, creep in ipairs(enemy) do
+    for _, creep in ipairs(enemy or {}) do
         local lane = classifyLane(creep.pos)
         local bucket = buckets[lane]
         bucket.enemyCreeps[#bucket.enemyCreeps + 1] = creep
@@ -1731,12 +1745,12 @@ local function buildLaneBuckets(team, t)
             + weight * 180
     end
 
-    for _, creep in ipairs(allied) do
+    for _, creep in ipairs(allied or {}) do
         local lane = classifyLane(creep.pos)
         buckets[lane].alliedCreeps[#buckets[lane].alliedCreeps + 1] = creep
     end
 
-    for _, structure in ipairs(structures) do
+    for _, structure in ipairs(structures or {}) do
         local lane = classifyLane(structure.pos)
         buckets[lane].structures[#buckets[lane].structures + 1] = structure
     end
@@ -2024,13 +2038,13 @@ syncSmartMode = function(t, team)
     end
 
     if isPushActive() and lanesWithCreeps == 0 and totalPressure < 200 then
-        if ui.autoPush and ui.autoPush.Set then sc(ui.autoPush.Set, ui.autoPush, false) end
-        if ui.farmActive and ui.farmActive.Set then sc(ui.farmActive.Set, ui.farmActive, true) end
+        if ui.autoPush and ui.autoPush.Set then ui.autoPush:Set(false) end
+        if ui.farmActive and ui.farmActive.Set then ui.farmActive:Set(true) end
         state.smartModeSwitchAt = t + SMART_MODE_COOLDOWN
         state.lastMode = "farm"
     elseif isFarmActive() and lanesWithCreeps >= 2 and totalPressure > 800 then
-        if ui.farmActive and ui.farmActive.Set then sc(ui.farmActive.Set, ui.farmActive, false) end
-        if ui.autoPush and ui.autoPush.Set then sc(ui.autoPush.Set, ui.autoPush, true) end
+        if ui.farmActive and ui.farmActive.Set then ui.farmActive:Set(false) end
+        if ui.autoPush and ui.autoPush.Set then ui.autoPush:Set(true) end
         state.smartModeSwitchAt = t + SMART_MODE_COOLDOWN
         state.lastMode = "push"
     end
@@ -2124,16 +2138,16 @@ end
 
 local function isValidNeutral(unit)
     if not unit or not alive(unit) or dormant(unit) then return false end
-    if sc(NPC.IsWaitingToSpawn, unit) == true then return false end
-    if sc(NPC.IsInvulnerable, unit) == true then return false end
+    if NPC.IsWaitingToSpawn(unit) == true then return false end
+    if NPC.IsInvulnerable(unit) == true then return false end
 
-    local neutral = sc(NPC.IsNeutral, unit)
+    local neutral = NPC.IsNeutral(unit)
     if neutral ~= true then
         local name = unitName(unit)
         if not string.find(name, "npc_dota_neutral_", 1, true) then return false end
     end
 
-    if not widgetGet(ui.farmAncients, false) and sc(NPC.IsAncient, unit) == true then
+    if not widgetGet(ui.farmAncients, false) and NPC.IsAncient(unit) == true then
         return false
     end
 
@@ -2145,14 +2159,14 @@ collectNeutrals = function(t)
     if cache.neutrals then return cache.neutrals end
 
     local result = {}
-    local npcs = sc(NPCs.GetAll) or {}
+    local npcs = NPCs.GetAll() or {}
 
     for _, unit in ipairs(npcs) do
         if isValidNeutral(unit) then
             result[#result + 1] = {
                 unit = unit,
                 pos = origin(unit),
-                hp = sc(Entity.GetHealth, unit) or 99999
+                hp = Entity.GetHealth(unit) or 99999
             }
         end
     end
@@ -2162,7 +2176,7 @@ collectNeutrals = function(t)
 end
 
 campCenter = function(camp)
-    local box = sc(Camp.GetCampBox, camp)
+    local box = Camp.GetCampBox(camp)
     if not box or not box.min or not box.max then return nil end
 
     return Vector(
@@ -2176,7 +2190,7 @@ campAllowed = function(camp)
     if widgetGet(ui.farmAncients, false) then return true end
     local ancientType = Enum.ECampType and Enum.ECampType.ECampType_ANCIENT
     if ancientType == nil then return true end
-    local campType = sc(Camp.GetType, camp)
+    local campType = Camp.GetType(camp)
     return campType ~= ancientType
 end
 
@@ -2253,7 +2267,7 @@ local function buildCampInfo(camp, index, neutrals)
     local target = nil
     local bestTargetScore = math.huge
 
-    for _, neutral in ipairs(neutrals) do
+    for _, neutral in ipairs(neutrals or {}) do
         local dSqr = dist2DSqr(center, neutral.pos)
         if dSqr <= radiusSqr then
             local d = math.sqrt(dSqr)
@@ -2268,7 +2282,7 @@ local function buildCampInfo(camp, index, neutrals)
 
     local isAncient = false
     local ancientType = Enum.ECampType and Enum.ECampType.ECampType_ANCIENT
-    if ancientType ~= nil and sc(Camp.GetType, camp) == ancientType then
+    if ancientType ~= nil and Camp.GetType(camp) == ancientType then
         isAncient = true
     end
 
@@ -2286,7 +2300,7 @@ collectCampInfos = function(neutrals, t)
     if cache.campInfos then return cache.campInfos end
 
     local infos = {}
-    local camps = sc(Camps.GetAll)
+    local camps = Camps.GetAll()
 
     if camps and #camps > 0 then
         for i, camp in ipairs(camps) do
@@ -2299,7 +2313,7 @@ collectCampInfos = function(neutrals, t)
         return infos
     end
 
-    for _, neutral in ipairs(neutrals) do
+    for _, neutral in ipairs(neutrals or {}) do
         infos[#infos + 1] = {
             id = "neutral_" .. tostring(unitId(neutral.unit)),
             center = neutral.pos,
@@ -2566,7 +2580,7 @@ buildGroups = function(active, neutrals, t, team)
     local infos = collectCampInfos(neutrals, t)
     local waitingSoon, waitingLater, visible, scouts = {}, {}, {}, {}
 
-    for _, info in ipairs(infos) do
+    for _, info in ipairs(infos or {}) do
         if not campSafeFromEnemies(info, t) then
             -- Dangerous camps are skipped until the last visible enemy position expires.
         elseif shouldWaitCamp(info, t) then
@@ -2678,10 +2692,10 @@ collectVisibleEnemyHeroes = function(team, t)
     if cache.enemyHeroes then return cache.enemyHeroes end
 
     local result = {}
-    local heroes = sc(Heroes.GetAll) or {}
+    local heroes = Heroes.GetAll() or {}
 
     for _, hero in ipairs(heroes) do
-        if alive(hero) and visible(hero) and sc(Entity.GetTeamNum, hero) ~= team and sc(NPC.IsIllusion, hero) ~= true then
+        if alive(hero) and visible(hero) and Entity.GetTeamNum(hero) ~= team and NPC.IsIllusion(hero) ~= true then
             local pos = origin(hero)
             if pos then
                 result[#result + 1] = {
@@ -2737,7 +2751,7 @@ local function canOrder(unit, orderType, target, pos, t)
         end
     elseif orderType == "attack" then
         if not target or not alive(target) then return false end
-        local currentTarget = Entity.GetAttackTarget and sc(Entity.GetAttackTarget, unit)
+        local currentTarget = Entity.GetAttackTarget and Entity.GetAttackTarget(unit)
         if currentTarget == target and last and t - last.time < 1.0 then return false end
         if last and last.type == "attack" and last.targetId == unitId(target) and t - last.time < 0.75 then
             return false
@@ -2761,31 +2775,31 @@ local function safeMovePosition(unit, pos)
     if not widgetGet(ui.pathCheck, true) or not GridNav or not GridNav.IsTraversableFromTo then return pos end
     local from = origin(unit)
     if not from then return pos end
-    if sc(GridNav.IsTraversableFromTo, from, pos, false, nil) == true then return pos end
+    if GridNav.IsTraversableFromTo(from, pos, false, nil) == true then return pos end
     return from
 end
 
 local function tryMobilityMove(player, unit, pos, t)
     if not widgetGet(ui.useMobility, true) or not player or not unit or not pos then return false end
-    if sc(NPC.IsChannellingAbility, unit) == true then return false end
+    if NPC.IsChannellingAbility(unit) == true then return false end
 
     local upos = origin(unit)
     if not upos or dist2D(upos, pos) < 900 then return false end
 
-    local mana = sc(NPC.GetMana, unit) or 0
-    local blink = sc(NPC.GetItem, unit, "item_blink", true)
-        or sc(NPC.GetItem, unit, "item_overwhelming_blink", true)
-        or sc(NPC.GetItem, unit, "item_swift_blink", true)
-        or sc(NPC.GetItem, unit, "item_arcane_blink", true)
-    if blink and sc(Ability.IsCastable, blink, mana) == true then
-        sc(Ability.CastPosition, blink, pos, false, true, false, ORDER_PREFIX .. "blink", true)
+    local mana = NPC.GetMana(unit) or 0
+    local blink = NPC.GetItem(unit, "item_blink", true)
+        or NPC.GetItem(unit, "item_overwhelming_blink", true)
+        or NPC.GetItem(unit, "item_swift_blink", true)
+        or NPC.GetItem(unit, "item_arcane_blink", true)
+    if blink and Ability.IsCastable(blink, mana) == true then
+        Ability.CastPosition(blink, pos, false, true, false, ORDER_PREFIX .. "blink", true)
         rememberOrder(unit, "move", nil, pos, t)
         return true
     end
 
-    local phase = sc(NPC.GetItem, unit, "item_phase_boots", true)
-    if phase and sc(Ability.IsCastable, phase, mana) == true then
-        sc(Ability.Toggle, phase, false, true, false, ORDER_PREFIX .. "phase")
+    local phase = NPC.GetItem(unit, "item_phase_boots", true)
+    if phase and Ability.IsCastable(phase, mana) == true then
+        Ability.Toggle(phase, false, true, false, ORDER_PREFIX .. "phase")
     end
 
     return false
@@ -2795,14 +2809,14 @@ issueMove = function(player, unit, pos, t)
     pos = safeMovePosition(unit, pos)
     if not player or not unit or not pos or not canOrder(unit, "move", nil, pos, t) then return false end
     if tryMobilityMove(player, unit, pos, t) then return true end
-    sc(Player.PrepareUnitOrders, player, O_MOVE, nil, pos, nil, ISSUER, unit, false, false, false, false, ORDER_PREFIX .. "move", false)
+    Player.PrepareUnitOrders(player, O_MOVE, nil, pos, nil, ISSUER, unit, false, false, false, false, ORDER_PREFIX .. "move", false)
     rememberOrder(unit, "move", nil, pos, t)
     return true
 end
 
 issueAttack = function(player, unit, target, t)
     if not player or not unit or not target or not canOrder(unit, "attack", target, nil, t) then return false end
-    sc(Player.PrepareUnitOrders, player, O_ATTACK, target, Vector(), nil, ISSUER, unit, false, false, false, false, ORDER_PREFIX .. "attack", false)
+    Player.PrepareUnitOrders(player, O_ATTACK, target, Vector(), nil, ISSUER, unit, false, false, false, false, ORDER_PREFIX .. "attack", false)
     rememberOrder(unit, "attack", target, nil, t)
     return true
 end
@@ -2928,18 +2942,18 @@ local function tryPoof(unit, pos, t, mode, anchorUnits)
     if mode == "move" and distance < widgetGet(ui.poofDistance, 1350) then return false end
     if mode == "escape" and distance < 850 then return false end
     if mode == "damage" and distance > 575 then return false end
-    if sc(NPC.IsChannellingAbility, unit) == true then return false end
+    if NPC.IsChannellingAbility(unit) == true then return false end
 
     local id = unitId(unit)
     if t - (state.lastPoof[id] or 0) < widgetGet(ui.poofCooldown, 3) then return false end
 
-    local poof = sc(NPC.GetAbility, unit, "meepo_poof")
-    local mana = sc(NPC.GetMana, unit) or 0
-    if poof and sc(Ability.IsCastable, poof, mana) == true then
+    local poof = NPC.GetAbility(unit, "meepo_poof")
+    local mana = NPC.GetMana(unit) or 0
+    if poof and Ability.IsCastable(poof, mana) == true then
         local target = findBestPoofTarget(unit, pos, mode, anchorUnits)
         if not target then return false end
 
-        sc(Ability.CastTarget, poof, target, false, true, false, ORDER_PREFIX .. "poof")
+        Ability.CastTarget(poof, target, false, true, false, ORDER_PREFIX .. "poof")
         state.lastPoof[id] = t
         return true
     end
@@ -2949,24 +2963,24 @@ end
 
 local function tryTeleportEscape(unit, pos, t, team)
     if not widgetGet(ui.tpEscape, true) or not unit or not pos then return false end
-    if sc(NPC.IsChannellingAbility, unit) == true then return false end
+    if NPC.IsChannellingAbility(unit) == true then return false end
 
     local id = unitId(unit)
     if t - (state.lastTp[id] or 0) < 8 then return false end
 
-    local mana = sc(NPC.GetMana, unit) or 0
-    local travels = sc(NPC.GetItem, unit, "item_travel_boots_2", true)
-        or sc(NPC.GetItem, unit, "item_travel_boots", true)
+    local mana = NPC.GetMana(unit) or 0
+    local travels = NPC.GetItem(unit, "item_travel_boots_2", true)
+        or NPC.GetItem(unit, "item_travel_boots", true)
 
-    if travels and sc(Ability.IsCastable, travels, mana) == true then
-        sc(Ability.CastPosition, travels, pos, false, true, false, ORDER_PREFIX .. "escape_travel", true)
+    if travels and Ability.IsCastable(travels, mana) == true then
+        Ability.CastPosition(travels, pos, false, true, false, ORDER_PREFIX .. "escape_travel", true)
         state.lastTp[id] = t
         return true
     end
 
-    local scroll = sc(NPC.GetItem, unit, "item_tpscroll", false)
-    if scroll and sc(Ability.IsCastable, scroll, mana) == true then
-        sc(Ability.CastPosition, scroll, basePosition(team), false, true, false, ORDER_PREFIX .. "escape_tp", true)
+    local scroll = NPC.GetItem(unit, "item_tpscroll", false)
+    if scroll and Ability.IsCastable(scroll, mana) == true then
+        Ability.CastPosition(scroll, basePosition(team), false, true, false, ORDER_PREFIX .. "escape_tp", true)
         state.lastTp[id] = t
         return true
     end
@@ -2979,7 +2993,7 @@ local function escapePositionFor(unit, neutrals, t, team)
     local bestCamp, bestScore = nil, -math.huge
     local infos = collectCampInfos(neutrals, t)
 
-    for _, info in ipairs(infos) do
+    for _, info in ipairs(infos or {}) do
         local emptyLocked = not info.target and t < (state.emptyUntil[info.id] or 0)
         if not emptyLocked and campSafeFromEnemies(info, t) then
             local dangerDistance = minDistanceToEnemyAvoid(info.center, t)
@@ -3104,9 +3118,13 @@ local function commandGroup(player, group, t, team)
         end
     end
 
+    ---@type Vector|nil
     local joinPos = target and origin(target) or group.camp.center
     if not target and group.role == "WAIT" then
-        joinPos = group.camp.waitPos or campWaitPosition(group.camp.center, team)
+        local waitPos = group.camp.waitPos or campWaitPosition(group.camp.center, team)
+        if waitPos then
+            joinPos = waitPos
+        end
     end
     if not joinPos then return end
 
@@ -3176,7 +3194,7 @@ runPackFarm = function(player, units, team, t)
         if isManual(unit, t) then
             state.unitCamp[unitId(unit)] = nil
             setStatus(unit, L("status_manual"), statusColor.manual)
-        elseif sc(NPC.IsChannellingAbility, unit) == true then
+        elseif NPC.IsChannellingAbility(unit) == true then
             setStatus(unit, L("status_cast"), statusColor.manual)
         elseif widgetGet(ui.megameepoHold, true) and isMegameepoActive(state.localHero) and unitId(unit) == unitId(state.localHero) then
             state.unitCamp[unitId(unit)] = nil
@@ -3256,12 +3274,17 @@ end
 end
 
 function MeepoJunglePack.OnUpdate()
-    if Engine and Engine.IsInGame and sc(Engine.IsInGame) ~= true then
+    if Engine and Engine.IsInGame and Engine.IsInGame() ~= true then
         resetRuntimeState()
         setMapOpen(false)
         return
     end
     if not isEnabled() then
+        resetRuntimeState()
+        setMapOpen(false)
+        return
+    end
+    if not isPlayingMeepo() then
         resetRuntimeState()
         setMapOpen(false)
         return
@@ -3285,16 +3308,16 @@ function MeepoJunglePack.OnUpdate()
     state.lastTick = t
 
     local player = Players.GetLocal and Players.GetLocal() or nil
-    local playerId = player and sc(Player.GetPlayerID, player) or -1
+    local playerId = player and Player.GetPlayerID(player) or -1
     local hero = Heroes.GetLocal and Heroes.GetLocal() or nil
     state.localHero = hero
 
-    if not player or not hero or not alive(hero) or unitName(hero) ~= MEEPO_NAME then
+    if not player or not hero or not alive(hero) then
         resetRuntimeState()
         return
     end
 
-    local team = sc(Entity.GetTeamNum, hero)
+    local team = Entity.GetTeamNum(hero)
     if not team then
         resetRuntimeState()
         return
@@ -3308,7 +3331,7 @@ function MeepoJunglePack.OnUpdate()
 
     if comboKeyActive(t) then
         clearStatuses()
-        for _, unit in ipairs(meepos) do
+        for _, unit in ipairs(meepos or {}) do
             state.unitCamp[unitId(unit)] = nil
             setStatus(unit, L("status_combo"), statusColor.combo)
         end
@@ -3358,7 +3381,7 @@ local mapColor = {
 
 statusTextSize = function(text)
     if Render and Render.TextSize and statusFont then
-        local size = sc(Render.TextSize, statusFont, 12, text)
+        local size = Render.TextSize(statusFont, 12, text)
         if size and size.x and size.y then return size.x, size.y end
     end
 
@@ -3505,7 +3528,7 @@ local function getMapImageHandle()
     end
 
     for _, path in ipairs(candidates) do
-        local handle = sc(Render.LoadImage, path)
+        local handle = Render.LoadImage(path)
         if type(handle) == "number" and handle > 0 then
             state.mapImageHandle = handle
             state.mapImagePath = path
@@ -3540,7 +3563,7 @@ end
 
 local function mouseDown()
     if not Input or not Input.IsKeyDown or not Enum.ButtonCode then return false end
-    return sc(Input.IsKeyDown, Enum.ButtonCode.KEY_MOUSE1, true) == true
+    return Input.IsKeyDown(Enum.ButtonCode.KEY_MOUSE1, true) == true
 end
 
 local function rectContains(rect, x, y)
@@ -3554,7 +3577,7 @@ local function clamp(value, minValue, maxValue)
 end
 
 local function screenSize()
-    local screen = Render and Render.ScreenSize and sc(Render.ScreenSize)
+    local screen = Render and Render.ScreenSize and Render.ScreenSize()
     if screen and screen.x and screen.y then
         return screen.x, screen.y
     end
@@ -3592,7 +3615,7 @@ local function mapLayout()
     local w, h = 322, 388
     local x = state.mapX or 12
     local y = state.mapY or 150
-    local screen = Render and Render.ScreenSize and sc(Render.ScreenSize)
+    local screen = Render and Render.ScreenSize and Render.ScreenSize()
 
     if screen and screen.x and screen.y then
         x = clamp(x, 0, math.max(0, screen.x - w))
@@ -3649,7 +3672,7 @@ local function collectMapCamps()
     end
 
     local infos = {}
-    local camps = sc(Camps.GetAll)
+    local camps = Camps.GetAll()
     if not camps then
         state.mapCamps = infos
         state.mapCampsAncients = allowAncients
@@ -3676,7 +3699,7 @@ end
 
 local function selectCampsBySide(side)
     state.selectedCamps = {}
-    for _, info in ipairs(collectMapCamps()) do
+    for _, info in ipairs(collectMapCamps() or {}) do
         if info.side == side then
             state.selectedCamps[info.id] = true
         end
@@ -3697,7 +3720,7 @@ end
 
 local function drawText(text, x, y, size, color)
     if statusFont then
-        sc(Render.Text, statusFont, size or 12, text, Vec2(x, y), color or mapColor.text)
+        Render.Text(statusFont, size or 12, text, Vec2(x, y), color or mapColor.text)
     end
 end
 
@@ -3711,7 +3734,7 @@ local function drawMapModeBadge(layout)
         or state.lastMode == "farm" and Color(92, 215, 132, 236)
         or Color(150, 160, 170, 205)
 
-    sc(Render.FilledRect, Vec2(x, y), Vec2(x + width, y + 18), color, 4)
+    Render.FilledRect(Vec2(x, y), Vec2(x + width, y + 18), color, 4)
     drawText(label, x + 8, y + 2, 11, Color(20, 24, 28, 255))
 end
 
@@ -3728,12 +3751,12 @@ local function drawActiveGroupMarkers(layout)
             or Color(92, 225, 132, 238)
 
         if gx and gy and tx and ty then
-            sc(Render.Line, Vec2(gx, gy), Vec2(tx, ty), withAlpha(color, 150), 2)
+            Render.Line(Vec2(gx, gy), Vec2(tx, ty), withAlpha(color, 150), 2)
         end
 
         if tx and ty then
-            sc(Render.FilledCircle, Vec2(tx, ty), 10, Color(0, 0, 0, 118))
-            sc(Render.FilledCircle, Vec2(tx, ty), 8, color)
+            Render.FilledCircle(Vec2(tx, ty), 10, Color(0, 0, 0, 118))
+            Render.FilledCircle(Vec2(tx, ty), 8, color)
             local marker = group.lane and string.upper(string.sub(group.lane, 1, 1)) or tostring(group.index or "?")
             drawText(marker, tx - 4, ty - 7, 11, Color(18, 20, 24, 255))
         end
@@ -3741,7 +3764,7 @@ local function drawActiveGroupMarkers(layout)
 end
 
 drawDebugOverlay = function()
-    if not isEnabled() or not widgetGet(ui.debugOverlay, false) or not Render or not statusFont then return end
+    if not isEnabled() or not isPlayingMeepo() or not widgetGet(ui.debugOverlay, false) or not Render or not statusFont then return end
 
     local info = state.debugInfo
     local lines = info and info.lines or nil
@@ -3762,9 +3785,9 @@ drawDebugOverlay = function()
     local topLeft = Vec2(x, y)
     local bottomRight = Vec2(x + width, y + height)
 
-    sc(Render.FilledRect, topLeft, bottomRight, Color(10, 14, 18, 178), 5)
-    sc(Render.Rect, topLeft, bottomRight, Color(255, 255, 255, 28), 5, Enum.DrawFlags and Enum.DrawFlags.None or 0, 1)
-    sc(Render.FilledRect, Vec2(x, y), Vec2(x + width, y + 22), Color(40, 55, 66, 188), 5)
+    Render.FilledRect(topLeft, bottomRight, Color(10, 14, 18, 178), 5)
+    Render.Rect(topLeft, bottomRight, Color(255, 255, 255, 28), 5, Enum.DrawFlags and Enum.DrawFlags.None or 0, 1)
+    Render.FilledRect(Vec2(x, y), Vec2(x + width, y + 22), Color(40, 55, 66, 188), 5)
     drawText(title, x + 9, y + 4, 12, Color(245, 248, 250, 255))
 
     for index, line in ipairs(lines) do
@@ -3773,7 +3796,7 @@ drawDebugOverlay = function()
 end
 
 drawFarmMap = function()
-    if not state.mapOpen or not isEnabled() or not Render or not statusFont then return end
+    if not isPlayingMeepo() or not state.mapOpen or not isEnabled() or not Render or not statusFont then return end
 
     syncMapTheme(false)
 
@@ -3781,17 +3804,17 @@ drawFarmMap = function()
     state.mapCampRects = {}
     updateMapRects(layout)
 
-    sc(Render.FilledRect, Vec2(layout.x, layout.y), Vec2(layout.x + layout.w, layout.y + layout.h), mapColor.panel, 5)
-    sc(Render.Rect, Vec2(layout.x, layout.y), Vec2(layout.x + layout.w, layout.y + layout.h), mapColor.border, 5, Enum.DrawFlags and Enum.DrawFlags.None or 0, 1)
-    sc(Render.FilledRect, Vec2(layout.x, layout.y), Vec2(layout.x + layout.w, layout.y + layout.headerH), mapColor.header, 5)
+    Render.FilledRect(Vec2(layout.x, layout.y), Vec2(layout.x + layout.w, layout.y + layout.h), mapColor.panel, 5)
+    Render.Rect(Vec2(layout.x, layout.y), Vec2(layout.x + layout.w, layout.y + layout.h), mapColor.border, 5, Enum.DrawFlags and Enum.DrawFlags.None or 0, 1)
+    Render.FilledRect(Vec2(layout.x, layout.y), Vec2(layout.x + layout.w, layout.y + layout.headerH), mapColor.header, 5)
     drawText(L("panel_title"), layout.x + 12, layout.y + 6, 14, mapColor.text)
     drawMapModeBadge(layout)
     drawText("x", layout.x + layout.w - 19, layout.y + 5, 16, mapColor.text)
 
     local radiantActive = state.mapSide == "radiant"
     local direActive = state.mapSide == "dire"
-    sc(Render.FilledRect, Vec2(state.mapRects.radiant.x, state.mapRects.radiant.y), Vec2(state.mapRects.radiant.x + state.mapRects.radiant.w, state.mapRects.radiant.y + state.mapRects.radiant.h), radiantActive and mapColor.tabActive or mapColor.tabIdle, 4)
-    sc(Render.FilledRect, Vec2(state.mapRects.dire.x, state.mapRects.dire.y), Vec2(state.mapRects.dire.x + state.mapRects.dire.w, state.mapRects.dire.y + state.mapRects.dire.h), direActive and mapColor.tabActive or mapColor.tabIdle, 4)
+    Render.FilledRect(Vec2(state.mapRects.radiant.x, state.mapRects.radiant.y), Vec2(state.mapRects.radiant.x + state.mapRects.radiant.w, state.mapRects.radiant.y + state.mapRects.radiant.h), radiantActive and mapColor.tabActive or mapColor.tabIdle, 4)
+    Render.FilledRect(Vec2(state.mapRects.dire.x, state.mapRects.dire.y), Vec2(state.mapRects.dire.x + state.mapRects.dire.w, state.mapRects.dire.y + state.mapRects.dire.h), direActive and mapColor.tabActive or mapColor.tabIdle, 4)
     drawText(L("panel_radiant"), state.mapRects.radiant.x + 55, state.mapRects.radiant.y + 4, 11, radiantActive and mapColor.tabTextActive or mapColor.text)
     drawText(L("panel_dire"), state.mapRects.dire.x + 61, state.mapRects.dire.y + 4, 11, direActive and mapColor.tabTextActive or mapColor.text)
 
@@ -3799,34 +3822,34 @@ drawFarmMap = function()
     local mapEnd = Vec2(layout.mapX + layout.mapSize, layout.mapY + layout.mapSize)
     local mapImage = getMapImageHandle()
     if mapImage and Render.Image then
-        sc(Render.Image, mapImage, mapStart, Vec2(layout.mapSize, layout.mapSize), Color(255, 255, 255, 245), 5)
-        sc(Render.FilledRect, mapStart, mapEnd, mapColor.mapOverlay, 5)
+        Render.Image(mapImage, mapStart, Vec2(layout.mapSize, layout.mapSize), Color(255, 255, 255, 245), 5)
+        Render.FilledRect(mapStart, mapEnd, mapColor.mapOverlay, 5)
     elseif Render.Gradient then
-        sc(Render.Gradient, mapStart, mapEnd, mapColor.mapTop, mapColor.mapRight, mapColor.mapLeft, mapColor.mapBottom, 5)
+        Render.Gradient(mapStart, mapEnd, mapColor.mapTop, mapColor.mapRight, mapColor.mapLeft, mapColor.mapBottom, 5)
     else
-        sc(Render.FilledRect, mapStart, mapEnd, mapColor.mapBottom, 5)
+        Render.FilledRect(mapStart, mapEnd, mapColor.mapBottom, 5)
     end
-    sc(Render.Rect, mapStart, mapEnd, mapColor.mapBorder, 5, Enum.DrawFlags and Enum.DrawFlags.None or 0, 2)
+    Render.Rect(mapStart, mapEnd, mapColor.mapBorder, 5, Enum.DrawFlags and Enum.DrawFlags.None or 0, 2)
 
     if not mapImage then
         local mx, my, ms = layout.mapX, layout.mapY, layout.mapSize
-        sc(Render.Line, Vec2(mx + 12, my + ms - 72), Vec2(mx + ms - 32, my + 42), mapColor.river, 10)
-        sc(Render.Line, Vec2(mx + 28, my + ms - 42), Vec2(mx + ms - 38, my + 68), mapColor.road, 3)
-        sc(Render.Line, Vec2(mx + 52, my + ms - 210), Vec2(mx + ms - 36, my + 178), mapColor.road, 2)
-        sc(Render.Line, Vec2(mx + 90, my + ms - 18), Vec2(mx + ms - 68, my + 92), mapColor.road, 2)
+        Render.Line(Vec2(mx + 12, my + ms - 72), Vec2(mx + ms - 32, my + 42), mapColor.river, 10)
+        Render.Line(Vec2(mx + 28, my + ms - 42), Vec2(mx + ms - 38, my + 68), mapColor.road, 3)
+        Render.Line(Vec2(mx + 52, my + ms - 210), Vec2(mx + ms - 36, my + 178), mapColor.road, 2)
+        Render.Line(Vec2(mx + 90, my + ms - 18), Vec2(mx + ms - 68, my + 92), mapColor.road, 2)
     end
 
     local anySelected = hasSelectedCamps()
-    for _, info in ipairs(collectMapCamps()) do
+    for _, info in ipairs(collectMapCamps() or {}) do
         local px, py = worldToMap(info.center, layout)
         if px and py then
             local selected = not anySelected or state.selectedCamps[info.id] == true
             local color = selected and mapColor.selected or mapColor.unselected
             local r = selected and 8 or 7
-            sc(Render.FilledCircle, Vec2(px, py), r + 2, Color(0, 0, 0, 120))
-            sc(Render.Circle, Vec2(px, py), r + 4, color, 2)
-            sc(Render.FilledCircle, Vec2(px, py), r, Color(32, 38, 42, 215))
-            sc(Render.FilledCircle, Vec2(px, py), math.max(3, r - 3), color)
+            Render.FilledCircle(Vec2(px, py), r + 2, Color(0, 0, 0, 120))
+            Render.Circle(Vec2(px, py), r + 4, color, 2)
+            Render.FilledCircle(Vec2(px, py), r, Color(32, 38, 42, 215))
+            Render.FilledCircle(Vec2(px, py), math.max(3, r - 3), color)
             state.mapCampRects[#state.mapCampRects + 1] = {id = info.id, x = px, y = py, r = r + 7}
         end
     end
@@ -3838,20 +3861,20 @@ drawFarmMap = function()
     for _, danger in ipairs(state.enemyAvoid) do
         local px, py = worldToMap(danger.pos, layout)
         if px and py then
-            sc(Render.Circle, Vec2(px, py), enemyAvoidRadius() * avoidScale, mapColor.danger, 2)
+            Render.Circle(Vec2(px, py), enemyAvoidRadius() * avoidScale, mapColor.danger, 2)
         end
     end
 
     if widgetGet(ui.mapAwareness, true) and state.localHero and alive(state.localHero) and collectEnemyAwareness then
-        local team = sc(Entity.GetTeamNum, state.localHero)
+        local team = Entity.GetTeamNum(state.localHero)
         local t = now()
         if team then
             for _, enemy in ipairs(collectEnemyAwareness(team, t)) do
                 local px, py = worldToMap(enemy.pos, layout)
                 if px and py then
                     local dotColor = enemy.visible and Color(255, 80, 80, 230) or Color(255, 180, 60, 180)
-                    sc(Render.FilledCircle, Vec2(px, py), 4, dotColor)
-                    sc(Render.Circle, Vec2(px, py), 6, Color(255, 255, 255, 140), 1)
+                    Render.FilledCircle(Vec2(px, py), 4, dotColor)
+                    Render.Circle(Vec2(px, py), 6, Color(255, 255, 255, 140), 1)
                 end
             end
         end
@@ -3860,8 +3883,8 @@ drawFarmMap = function()
     if state.localHero and alive(state.localHero) then
         local hx, hy = worldToMap(origin(state.localHero), layout)
         if hx and hy then
-            sc(Render.FilledCircle, Vec2(hx, hy), 5, mapColor.hero)
-            sc(Render.Circle, Vec2(hx, hy), 8, Color(255, 255, 255, 180), 1)
+            Render.FilledCircle(Vec2(hx, hy), 5, mapColor.hero)
+            Render.Circle(Vec2(hx, hy), 8, Color(255, 255, 255, 180), 1)
         end
     end
 
@@ -3872,12 +3895,12 @@ drawFarmMap = function()
 end
 
 handleFarmMapClick = function()
-    if not state.mapOpen or not isEnabled() then
+    if not isPlayingMeepo() or not state.mapOpen or not isEnabled() then
         state.mapMousePrev = false
         state.mapDragging = false
         return
     end
-    if Input and Input.IsInputCaptured and sc(Input.IsInputCaptured) == true then return end
+    if Input and Input.IsInputCaptured and Input.IsInputCaptured() == true then return end
 
     local down = mouseDown()
     local x, y = cursorPos()
@@ -3957,6 +3980,8 @@ end
 end
 
 function MeepoJunglePack.OnDraw()
+    if not isEnabled() or not isPlayingMeepo() then return end
+
     drawFarmMap()
     drawDebugOverlay()
 
@@ -3980,10 +4005,10 @@ function MeepoJunglePack.OnDraw()
         local bottomRight = Vec2(x + width, rowY + height)
         local textPos = Vec2(x + (anchored and 12 or 14), rowY + 2)
 
-        sc(Render.FilledRect, topLeft, bottomRight, anchored and Color(12, 16, 20, 176) or statusColor.bg, 4)
-        sc(Render.FilledCircle, Vec2(x + 7, rowY + height / 2), 3, color)
-        sc(Render.Text, statusFont, 12, text, Vec2(textPos.x + 1, textPos.y + 1), statusColor.shadow)
-        sc(Render.Text, statusFont, 12, text, textPos, color)
+        Render.FilledRect(topLeft, bottomRight, anchored and Color(12, 16, 20, 176) or statusColor.bg, 4)
+        Render.FilledCircle(Vec2(x + 7, rowY + height / 2), 3, color)
+        Render.Text(statusFont, 12, text, Vec2(textPos.x + 1, textPos.y + 1), statusColor.shadow)
+        Render.Text(statusFont, 12, text, textPos, color)
     end
 end
 
@@ -4009,7 +4034,7 @@ function MeepoJunglePack.OnNpcDying(npc)
 end
 
 function MeepoJunglePack.OnKeyEvent(data, key)
-    if not isEnabled() or not state.mapOpen or not isMouseKey(key) then return end
+    if not isEnabled() or not isPlayingMeepo() or not state.mapOpen or not isMouseKey(key) then return end
     if state.mapDragging or cursorOnMapPanel() or os.clock() < (state.mapBlockInputUntil or 0) then
         return false
     end
@@ -4031,18 +4056,18 @@ function MeepoJunglePack.OnPrepareUnitOrders(data, playerArg, orderArg, targetAr
         return true
     end
 
-    if isEnabled() and state.mapOpen and (state.mapDragging or cursorOnMapPanel() or os.clock() < (state.mapBlockInputUntil or 0)) then
+    if isEnabled() and isPlayingMeepo() and state.mapOpen and (state.mapDragging or cursorOnMapPanel() or os.clock() < (state.mapBlockInputUntil or 0)) then
         return false
     end
 
     if not hasActiveMode() then return true end
 
     local localPlayer = Players.GetLocal and Players.GetLocal() or nil
-    local localPlayerId = localPlayer and sc(Player.GetPlayerID, localPlayer) or -1
+    local localPlayerId = localPlayer and Player.GetPlayerID(localPlayer) or -1
 
     local orderPlayer = dataTable and dataTable.player or playerArg
     if orderPlayer then
-        local orderPlayerId = sc(Player.GetPlayerID, orderPlayer)
+        local orderPlayerId = Player.GetPlayerID(orderPlayer)
         if orderPlayerId ~= localPlayerId then return true end
     end
 
@@ -4050,7 +4075,7 @@ function MeepoJunglePack.OnPrepareUnitOrders(data, playerArg, orderArg, targetAr
     local npc = dataTable and dataTable.npc or npcArg
 
     if issuer == Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_SELECTED_UNITS then
-        local selected = localPlayer and Player.GetSelectedUnits and sc(Player.GetSelectedUnits, localPlayer) or {}
+        local selected = localPlayer and Player.GetSelectedUnits and Player.GetSelectedUnits(localPlayer) or {}
         for _, unit in ipairs(selected) do
             applyManualOverride(unit)
         end
