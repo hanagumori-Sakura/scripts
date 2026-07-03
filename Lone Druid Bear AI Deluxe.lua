@@ -27,10 +27,56 @@ local root = tab:Create("Bear AI Deluxe")
 
 local ui = {}
 
+-- Font Awesome icons (semantic, FA5-safe)
+local I = {
+    lang        = "\u{f0ac}", -- globe / language
+    power       = "\u{f011}", -- power / toggle AI
+    robot       = "\u{f544}", -- robot / Bear AI
+    route       = "\u{f554}", -- route / follow hero
+    ahead       = "\u{f061}", -- arrow right / bear in front
+    radius      = "\u{f1db}", -- bullseye / distance sliders
+    shield      = "\u{f3ed}", -- shield / lane body block
+    magic       = "\u{f0d0}", -- magic / aghs-only gate
+    mirror      = "\u{f0ec}", -- exchange / mirror attack
+    follow_only = "\u{f023}", -- lock / mirror only in follow
+    signal      = "\u{f1eb}", -- broadcast / gain_aggro event
+    tree        = "\u{f1bb}", -- tree / jungle farm
+    dragon      = "\u{f6e2}", -- dragon / ancient camps
+    crosshair   = "\u{f05b}", -- crosshairs / last-hit
+    building    = "\u{f1ad}", -- building / lane push
+    wave        = "\u{f0da}", -- caret-right / follow wave to tower
+    hammer      = "\u{f6e3}", -- hammer / siege priority
+    list        = "\u{f0dc}", -- sort / creep priorities
+    fist        = "\u{f6de}", -- fist / lane harass
+    tether      = "\u{f0c1}", -- link / idle return to hero
+    layers      = "\u{f5fd}", -- layers / stacking
+    clock       = "\u{f017}", -- clock / timing
+    vines       = "\u{f06c}", -- leaf / entangle creeps
+    heart       = "\u{f004}", -- heart / HP retreat
+    home        = "\u{f015}", -- home / fountain
+    play        = "\u{f04b}", -- play / resume farm
+    eye         = "\u{f06e}", -- eye / danger radius
+    marker      = "\u{f3c5}", -- map pin / bear alone
+    warning     = "\u{f071}", -- warning / alerts
+    users       = "\u{f0c0}", -- users / save allies
+    invis       = "\u{f070}", -- eye-slash / don't reveal invis
+    camp        = "\u{f54e}", -- campground / farm items
+    combat      = "\u{f0e7}", -- bolt / combat items
+    desktop     = "\u{f108}", -- desktop / HUD panel
+    drag        = "\u{f047}", -- arrows / drag panels
+    axis_x      = "\u{f07e}", -- arrows-h / panel X
+    axis_y      = "\u{f07d}", -- arrows-v / panel Y
+    human       = "\u{f4fe}", -- user-cog / humanizer
+    shuffle     = "\u{f074}", -- shuffle / jitter
+    pause       = "\u{f256}", -- hand / manual control pause
+    bind        = "\u{f084}", -- keyboard / hotkeys
+    move        = "\u{f24d}", -- compass / move interval
+}
+
 -- Language toggle
 local g_lang = root:Create("Language / Язык")
 ui.lang = g_lang:Switch("English / Английский [F7 to reload]", false)
-ui.lang:Icon("\u{f0ac}")
+ui.lang:Icon(I.lang)
 
 local function L(ru, en)
     return ui.lang:Get() and en or ru
@@ -50,24 +96,39 @@ local g_keys  = root:Create(L("Горячие клавиши",        "Hotkeys")
 
 -- Main
 ui.on        = g_main:Switch(L("Включить Bear AI",                      "Enable Bear AI"), false)
-ui.on:Icon("\u{f00c}")
+ui.on:Icon(I.robot)
 ui.follow    = g_main:Switch(L("Следовать за героем",                   "Follow Hero"), true)
-ui.follow:Icon("\u{f238}")
+ui.follow:Icon(I.route)
+ui.follow_front = g_main:Switch(L("Медведь впереди героя",            "Bear in Front of Hero"), true)
+ui.follow_front:Icon(I.ahead)
+ui.follow_offset = g_main:Slider(
+    L("Дистанция впереди", "Forward Offset"),
+    80, 350, 180,
+    function(v) return v .. L(" ед.", " u.") end
+)
+ui.follow_offset:Icon(I.radius)
+ui.lane_bodyblock = g_main:Switch(L("Блок на лейне (между LD и врагом)", "Lane Body Block"), true)
+ui.lane_bodyblock:Icon(I.shield)
 ui.only_aghs = g_main:Switch(L("Farm/Push/Stack только с Аганимом",     "Farm/Push/Stack Aghs only"), false)
-ui.only_aghs:Icon("\u{f005}")
+ui.only_aghs:Icon(I.magic)
 
 -- Mirror Attack
 local g_mirror = root:Create(L("Зеркальная Атака", "Mirror Attack"))
 ui.mirror_on = g_mirror:Switch(L("Медведь атакует цель героя", "Bear mirrors hero attack target"), true)
-ui.mirror_on:Icon("\u{f0e8}")
+ui.mirror_on:Icon(I.mirror)
 ui.mirror_only_follow = g_mirror:Switch(L("Только в режиме Follow",     "Only in Follow mode"), false)
-ui.mirror_only_follow:Icon("\u{f238}")
+ui.mirror_only_follow:Icon(I.follow_only)
 ui.mirror_r = g_mirror:Slider(
     L("Макс. дистанция до цели", "Max distance to target"),
     200, 2000, 1200,
     function(v) return v .. L(" ед.", " u.") end
 )
-ui.mirror_r:Icon("\u{f140}")
+ui.mirror_r:Icon(I.radius)
+ui.mirror_aggro_evt = g_mirror:Switch(
+    L("Событие gain_aggro (Unsafe)", "gain_aggro Event (Unsafe)"),
+    false
+)
+ui.mirror_aggro_evt:Icon(I.signal)
 
 -- Modes
 ui.farm = g_modes:Switch(L("Режим: Фарм леса",  "Mode: Forest Farm"), false)
@@ -81,47 +142,57 @@ ui.farm_radius = g_farm:Slider(
     400, 1200, 800,
     function(v) return v .. L(" ед.", " u.") end
 )
-ui.farm_radius:Icon("\u{f140}")
+ui.farm_radius:Icon(I.radius)
 ui.farm_ancients = g_farm:Switch(L("Фармить древних крипов", "Farm Ancient Camps"), true)
-ui.farm_ancients:Icon("\u{f1b2}")
+ui.farm_ancients:Icon(I.dragon)
 ui.farm_lasthit = g_farm:Switch(L("Умный ласт-хит нейтралов", "Smart Neutral Last-Hit"), true)
-ui.farm_lasthit:Icon("\u{f145}")
+ui.farm_lasthit:Icon(I.crosshair)
 
 -- Push
-ui.tower_lvl = g_push:Slider(
-    L("Атаковать башню от уровня", "Attack Tower from Level"),
-    0, 25, 0,
-    function(v)
-        return v == 0
-            and L("Никогда", "Never")
-            or  (L("Уровень ", "Level ") .. v .. "+")
-    end
+ui.push_creep_r = g_push:Slider(
+    L("Радиус боя с крипами", "Creep Engage Radius"),
+    400, 2000, 1200,
+    function(v) return v .. L(" ед.", " u.") end
 )
-ui.tower_lvl:Icon("\u{f132}")
+ui.push_creep_r:Icon(I.radius)
+ui.push_follow_wave = g_push:Switch(L("Идти с волной на башню", "Follow Wave to Tower"), true)
+ui.push_follow_wave:Icon(I.wave)
+ui.push_siege_prio = g_push:Switch(L("Приоритет катапульт у башни", "Prioritize Siege at Tower"), true)
+ui.push_siege_prio:Icon(I.hammer)
 ui.push_lasthit = g_push:Switch(L("Умный ласт-хит крипов", "Smart Creep Last-Hit"), true)
-ui.push_lasthit:Icon("\u{f145}")
+ui.push_lasthit:Icon(I.crosshair)
 ui.push_priorities = g_push:Switch(L("Приоритет дальников/знаменосцев", "Prioritize Ranged/Flagbearers"), true)
-ui.push_priorities:Icon("\u{f0f3}")
+ui.push_priorities:Icon(I.list)
+ui.lane_harass = g_push:Switch(L("Харасс героев рядом с LD", "Harass Heroes Near LD"), true)
+ui.lane_harass:Icon(I.fist)
+ui.lane_harass_r = g_push:Slider(
+    L("Радиус харасса от LD", "Harass Radius from LD"),
+    300, 1000, 600,
+    function(v) return v .. L(" ед.", " u.") end
+)
+ui.lane_harass_r:Icon(I.radius)
+ui.farm_idle_hero = g_farm:Switch(L("При простое — к герою", "When Idle — Go to Hero"), true)
+ui.farm_idle_hero:Icon(I.tether)
 
 -- Stacks
 ui.stack_enable    = g_stack:Switch(L("Включить стаки",       "Enable Stacking"), true)
-ui.stack_enable:Icon("\u{f0c9}")
+ui.stack_enable:Icon(I.layers)
 ui.stack_farm      = g_stack:Switch(L("Стаки при фарме",      "Stack during Farm"), true)
-ui.stack_farm:Icon("\u{f66b}")
+ui.stack_farm:Icon(I.tree)
 ui.stack_push      = g_stack:Switch(L("Стаки при пуше",       "Stack during Push"), true)
-ui.stack_push:Icon("\u{f0e7}")
+ui.stack_push:Icon(I.building)
 ui.stack_aggro_sec = g_stack:Slider(
     L("Секунда агра (база)", "Aggro Second (base)"),
     50, 57, 53,
     function(v) return v .. L(" сек", " sec") end
 )
-ui.stack_aggro_sec:Icon("\u{f017}")
+ui.stack_aggro_sec:Icon(I.clock)
 ui.stack_range = g_stack:Slider(
     L("Радиус поиска крипов", "Creep Search Radius"),
     300, 1200, 800,
     function(v) return v .. L(" ед.", " u.") end
 )
-ui.stack_range:Icon("\u{f140}")
+ui.stack_range:Icon(I.radius)
 
 -- Aghanim
 ui.aghs_on  = g_aghs:Switch(L("Включить логику Аганима",  "Enable Aghanim Logic"), true)
@@ -129,13 +200,13 @@ ui.aghs_on:Image("panorama/images/items/ultimate_scepter_png.vtex_c")
 ui.entangle = g_aghs:Switch(L("Авто-путы на врага",        "Auto Entangle"),        true)
 ui.entangle:Image("panorama/images/spellicons/lone_druid_spirit_bear_entangle_png.vtex_c")
 ui.ent_creeps = g_aghs:Switch(L("Путы на крипов (Push)", "Entangle Creeps (Push)"), false)
-ui.ent_creeps:Icon("\u{f188}")
+ui.ent_creeps:Icon(I.vines)
 ui.ent_r    = g_aghs:Slider(
     L("Радиус пут", "Entangle Radius"),
     100, 700, 400,
     function(v) return v .. L(" ед.", " u.") end
 )
-ui.ent_r:Icon("\u{f140}")
+ui.ent_r:Icon(I.radius)
 
 -- Bear survival
 ui.def_enable = g_def:Switch(L("Инстинкт самосохранения",    "Self-Preservation"),   true)
@@ -144,17 +215,17 @@ ui.def_hp_hero = g_def:Slider(
     L("Отступать к герою при HP <", "Retreat to Hero at HP <"), 
     20, 90, 50, function(v) return v .. "%" end
 )
-ui.def_hp_hero:Icon("\u{f21e}")
+ui.def_hp_hero:Icon(I.heart)
 ui.def_hp_base = g_def:Slider(
     L("На фонтан при HP <", "To Base at HP <"), 
     5, 40, 20, function(v) return v .. "%" end
 )
-ui.def_hp_base:Icon("\u{f0f9}")
+ui.def_hp_base:Icon(I.home)
 ui.def_hp_resume = g_def:Slider(
     L("Снова фармить при HP >", "Resume Farm at HP >"), 
     50, 100, 95, function(v) return v .. "%" end
 )
-ui.def_hp_resume:Icon("\u{f04e}")
+ui.def_hp_resume:Icon(I.play)
 ui.def_roar   = g_def:Switch(L("Авто-Savage Roar",            "Auto Savage Roar"),    true)
 ui.def_roar:Image("panorama/images/spellicons/lone_druid_savage_roar_png.vtex_c")
 ui.def_phase  = g_def:Switch(L("Авто-Phase Boots",            "Auto Phase Boots"),    true)
@@ -164,77 +235,77 @@ ui.def_gank_r = g_def:Slider(
     350, 1000, 600,
     function(v) return v .. L(" ед.", " u.") end
 )
-ui.def_gank_r:Icon("\u{f06d}")
+ui.def_gank_r:Icon(I.eye)
 ui.def_alone  = g_def:Slider(
     L("Медведь 'один' дальше", "Bear 'alone' beyond"),
     800, 2500, 1500,
     function(v) return v .. L(" ед.", " u.") end
 )
-ui.def_alone:Icon("\u{f124}")
+ui.def_alone:Icon(I.marker)
 ui.def_alert  = g_def:Switch(L("Показывать DEFENSE alert",    "Show DEFENSE Alert"),  true)
-ui.def_alert:Icon("\u{f0f3}")
+ui.def_alert:Icon(I.warning)
 ui.def_roar_allies = g_def:Switch(L("Спасать союзников Рыком", "Save Allies with Savage Roar"), true)
-ui.def_roar_allies:Icon("\u{f0c0}")
+ui.def_roar_allies:Icon(I.users)
 ui.def_invis_safety = g_def:Switch(L("Не палить инвизного героя", "Don't Reveal Invis Hero"), true)
-ui.def_invis_safety:Icon("\u{f070}")
+ui.def_invis_safety:Icon(I.invis)
 
 -- Items
 ui.transfer = g_item:Switch(L("Авто-передача предметов медведю", "Auto Item Transfer to Bear"), true)
 ui.transfer:Image("panorama/images/items/bag_of_gold_png.vtex_c")
 ui.auto_items_farm = g_item:Switch(L("Авто-предметы при фарме", "Auto Items during Farm"), true)
-ui.auto_items_farm:Icon("\u{f0c9}")
+ui.auto_items_farm:Icon(I.camp)
 ui.auto_items_combat = g_item:Switch(L("Авто-предметы в бою", "Auto Items in Combat"), true)
-ui.auto_items_combat:Icon("\u{f0e7}")
+ui.auto_items_combat:Icon(I.combat)
 
 -- Visuals
 ui.show_panel   = g_vis:Switch(L("Показывать панель медведя",       "Show Bear Panel"),       true)
-ui.show_panel:Icon("\u{f0e5}")
+ui.show_panel:Icon(I.desktop)
 ui.show_warning = g_vis:Switch(L("Warning без Аганима",             "No-Aghs Warning"),       true)
-ui.show_warning:Icon("\u{f071}")
+ui.show_warning:Icon(I.warning)
 ui.drag_mode    = g_vis:Switch(L("Режим перемещения панелей",       "Panel Drag Mode"),       false)
-ui.drag_mode:Icon("\u{f047}")
+ui.drag_mode:Icon(I.drag)
 
 ui.panel_x = g_vis:Slider(L("Панель X", "Panel X"), 0, 1900, 760)
-ui.panel_x:Icon("\u{f07e}")
+ui.panel_x:Icon(I.axis_x)
 ui.panel_y = g_vis:Slider(L("Панель Y", "Panel Y"), 0, 1000, 150)
-ui.panel_y:Icon("\u{f07d}")
+ui.panel_y:Icon(I.axis_y)
 ui.aghs_x  = g_vis:Slider("Warning X", 0, 1900, 760)
-ui.aghs_x:Icon("\u{f07e}")
+ui.aghs_x:Icon(I.axis_x)
 ui.aghs_y  = g_vis:Slider("Warning Y", 0, 1000, 70)
-ui.aghs_y:Icon("\u{f07d}")
+ui.aghs_y:Icon(I.axis_y)
 
 -- Hotkeys
 ui.k_toggle = g_keys:Bind(L("Вкл / Выкл AI",       "Toggle AI"),    Enum.ButtonCode.KEY_F7)
-ui.k_toggle:Icon("\u{f011}")
+ui.k_toggle:Icon(I.power)
 ui.k_push   = g_keys:Bind(L("Переключить: Push",    "Toggle: Push"), Enum.ButtonCode.KEY_F5)
-ui.k_push:Icon("\u{f0e7}")
+ui.k_push:Icon(I.building)
 ui.k_farm   = g_keys:Bind(L("Переключить: Farm",    "Toggle: Farm"), Enum.ButtonCode.KEY_F6)
-ui.k_farm:Icon("\u{f66b}")
+ui.k_farm:Icon(I.tree)
 
 -- Humanizer
 local hum_tab = tab:Create(L("Хуманайзер", "Humanizer"))
 local g_hum   = hum_tab:Create(L("Настройки", "Settings"))
 
 ui.hum_on = g_hum:Switch(L("Включить хуманайзер", "Enable Humanizer"), true)
-ui.hum_on:Icon("\u{f007}")
+ui.hum_on:Icon(I.human)
 ui.hum_delay = g_hum:Slider(
     L("Задержка тика", "Tick Delay"),
     0, 200, 80,
     function(v) return "± " .. v .. L(" мс", " ms") end
 )
-ui.hum_delay:Icon("\u{f017}")
+ui.hum_delay:Icon(I.clock)
 ui.hum_atk_delay = g_hum:Slider(
     L("Мин. интервал атаки", "Min Attack Interval"),
     200, 2000, 800,
     function(v) return v .. L(" мс", " ms") end
 )
-ui.hum_atk_delay:Icon("\u{f017}")
+ui.hum_atk_delay:Icon(I.crosshair)
 ui.hum_mov_delay = g_hum:Slider(
     L("Мин. интервал move", "Min Move Interval"),
     500, 5000, 2000,
     function(v) return v .. L(" мс", " ms") end
 )
-ui.hum_mov_delay:Icon("\u{f017}")
+ui.hum_mov_delay:Icon(I.move)
 ui.hum_jitter = g_hum:Slider(
     L("Разброс назначения", "Destination Jitter"),
     0, 200, 12,
@@ -244,7 +315,13 @@ ui.hum_jitter = g_hum:Slider(
             or  ("± " .. v .. L(" ед.", " u."))
     end
 )
-ui.hum_jitter:Icon("\u{f074}")
+ui.hum_jitter:Icon(I.shuffle)
+ui.manual_pause = g_hum:Slider(
+    L("Пауза AI после твоего ордера", "AI Pause After Your Order"),
+    0, 5, 2,
+    function(v) return v .. L(" сек", " sec") end
+)
+ui.manual_pause:Icon(I.pause)
 
 -- Callbacks
 ui.push:SetCallback(function()
@@ -261,14 +338,13 @@ local TICK      = 0.25
 local TR_DLY    = 1.0
 local FOL_START = 350
 local FOL_STOP  = 150
-local ATK_R     = 800
+local FOL_FRONT_SLOT = 100
+local FOL_FRONT_LEASH = 520
 local WALK_R    = 150
-local RESP      = 60.0
-local IDLE_T    = 8.0
-local AFTER_T   = 2.0
 local MOV_RPT   = 1.0
 local GIVE_D    = 300
 local ROAR_R    = 380
+local SCRIPT_ORDER_ID = "ld_bear_ai."
 
 local BEARS = {["npc_dota_lone_druid_bear1"] = true,["npc_dota_lone_druid_bear2"] = true,
     ["npc_dota_lone_druid_bear3"] = true,["npc_dota_lone_druid_bear4"] = true,
@@ -337,8 +413,6 @@ local hum_goal_pos          = nil
 local hum_goal_jittered     = nil
 local hum_goal_tag          = nil
 local hum_goal_allow_jitter = nil
-local hum_last_follow       = -999
-local hum_last_fol_tgt      = nil
 local invis_stop_issued     = false
 local hum_follow_active     = false
 
@@ -391,6 +465,8 @@ local entangle_cast_this_tick = false
 -- Mirror attack state: target captured from hero's attack orders
 local mirror_tgt     = nil   -- the enemy the hero ordered an attack on
 local mirror_tgt_set = -999  -- time it was set (for staleness check)
+local manual_until   = 0
+local aggro_listener_ok = false
 
 -- =========================================================
 -- UTILS / MOUSE LOGIC (ИСПРАВЛЕННЫЙ БЛОК)
@@ -491,10 +567,6 @@ local function en(u)
     return enemy_team ~= nil and sc(Entity.GetTeamNum, u) == enemy_team
 end
 
-local function hlvl()
-    return (hero and sc(Hero.GetLevel, hero)) or 0
-end
-
 local function game_min_sec()
     local now = GameRules.GetGameTime()
     local gt  = now - (sc(GameRules.GetGameStartTime) or 0)
@@ -537,8 +609,6 @@ local function reset_hum_state()
     hum_last_atk      = -999
     hum_last_tgt      = nil
     hum_last_mov      = -999
-    hum_last_follow   = -999
-    hum_last_fol_tgt  = nil
     hum_follow_active = false
     reset_hum_move()
 end
@@ -559,11 +629,62 @@ local function panic_active(now)
     return (now or GameRules.GetGameTime()) < def.panic_until
 end
 
-local function mode_name()
+local function is_manual_paused(now)
+    return manual_until > 0 and now < manual_until
+end
+
+local function mode_name(now)
+    if now and is_manual_paused(now) then return "MANUAL" end
     if ui.push:Get() then return "PUSH" end
     if ui.farm:Get() then return "FARM" end
     if ui.follow:Get() then return "FOLLOW" end
     return "IDLE"
+end
+
+local function is_bear_unit(u)
+    if not u then return false end
+    local n = sc(NPC.GetUnitName, u)
+    return n ~= nil and BEARS[n] == true
+end
+
+local function apply_manual_override(now)
+    local dur = ui.manual_pause:Get() or 0
+    if dur <= 0 then return end
+    manual_until = math.max(manual_until, now + dur)
+    reset_hum_move()
+    hum_last_tgt = nil
+    hum_follow_active = false
+end
+
+local function is_script_order(data_table, issuer)
+    if issuer == ISSUER then return true end
+    local id = data_table and data_table.identifier
+    return type(id) == "string" and string.find(id, SCRIPT_ORDER_ID, 1, true) == 1
+end
+
+local function order_affects_bear(npc)
+    if not bear then return false end
+    if npc == bear or is_bear_unit(npc) then return true end
+    if type(npc) == "table" then
+        for _, u in ipairs(npc) do
+            if u == bear or is_bear_unit(u) then return true end
+        end
+    end
+    local selected = player and sc(Player.GetSelectedUnits, player)
+    if selected then
+        for _, u in ipairs(selected) do
+            if u == bear or is_bear_unit(u) then return true end
+        end
+    end
+    return false
+end
+
+local function try_register_aggro_listener()
+    if aggro_listener_ok then return end
+    if not ui.mirror_aggro_evt:Get() then return end
+    if not Event or not Event.AddListener then return end
+    pcall(function() Event.AddListener("dota_hero_on_gain_aggro") end)
+    aggro_listener_ok = true
 end
 
 local function bear_item(name)
@@ -1297,8 +1418,12 @@ local function draw_bear_panel(x, y, mode, aghs_ok, aghs_gate, hp_num, d_now, cu
     DrawShadowText(font_small, 11 * scale, mir_v, Vec2(x + 260 * scale, r1), ui.mirror_on:Get() and aa(acc, 230) or aa(dim, 155))
 
     local r2 = r1 + 18 * scale
-    DrawShadowText(font_small, 11 * scale, L("ЗАЩИТА:", "DEFENSE:"), Vec2(x + 12 * scale, r2), aa(dim, 180))
-    DrawShadowText(font_small, 11 * scale, pretty_def_reason(def.reason, d_now), Vec2(x + 78 * scale, r2), d_now and warn_c or ok_c)
+    DrawShadowText(font_small, 11 * scale, "MODE", Vec2(x + 12 * scale, r2), aa(dim, 180))
+    local mode_c = (mode == "MANUAL") and warn_c or aa(acc, 230)
+    DrawShadowText(font_small, 11 * scale, trim_panel_text(tostring(mode or "IDLE"), 7), Vec2(x + 52 * scale, r2), mode_c)
+
+    DrawShadowText(font_small, 11 * scale, L("ЗАЩИТА:", "DEF:"), Vec2(x + 118 * scale, r2), aa(dim, 180))
+    DrawShadowText(font_small, 11 * scale, pretty_def_reason(def.reason, d_now), Vec2(x + 158 * scale, r2), d_now and warn_c or ok_c)
     
     local time_txt = tostring(minute) .. ":" .. string.format("%02d", F(sec))
     local tsz_t = tsz(time_txt)
@@ -1445,11 +1570,21 @@ local function refresh_bear()
     end
 end
 
-local function has_aghs()
-    -- Если медведя нет, то и проверять нечего
-    if not bear then return false end
+local function hero_has_ld_scepter_entangle()
+    if not hero or not alive(hero) then return false end
+    for i = 0, 15 do
+        local ab = sc(NPC.GetAbilityByIndex, hero, i)
+        if ab and sc(Ability.GetName, ab) == "lone_druid_entangle" then
+            if sc(Ability.IsHidden, ab) ~= true then return true end
+            if (sc(Ability.GetLevel, ab) or 0) > 0 then return true end
+        end
+    end
+    return false
+end
 
-    -- Списки всех возможных системных названий Аганима
+local function unit_has_aghs(unit)
+    if not unit or not alive(unit) then return false end
+
     local scepters = {
         ["item_ultimate_scepter"]   = true,
         ["item_aghanims_scepter"]   = true,
@@ -1457,45 +1592,45 @@ local function has_aghs()
         ["item_aghanims_blessing"]  = true,
     }
 
-    -- Списки баффов (когда Аганим съеден рецептом, выпал с Рошана или передан Алхимиком)
     local mods = {
         "modifier_item_ultimate_scepter_consumed",
         "modifier_item_ultimate_scepter_consumed_alchemist",
         "modifier_item_ultimate_scepter",
         "modifier_item_aghanims_scepter",
+        "modifier_item_ultimate_scepter_stat_boost",
     }
 
-    -- Важно: проверяем И медведя И самого героя (т.к. аганим на герое работает и на медведя)
-    for _, unit in ipairs({bear, hero}) do
-        if unit and alive(unit) then
-            
-            -- 1. Системная проверка API чита (если поддерживается)
-            if NPC.HasScepter then
-                local ok, r = pcall(NPC.HasScepter, unit)
-                if ok and r == true then return true end
-            end
+    if NPC.HasScepter then
+        local ok, r = pcall(NPC.HasScepter, unit)
+        if ok and r then return true end
+    end
 
-            -- 2. Проверка баффов Aghanim's Blessing (съеденного аганима)
-            for _, m in ipairs(mods) do
-                if sc(Entity.HasModifier, unit, m) == true then 
-                    return true 
-                end
-            end
+    if NPC.GetScepterUpgradeID then
+        local ok, id = pcall(NPC.GetScepterUpgradeID, unit)
+        if ok and type(id) == "number" and id > 0 then return true end
+    end
 
-            -- 3. Проверка инвентаря (цикл до 16, чтобы проверить и рюкзак, и тайш)
-            for i = 0, 16 do
-                local it = sc(NPC.GetItemByIndex, unit, i)
-                if it then
-                    local name = sc(Ability.GetName, it) or ""
-                    if scepters[name] then 
-                        return true 
-                    end
-                end
-            end
+    for _, m in ipairs(mods) do
+        if sc(Entity.HasModifier, unit, m) then return true end
+        if NPC.HasModifier and sc(NPC.HasModifier, unit, m) then return true end
+    end
 
+    for i = 0, 16 do
+        local it = sc(NPC.GetItemByIndex, unit, i)
+        if it then
+            local name = sc(Ability.GetName, it) or ""
+            if scepters[name] then return true end
         end
     end
 
+    return false
+end
+
+local function has_aghs()
+    -- LD: аганим на герое даёт независимого медведя — героя проверяем в первую очередь
+    if unit_has_aghs(hero) then return true end
+    if unit_has_aghs(bear) then return true end
+    if hero_has_ld_scepter_entangle() then return true end
     return false
 end
 
@@ -1521,9 +1656,15 @@ local function hum_jitter(pos)
     return Vector(pos:GetX() + dx, pos:GetY() + dy, pos:GetZ())
 end
 
-local function ord(t, tgt, pos, ab)
+local function ord(t, tgt, pos, ab, tag)
     if not player or not bear or not alive(bear) then return end
-    Player.PrepareUnitOrders(player, t, tgt, pos, ab, ISSUER, bear, false)
+    local now = hum_now > 0 and hum_now or GameRules.GetGameTime()
+    if is_manual_paused(now) then return end
+    local order_id = SCRIPT_ORDER_ID .. (tag or "order")
+    Player.PrepareUnitOrders(
+        player, t, tgt, pos, ab, ISSUER, bear,
+        false, false, true, false, order_id, false
+    )
 end
 
 local function ba(t)
@@ -1550,7 +1691,7 @@ end
 local function bam(p)
     if not p then return end
     reset_hum_move()
-    ord(O_ATK_MV, nil, p, nil)
+    ord(O_ATK_MV, nil, p, nil, "atk_move")
 end
 
 local function bm(p, tag, allow_jitter)
@@ -1585,14 +1726,21 @@ local function bm(p, tag, allow_jitter)
     end
 
     hum_last_mov = hum_now
-    ord(O_MOVE, nil, send_pos, nil)
+    ord(O_MOVE, nil, send_pos, nil, tag or "move")
 end
 
 local function bm_force(p, tag)
     if not p then return end
     reset_hum_move()
     hum_last_mov = hum_now
-    ord(O_MOVE, nil, p, nil)
+    ord(O_MOVE, nil, p, nil, tag or "move")
+end
+
+local function bam_force(p)
+    if not p then return end
+    reset_hum_move()
+    hum_last_mov = hum_now
+    ord(O_ATK_MV, nil, p, nil, "atk_move_force")
 end
 
 local function bct(a, t)
@@ -1644,9 +1792,6 @@ local function get_bear_damage()
 end
 
 local function is_strong_enough_for_ancients()
-    if not hero then return false end
-    local lvl = hlvl()
-    if lvl >= 7 then return true end
     local items = {
         "item_radiance", "item_maelstrom", "item_mjollnir",
         "item_mask_of_demonic_release", "item_mask_of_madness", "item_armlet"
@@ -1654,7 +1799,7 @@ local function is_strong_enough_for_ancients()
     for _, it_name in ipairs(items) do
         if bear_item(it_name) then return true end
     end
-    return false
+    return true
 end
 
 local function check_armlet_toggle_off()
@@ -1971,6 +2116,316 @@ local function friendly_creep_near(pos, radius)
                     return true
                 end
             end
+        end
+    end
+    return false
+end
+
+local function is_lane_creep_name(name)
+    return name and string.find(name, "npc_dota_creep_", 1, true) ~= nil
+end
+
+local function enemy_creeps_in_radius(bpos, radius)
+    local count = 0
+    local list = npc_cache or NPCs.GetAll()
+    for _, u in pairs(list) do
+        if u and alive(u) and en(u) then
+            local name = gn(u)
+            if is_lane_creep_name(name) then
+                local p = gp(u)
+                if p and d2(p, bpos) <= radius then
+                    count = count + 1
+                end
+            end
+        end
+    end
+    return count
+end
+
+local function allied_creeps_pushing(pos, from_pos)
+    if not pos then return false end
+    local list = npc_cache or NPCs.GetAll()
+    for _, u in pairs(list) do
+        if u and alive(u) and not en(u) then
+            local name = gn(u)
+            if is_lane_creep_name(name) then
+                local p = gp(u)
+                if p then
+                    local dist_struct = d2(p, pos)
+                    if dist_struct <= 1400 then return true end
+                    if ui.push_follow_wave:Get() and dist_struct <= 2800 then
+                        if from_pos and dist_struct < d2(from_pos, pos) + 500 then
+                            return true
+                        end
+                        if NPC.IsRunning and sc(NPC.IsRunning, u) then
+                            return true
+                        end
+                        if NPC.IsAttacking and sc(NPC.IsAttacking, u) then
+                            return true
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function can_attack_structure(sp, bpos)
+    if not sp then return false end
+    if friendly_creep_near(sp, 900) then return true end
+    if allied_creeps_pushing(sp, bpos) then return true end
+    local creep_r = ui.push_creep_r:Get() or 1200
+    if enemy_creeps_in_radius(bpos, creep_r) == 0 then return true end
+    return false
+end
+
+local function score_push_creep(u, name, d, bpos, bear_range, avg_dmg, tower_phase)
+    local score = -d * 0.1
+    if ui.push_priorities:Get() then
+        if string.find(name, "ranged", 1, true) or string.find(name, "flagbearer", 1, true) then
+            score = score + 50
+        elseif string.find(name, "melee", 1, true) then
+            score = score + 20
+        elseif string.find(name, "siege", 1, true) then
+            score = score + 10
+        end
+    end
+    if tower_phase and ui.push_siege_prio:Get() and string.find(name, "siege", 1, true) then
+        score = score + 80
+    end
+    if ui.push_lasthit:Get() and d <= (bear_range + 200) then
+        local hp = sc(Entity.GetHealth, u) or 1
+        local mult = sc(NPC.GetArmorDamageMultiplier, u) or 1
+        if hp <= avg_dmg * mult then
+            score = score + 5000
+        end
+    end
+    return score
+end
+
+local function find_push_creeps(bpos, creep_r)
+    local list = npc_cache or NPCs.GetAll()
+    local search_r = math.max(creep_r, 1800)
+    local bear_range = (sc(NPC.GetAttackRange, bear) or 150) + (sc(NPC.GetAttackRangeBonus, bear) or 0)
+    local avg_dmg = get_bear_damage()
+    local tower_phase = enemy_creeps_in_radius(bpos, creep_r) == 0
+
+    local best_attack, best_attack_score = nil, -99999
+    local best_chase, best_chase_dist = nil, math.huge
+
+    for _, u in pairs(list) do
+        if u and alive(u) and en(u) then
+            local name = gn(u)
+            if is_lane_creep_name(name) then
+                local p = gp(u)
+                if p then
+                    local d = d2(p, bpos)
+                    if d <= search_r then
+                        local score = score_push_creep(u, name, d, bpos, bear_range, avg_dmg, tower_phase)
+                        if d <= bear_range + 250 then
+                            if score > best_attack_score then
+                                best_attack_score = score
+                                best_attack = u
+                            end
+                        elseif d < best_chase_dist then
+                            best_chase_dist = d
+                            best_chase = u
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return best_attack, best_chase, tower_phase
+end
+
+local function is_enemy_structure(u)
+    if not u or not alive(u) or not en(u) or sc(NPC.IsInvulnerable, u) then return false end
+    if NPC.IsTower and sc(NPC.IsTower, u) then return true end
+    if NPC.IsBarracks and sc(NPC.IsBarracks, u) then return true end
+    local name = gn(u) or ""
+    if string.find(name, "fillers", 1, true) then return true end
+    if string.find(name, "fort", 1, true) or string.find(name, "ancient", 1, true) then return true end
+    return false
+end
+
+local function find_push_structure(bpos)
+    local best, best_dist = nil, math.huge
+
+    if Towers and Towers.GetAll then
+        for _, t in pairs(Towers.GetAll()) do
+            if t and alive(t) and en(t) and not sc(NPC.IsInvulnerable, t) then
+                local p = gp(t)
+                if p then
+                    local d = d2(p, bpos)
+                    if d < best_dist then
+                        best_dist = d
+                        best = t
+                    end
+                end
+            end
+        end
+    end
+
+    local list = npc_cache or NPCs.GetAll()
+    for _, u in pairs(list) do
+        if is_enemy_structure(u) then
+            local p = gp(u)
+            if p then
+                local d = d2(p, bpos)
+                if d < best_dist then
+                    best_dist = d
+                    best = u
+                end
+            end
+        end
+    end
+
+    return best, best_dist
+end
+
+local function find_wave_push_goal(bpos, struct_pos)
+    if not struct_pos then return nil end
+    local best_pos, best_dist = nil, math.huge
+    local list = npc_cache or NPCs.GetAll()
+    for _, u in pairs(list) do
+        if u and alive(u) and not en(u) then
+            local name = gn(u)
+            if is_lane_creep_name(name) then
+                local p = gp(u)
+                if p then
+                    local d = d2(p, struct_pos)
+                    if d < best_dist then
+                        best_dist = d
+                        best_pos = p
+                    end
+                end
+            end
+        end
+    end
+    if best_pos and best_dist <= 3200 then return best_pos end
+    return struct_pos
+end
+
+local function do_push_structure(bpos)
+    reset_hum_move()
+    hum_last_tgt = nil
+
+    local struct, struct_dist = find_push_structure(bpos)
+    if not struct then return false end
+
+    local sp = gp(struct)
+    if not sp then return false end
+
+    local bear_range = (sc(NPC.GetAttackRange, bear) or 150) + (sc(NPC.GetAttackRangeBonus, bear) or 0)
+
+    if can_attack_structure(sp, bpos) then
+        if struct_dist <= bear_range + 200 then
+            ba_force(struct)
+        else
+            bam_force(sp)
+        end
+        return true
+    end
+
+    local wave_goal = find_wave_push_goal(bpos, sp)
+    if wave_goal then
+        bam_force(wave_goal)
+        return true
+    end
+
+    bam_force(sp)
+    return true
+end
+
+local function get_follow_front_goal()
+    if not hero or not alive(hero) then return nil end
+    local hp = gp(hero)
+    if not hp then return nil end
+
+    if ui.lane_bodyblock:Get() then
+        local enemy, ed = nearest_enemy_hero(hp)
+        local harass_r = ui.lane_harass_r:Get() or 600
+        if enemy and ed <= harass_r then
+            local ep = gp(enemy)
+            if ep then
+                local dir = hp - ep
+                if dir:Length2D() > 1 then
+                    return hp + dir:Normalized() * 120
+                end
+            end
+        end
+    end
+
+    if Entity.GetForwardPosition then
+        local offset = ui.follow_offset:Get() or 180
+        local fp = sc(Entity.GetForwardPosition, hero, offset)
+        if fp then return fp end
+    end
+
+    return hp
+end
+
+local function find_harass_hero(bpos, creep_r)
+    if not ui.lane_harass:Get() or not hero or not alive(hero) then return nil end
+    local hp = gp(hero)
+    if not hp then return nil end
+    local harass_r = ui.lane_harass_r:Get() or 600
+    local best, best_score = nil, -99999
+    for _, h in pairs(Heroes.GetAll()) do
+        if h and alive(h) and en(h) and not sc(NPC.IsIllusion, h) and not sc(Hero.IsClone, h) then
+            local p = gp(h)
+            if p and d2(p, hp) <= harass_r and d2(p, bpos) <= creep_r then
+                local score = 1000 - d2(p, bpos)
+                if score > best_score then
+                    best_score = score
+                    best = h
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function do_farm_idle_fallback(bpos, now)
+    if ui.farm_idle_hero:Get() and hero and alive(hero) then
+        local hp = gp(hero)
+        if hp and d2(bpos, hp) > FOL_START then
+            bm(hp, "farm_idle_to_hero", false)
+            return true
+        end
+    end
+
+    local _, min, sec = game_min_sec()
+    local best_camp, best_dist = nil, math.huge
+    for _, c in ipairs(CAMPS) do
+        local cleared_min = fc[c.id] or -1
+        if cleared_min >= min then
+            local d = d2(c.p, bpos)
+            if d < best_dist then
+                best_dist = d
+                best_camp = c
+            end
+        end
+    end
+
+    if best_camp then
+        if sec >= 53 and sec <= 59 and d2(bpos, best_camp.p) < 500 then
+            local dir = (bpos - best_camp.p):Normalized()
+            bm(best_camp.p + dir * 450, "farm_idle_spawn_wait", false)
+        else
+            bm(best_camp.p, "farm_idle_next_camp", true)
+        end
+        return true
+    end
+
+    if hero and alive(hero) then
+        local hp = gp(hero)
+        if hp then
+            bam(hp)
+            return true
         end
     end
     return false
@@ -2476,12 +2931,18 @@ local function do_farm(bpos, now)
         if old then fc[old] = min end
         reset_farm_state()
         next_camp(bpos, now, old)
+        if not camp_pos then
+            do_farm_idle_fallback(bpos, now)
+        end
         return
     end
 
     -- 3. НЕТ АКТИВНОГО КЕМПА — ИЩЕМ
     if not camp_pos then
         next_camp(bpos, now, nil)
+        if not camp_pos then
+            do_farm_idle_fallback(bpos, now)
+        end
         return
     end
 
@@ -2540,6 +3001,9 @@ local function do_farm(bpos, now)
         end
         reset_farm_state()
         next_camp(bpos, now, old)
+        if not camp_pos then
+            do_farm_idle_fallback(bpos, now)
+        end
     end
 end
 
@@ -2549,7 +3013,6 @@ end
 local function do_push(bpos)
     if entangle_cast_this_tick then return end
 
-    -- 0. Disarm & separation awareness
     if not has_aghs() and hero and alive(hero) then
         local hp = gp(hero)
         if hp and d2(bpos, hp) > 1050 then
@@ -2558,90 +3021,35 @@ local function do_push(bpos)
         end
     end
 
-    -- 0.1 Auto-rune snatching
     if do_runes(bpos) then return end
 
-    local list = npc_cache or NPCs.GetAll()
+    local creep_r = ui.push_creep_r:Get() or 1200
 
-    local best_creep = nil
-    local best_score = -99999
-    local avg_dmg = get_bear_damage()
-    local bear_range = (sc(NPC.GetAttackRange, bear) or 150) + (sc(NPC.GetAttackRangeBonus, bear) or 0)
-
-    for _, u in pairs(list) do
-        if u and alive(u) and en(u) then
-            local name = gn(u)
-            if string.find(name, "npc_dota_creep_", 1, true) then
-                local p = gp(u)
-                if p then
-                    local d = d2(p, bpos)
-                    local score = 0
-                    
-                    if ui.push_priorities:Get() then
-                        if string.find(name, "ranged", 1, true) or string.find(name, "flagbearer", 1, true) then
-                            score = score + 50
-                        elseif string.find(name, "melee", 1, true) then
-                            score = score + 20
-                        elseif string.find(name, "siege", 1, true) then
-                            score = score + 10
-                        end
-                    end
-                    
-                    score = score - (d * 0.1)
-                    
-                    local hp = sc(Entity.GetHealth, u) or 1
-                    if ui.push_lasthit:Get() and d <= (bear_range + 200) then
-                        local mult = sc(NPC.GetArmorDamageMultiplier, u) or 1
-                        local real_dmg = avg_dmg * mult
-                        if hp <= real_dmg then
-                            score = score + 5000
-                        end
-                    end
-                    
-                    if score > best_score then
-                        best_score = score
-                        best_creep = u
-                    end
-                end
-            end
-        end
-    end
-    if best_creep then
-        ba(best_creep)
+    local harass_tgt = find_harass_hero(bpos, math.max(creep_r, 1800))
+    if harass_tgt then
+        ba_force(harass_tgt)
         return
     end
 
-    local best_tower, best_tower_dist = nil, math.huge
-    for _, t in pairs(Towers.GetAll()) do
-        if t and alive(t) and en(t) and not sc(NPC.IsInvulnerable, t) then
-            local p = gp(t)
-            if p then
-                local d = d2(p, bpos)
-                if d < best_tower_dist then
-                    best_tower_dist = d
-                    best_tower = t
-                end
-            end
+    local atk_creep, chase_creep, tower_phase = find_push_creeps(bpos, creep_r)
+
+    if atk_creep then
+        local ap = gp(atk_creep)
+        local atk_dist = ap and d2(ap, bpos) or math.huge
+        if not tower_phase or atk_dist <= creep_r then
+            ba_force(atk_creep)
+            return
         end
     end
 
-    if best_tower then
-        local tp = gp(best_tower)
-        if tp then
-            local min = ui.tower_lvl:Get()
-            if min > 0 and hlvl() >= min then
-                -- Backdoor protection / Creep check
-                if friendly_creep_near(tp, 900) then
-                    ba(best_tower)
-                else
-                    local fallback_pos = gp(hero)
-                    local nearest_creep = find_nearest_friendly_creep(bpos)
-                    if nearest_creep then fallback_pos = gp(nearest_creep) end
-                    bm(fallback_pos or tp, "push_backdoor_safety", false)
-                end
-            else
-                bm(tp, "push_tower", true)
-            end
+    if chase_creep and not tower_phase then
+        ba_force(chase_creep)
+        return
+    end
+
+    if tower_phase or (not atk_creep and not chase_creep) then
+        if do_push_structure(bpos) then
+            return
         end
     end
 end
@@ -2931,11 +3339,9 @@ local function do_mirror_attack(bpos)
     if d2(bpos, tgt_pos) > ui.mirror_r:Get() then return false end
 
 
-    -- Don't spam: check if bear is already attacking this target
-    if hum_last_tgt == mirror_tgt then
-        if sc(NPC.IsAttacking, bear) or (now - hum_last_atk) < 1.5 then
-            return true
-        end
+    -- Don't spam: only skip re-order while bear is actually swinging
+    if hum_last_tgt == mirror_tgt and sc(NPC.IsAttacking, bear) then
+        return true
     end
 
     -- Auto-Phase Boots in chase
@@ -2954,6 +3360,12 @@ end
 -- CORE
 -- =========================================================
 local function on_tick(now)
+    if is_manual_paused(now) then
+        npc_cache = nil
+        neutral_cache = nil
+        return
+    end
+
     npc_cache = NPCs.GetAll()
     build_neutral_cache()
     entangle_cast_this_tick = false
@@ -3010,8 +3422,7 @@ local function on_tick(now)
         end
 
         reset_farm_state()
-        -- Mirror attack has priority over push AI when hero is actively attacking
-        if not do_mirror_attack(bpos) then
+        if not do_mirror_attack(bpos) or not sc(NPC.IsAttacking, bear) then
             do_push(bpos)
         end
 
@@ -3046,16 +3457,42 @@ local function on_tick(now)
 
         -- Mirror attack takes priority over following
         if not do_mirror_attack(bpos) then
-            if hero then
+            local harass_tgt = find_harass_hero(bpos, ui.mirror_r:Get() or 1200)
+            if harass_tgt then
+                ba_force(harass_tgt)
+            elseif hero then
                 local hp = gp(hero)
-                if hp then
-                    local dist = d2(bpos, hp)
-                    local is_hero_invis = is_invisible(hero)
-                    
-                    if ui.def_invis_safety:Get() and is_hero_invis then
-                        if dist > 1200 then
+                if not hp then
+                    -- skip
+                elseif ui.follow_front:Get() then
+                    local goal = get_follow_front_goal()
+                    if goal and not entangle_cast_this_tick then
+                        local dist_goal = d2(bpos, goal)
+                        local dist_hero = d2(bpos, hp)
+                        local offset = ui.follow_offset:Get() or 180
+                        local slot_r = math.max(FOL_FRONT_SLOT, offset * 0.35)
+                        local leash_r = FOL_FRONT_LEASH + offset * 0.5
+
+                        if dist_goal > slot_r or dist_hero > leash_r then
+                            if ui.def_phase:Get() and dist_hero > 400 then
+                                local phase = bear_item("item_phase_boots")
+                                if phase and sc(Ability.IsCastable, phase, 0) then
+                                    bcn(phase)
+                                end
+                            end
+                            bm(goal, "follow_front", false)
                             hum_follow_active = true
-                        elseif dist <= 800 then
+                        else
+                            hum_follow_active = false
+                        end
+                    end
+                else
+                    local is_hero_invis = is_invisible(hero)
+
+                    if ui.def_invis_safety:Get() and is_hero_invis then
+                        if d2(bpos, hp) > 1200 then
+                            hum_follow_active = true
+                        elseif d2(bpos, hp) <= 800 then
                             hum_follow_active = false
                         end
                         if hum_follow_active and not entangle_cast_this_tick then
@@ -3075,6 +3512,7 @@ local function on_tick(now)
                         end
                     else
                         invis_stop_issued = false
+                        local dist = d2(bpos, hp)
                         if dist > FOL_START then
                             hum_follow_active = true
                         elseif dist < FOL_STOP then
@@ -3129,6 +3567,8 @@ end
 function ld.OnFrame()
     if not ui.on:Get() then return end
     if not hero or not alive(hero) then return end
+
+    refresh_bear()
 
     local mx, my = get_cursor()
     local is_down = is_lmb_down()
@@ -3276,7 +3716,7 @@ function ld.OnFrame()
     if not ui.show_panel:Get() then return end
 
     local x, y      = ui.panel_x:Get(), ui.panel_y:Get()
-    local mode       = mode_name()
+    local mode       = mode_name(now)
     local aghs_ok    = has_aghs()
     local now        = GameRules.GetGameTime()
     local d_now      = panic_active(now)
@@ -3336,8 +3776,11 @@ function ld.OnUpdate()
         reset_stack_state()
         reset_hum_state()
         reset_def_state()
+        manual_until = 0
         return
     end
+
+    try_register_aggro_listener()
 
     if not hero then
         player = Players.GetLocal()
@@ -3387,6 +3830,10 @@ function ld.OnUpdate()
     local now = GameRules.GetGameTime()
     hum_now = now
 
+    if is_manual_paused(now) then
+        return
+    end
+
     local bpos = gp(bear)
     if bpos and do_defense(bpos, now) then
         reset_farm_state()
@@ -3424,13 +3871,53 @@ function ld.OnUpdate()
 end
 
 
+function ld.OnFireEventClient(data)
+    if not ui.on:Get() or not ui.mirror_aggro_evt:Get() or not ui.mirror_on:Get() then return end
+    if not data or data.name ~= "dota_hero_on_gain_aggro" then return end
+
+    local evt = data.event
+    if not evt or not Event or not Event.GetInt then return end
+
+    local attacker = Entity.Get(Event.GetInt(evt, "entindex_attacker"))
+    local target   = Entity.Get(Event.GetInt(evt, "entindex_hero"))
+    if not attacker or not target then return end
+    if not NPC.IsHero(attacker) or not NPC.IsHero(target) then return end
+
+    local me = hero or Heroes.GetLocal()
+    if not me then return end
+    if not Entity.IsSameTeam(me, attacker) then return end
+    if Entity.IsSameTeam(me, target) then return end
+    if not alive(target) or not en(target) then return end
+
+    local ap = gp(attacker)
+    local mp = gp(me)
+    if not ap or not mp then return end
+
+    if attacker ~= me and d2(ap, mp) > 1400 then return end
+
+    set_mirror_target(target)
+end
+
+
 function ld.OnPrepareUnitOrders(data, player_arg, order_arg, target_arg, position_arg, ability_arg, orderIssuer_arg, npc_arg, queue_arg, showEffects_arg)
     if not ui.on:Get() then return end
     if not hero or not player then return end
-    if player_arg and player_arg ~= player then return end
 
-    -- Handle order issued to the hero
-    if npc_arg == hero then
+    local data_table = type(data) == "table" and data or nil
+    local issuer = data_table and data_table.orderIssuer or orderIssuer_arg
+    local npc = data_table and data_table.npc or npc_arg
+    local order_player = data_table and data_table.player or player_arg
+
+    if is_script_order(data_table, issuer) then return end
+    if order_player and order_player ~= player then return end
+
+    if (ui.manual_pause:Get() or 0) > 0 and order_affects_bear(npc) then
+        apply_manual_override(GameRules.GetGameTime())
+    end
+
+    if npc_arg ~= hero and npc ~= hero then return end
+
+    if npc_arg == hero or npc == hero then
         if ui.mirror_on:Get() then
             if order_arg == O_ATTACK then
                 local tgt = target_arg
