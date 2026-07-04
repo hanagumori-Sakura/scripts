@@ -426,36 +426,92 @@ local function getAdaptiveFallbackScreenSize()
     return Vec2(1280, 720)
 end
 
-local function GetScreenSize()
+local function GetBestScreenSize()
+    local candidates = {}
+
+    local function addCandidate(value, valueB)
+        local normalized = normalizeScreenSize(value, valueB)
+        if normalized then
+            candidates[#candidates + 1] = normalized
+        end
+    end
+
     if Render and Render.ScreenSize then
         local ok, size = SafeCall(Render.ScreenSize)
         if ok then
-            local normalized = normalizeScreenSize(size)
-            if normalized then
-                updateScreenBaselines(normalized)
-                return normalized
-            end
+            addCandidate(size)
+        end
+    end
+
+    if Renderer and Renderer.GetScreenSize then
+        local ok, size = SafeCall(Renderer.GetScreenSize)
+        if ok then
+            addCandidate(size)
         end
     end
 
     if Engine and Engine.GetScreenSize then
         local ok, a, b = SafeCall(Engine.GetScreenSize)
         if ok then
-            local normalized = normalizeScreenSize(a, b)
+            addCandidate(a, b)
+        end
+    end
+
+    local best = nil
+    local bestArea = 0
+    for i, candidate in ipairs(candidates) do
+        local area = candidate.x * candidate.y
+        if area > bestArea then
+            bestArea = area
+            best = candidate
+        end
+    end
+
+    if best then
+        updateScreenBaselines(best)
+        return Vec2(best.x, best.y)
+    end
+
+    local fallback = getAdaptiveFallbackScreenSize()
+    updateScreenBaselines(fallback)
+    return fallback
+end
+
+local function GetScreenSize()
+    return GetBestScreenSize()
+end
+
+local function GetLiveRenderScreenSize()
+    if Render and Render.ScreenSize then
+        local ok, size = SafeCall(Render.ScreenSize)
+        if ok then
+            local normalized = normalizeScreenSize(size)
             if normalized then
-                updateScreenBaselines(normalized)
-                return normalized
+                return Vec2(normalized.x, normalized.y)
             end
         end
     end
 
-    local adaptiveFallback = getAdaptiveFallbackScreenSize()
-    updateScreenBaselines(adaptiveFallback)
-    return adaptiveFallback
+    if Renderer and Renderer.GetScreenSize then
+        local ok, size = SafeCall(Renderer.GetScreenSize)
+        if ok then
+            local normalized = normalizeScreenSize(size)
+            if normalized then
+                return Vec2(normalized.x, normalized.y)
+            end
+        end
+    end
+
+    return Vec2(screenSize.x, screenSize.y)
 end
 
 local function CaptureScreenSizeForMenuSession()
-    local size = GetScreenSize()
+    local size = GetBestScreenSize()
+    local liveSize = GetLiveRenderScreenSize()
+    if liveSize.x * liveSize.y > size.x * size.y then
+        size = liveSize
+    end
+
     if not size or not size.x or not size.y or size.x <= 1 or size.y <= 1 then
         return
     end
@@ -1979,9 +2035,24 @@ local function DrawBackgroundEffects(fadeInAlpha)
     fadeInAlpha = fadeInAlpha or State.fadeInAlpha or 1
 
     local primaryColor, secondaryColor = GetDrawThemeColors()
-    local width = screenSize.x
-    local height = screenSize.y
-    local screenScale = getScreenScale()
+    local renderSize = GetLiveRenderScreenSize()
+    local width = renderSize.x
+    local height = renderSize.y
+    local simW = math.max(screenSize.x, 1)
+    local simH = math.max(screenSize.y, 1)
+    local posScaleX = width / simW
+    local posScaleY = height / simH
+
+    local function toRenderX(simX)
+        return simX * posScaleX
+    end
+
+    local function toRenderY(simY)
+        return simY * posScaleY
+    end
+
+    local renderMinDim = math.min(width, height)
+    local screenScale = clamp(renderMinDim / math.max(baseScreenMinDim or renderMinDim, 1), 0.75, 1.8)
     local lowQuality = qualityScale < CONSTANTS.QUALITY_LOW_THRESHOLD
     local drawStarRays = qualityScale >= CONSTANTS.STAR_RAY_QUALITY_THRESHOLD
         and Script.starRays and Script.starRays:Get()
@@ -1991,7 +2062,7 @@ local function DrawBackgroundEffects(fadeInAlpha)
 
     if Script.backgroundBlur and Script.backgroundBlur:Get() and Script.blurIntensity then
         local blurStrength = clamp(Script.blurIntensity:Get(), 0.1, 1.0)
-        Render.Blur(Vec2(0, 0), screenSize, blurStrength, 1.0, 0, Enum.DrawFlags.None)
+        Render.Blur(Vec2(0, 0), renderSize, blurStrength, 1.0, 0, Enum.DrawFlags.None)
     end
 
     if Script.colorWash and Script.colorWash:Get() then
@@ -2000,7 +2071,7 @@ local function DrawBackgroundEffects(fadeInAlpha)
 
         gradientRectCompat(
             Vec2(0, 0),
-            screenSize,
+            renderSize,
             Color(primaryColor.r, primaryColor.g, primaryColor.b, washAlpha),
             Color(secondaryColor.r, secondaryColor.g, secondaryColor.b, washAlpha),
             true
@@ -2008,7 +2079,7 @@ local function DrawBackgroundEffects(fadeInAlpha)
 
         gradientRectCompat(
             Vec2(0, 0),
-            screenSize,
+            renderSize,
             Color(10, 18, 32, washAlphaSoft),
             Color(0, 0, 0, 0),
             false
@@ -2038,10 +2109,14 @@ local function DrawBackgroundEffects(fadeInAlpha)
         local streakVisibility = fadeInAlpha * (0.74 + qualityScale * 0.26)
         for i, streak in ipairs(ambientStreakActive) do
             local sway = math.sin(time * 0.8 + i * 0.67)
-            local sx = streak.x + sway * 8
-            local sy = streak.y + sway * 4
-            local ex = sx + math.cos(streak.angle) * streak.length
-            local ey = sy + math.sin(streak.angle) * streak.length
+            local simSx = streak.x + sway * 8
+            local simSy = streak.y + sway * 4
+            local simEx = simSx + math.cos(streak.angle) * streak.length
+            local simEy = simSy + math.sin(streak.angle) * streak.length
+            local sx = toRenderX(simSx)
+            local sy = toRenderY(simSy)
+            local ex = toRenderX(simEx)
+            local ey = toRenderY(simEy)
             local alpha = math.floor(streak.alpha * streakVisibility)
 
             if alpha > 2 then
@@ -2145,8 +2220,8 @@ local function DrawBackgroundEffects(fadeInAlpha)
             local layerDriftMul = STAR_LAYER_DRIFT[layer] or 1.0
             local alpha = math.floor(star.brightness * 255 * fadeInAlpha * layerAlphaMul)
             local starParallax = (0.12 + star.size * 0.03) * layerParallax * (multiLayer and 1 or 0.65)
-            local drawX = star.x + sceneParallaxX * starParallax
-            local drawY = star.y + sceneParallaxY * starParallax * layerDriftMul
+            local drawX = toRenderX(star.x + sceneParallaxX * starParallax)
+            local drawY = toRenderY(star.y + sceneParallaxY * starParallax * layerDriftMul)
             local drawSize = star.size * (multiLayer and layerSizeMul or 1.0)
 
             local coreColor
@@ -2179,13 +2254,15 @@ local function DrawBackgroundEffects(fadeInAlpha)
     if Script.shootingStars and Script.shootingStars:Get() then
         for _, star in ipairs(shootingStarPool) do
             if star.active then
-                local x = star.startX + (star.endX - star.startX) * star.progress
-                local y = star.startY + (star.endY - star.startY) * star.progress
+                local simX = star.startX + (star.endX - star.startX) * star.progress
+                local simY = star.startY + (star.endY - star.startY) * star.progress
+                local x = toRenderX(simX)
+                local y = toRenderY(simY)
 
                 for i = 1, #star.tail - 1 do
                     local tailAlpha = math.floor((i / #star.tail) * 200 * fadeInAlpha)
                     local size = star.size * (i / #star.tail)
-                    Render.FilledCircle(Vec2(star.tail[i].x, star.tail[i].y), size, Color(255, 255, 200, tailAlpha), 8)
+                    Render.FilledCircle(Vec2(toRenderX(star.tail[i].x), toRenderY(star.tail[i].y)), size, Color(255, 255, 200, tailAlpha), 8)
                 end
 
                 Render.FilledCircle(Vec2(x, y), star.size, Color(255, 255, 255, math.floor(255 * fadeInAlpha)), 8)
@@ -2204,7 +2281,6 @@ local function DrawBackgroundEffects(fadeInAlpha)
     local particleSoftCore = Script.particleSoftCore and Script.particleSoftCore:Get()
     local particleLinksEnabled = Script.particleConnections and Script.particleConnections:Get()
     local connectionDist = Script.particleConnectionDist and Script.particleConnectionDist:Get() or CONSTANTS.PARTICLE_CONNECTION_DIST
-    local connectionDistSq = connectionDist * connectionDist
     local maxConnections = Script.particleMaxConnections and Script.particleMaxConnections:Get() or CONSTANTS.PARTICLE_MAX_CONNECTIONS
     local linkBaseAlpha = Script.particleConnectionAlpha and Script.particleConnectionAlpha:Get() or 50
     local linkWidth = Script.particleConnectionWidth and Script.particleConnectionWidth:Get() or 1
@@ -2221,10 +2297,11 @@ local function DrawBackgroundEffects(fadeInAlpha)
         end
 
         local alpha = math.floor(particle.brightness * particleBaseAlpha * fadeInAlpha)
-        local radius = particle.size * particleSize * (particle.depth or 1) * 0.85
+        local sizeScale = (posScaleX + posScaleY) * 0.5
+        local radius = particle.size * particleSize * (particle.depth or 1) * 0.85 * sizeScale
         local parallaxStrength = 0.22 + (particle.depth or 1) * 0.28
-        local drawX = particle.x + sceneParallaxX * parallaxStrength
-        local drawY = particle.y + sceneParallaxY * parallaxStrength
+        local drawX = toRenderX(particle.x + sceneParallaxX * parallaxStrength)
+        local drawY = toRenderY(particle.y + sceneParallaxY * parallaxStrength)
 
         particle.drawX = drawX
         particle.drawY = drawY
@@ -2248,12 +2325,13 @@ local function DrawBackgroundEffects(fadeInAlpha)
     end
 
     if particleLinksEnabled and maxConnections > 0 and connectionDist > 0 then
+        local renderConnectionDist = connectionDist * ((posScaleX + posScaleY) * 0.5)
         DrawParticleLinks(
             bgParticleActive,
             c1,
             c2,
-            connectionDist,
-            connectionDistSq,
+            renderConnectionDist,
+            renderConnectionDist * renderConnectionDist,
             maxConnections,
             linkBaseAlpha,
             linkWidth,
