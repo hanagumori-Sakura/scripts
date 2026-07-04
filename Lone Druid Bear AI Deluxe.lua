@@ -3,8 +3,14 @@ local ld = {}
 -- =========================================================
 -- RENDER
 -- =========================================================
-local font_big   = Render.LoadFont("Verdana", 14, 700)
-local font_small = Render.LoadFont("Verdana", 12, 400)
+local font_big   = Render.LoadFont("Segoe UI", Enum.FontCreate.FONTFLAG_ANTIALIAS, Enum.FontWeight.MEDIUM)
+local font_small = Render.LoadFont("Segoe UI", Enum.FontCreate.FONTFLAG_ANTIALIAS, Enum.FontWeight.NORMAL)
+if not font_big or font_big == 0 then
+    font_big = Render.LoadFont("Tahoma", Enum.FontCreate.FONTFLAG_ANTIALIAS, Enum.FontWeight.MEDIUM)
+end
+if not font_small or font_small == 0 then
+    font_small = Render.LoadFont("Tahoma", Enum.FontCreate.FONTFLAG_ANTIALIAS, Enum.FontWeight.NORMAL)
+end
 
 -- =========================================================
 -- ORDERS
@@ -61,6 +67,7 @@ local I = {
     invis       = "\u{f070}", -- eye-slash / don't reveal invis
     camp        = "\u{f54e}", -- campground / farm items
     combat      = "\u{f0e7}", -- bolt / combat items
+    transfer    = "\u{f362}", -- exchange-alt / give items to bear
     desktop     = "\u{f108}", -- desktop / HUD panel
     drag        = "\u{f047}", -- arrows / drag panels
     axis_x      = "\u{f07e}", -- arrows-h / panel X
@@ -102,7 +109,7 @@ ui.follow_front = g_main:Switch(L("Медведь впереди героя",   
 ui.follow_front:Icon(I.ahead)
 ui.follow_offset = g_main:Slider(
     L("Дистанция впереди", "Forward Offset"),
-    80, 350, 180,
+    80, 650, 180,
     function(v) return v .. L(" ед.", " u.") end
 )
 ui.follow_offset:Icon(I.radius)
@@ -250,7 +257,7 @@ ui.def_invis_safety:Icon(I.invis)
 
 -- Items
 ui.transfer = g_item:Switch(L("Авто-передача предметов медведю", "Auto Item Transfer to Bear"), true)
-ui.transfer:Image("panorama/images/items/bag_of_gold_png.vtex_c")
+ui.transfer:Icon(I.transfer)
 ui.auto_items_farm = g_item:Switch(L("Авто-предметы при фарме", "Auto Items during Farm"), true)
 ui.auto_items_farm:Icon(I.camp)
 ui.auto_items_combat = g_item:Switch(L("Авто-предметы в бою", "Auto Items in Combat"), true)
@@ -344,6 +351,9 @@ local MOV_RPT   = 1.0
 local GIVE_D    = 300
 local ROAR_R    = 380
 local SCRIPT_ORDER_ID = "ld_bear_ai."
+local CONFIG_FILE     = "ld_bear_ai"
+local panel_rt_handle = nil
+local config_dirty    = false
 
 local BEARS = {["npc_dota_lone_druid_bear1"] = true,["npc_dota_lone_druid_bear2"] = true,
     ["npc_dota_lone_druid_bear3"] = true,["npc_dota_lone_druid_bear4"] = true,
@@ -562,6 +572,134 @@ local function d2(a, b)
     return (a - b):Length2D()
 end
 
+local H = {}
+
+function H.d2sqr(a, b)
+    if a and b and a.DistanceSqr2D then
+        return a:DistanceSqr2D(b)
+    end
+    local dx = a:GetX() - b:GetX()
+    local dy = a:GetY() - b:GetY()
+    return dx * dx + dy * dy
+end
+
+function H.in_range2d(a, b, r)
+    if a and b and a.IsInRange2D then
+        return a:IsInRange2D(b, r)
+    end
+    return H.d2sqr(a, b) <= r * r
+end
+
+function H.safe_move_pos(from, pos)
+    if not pos then return pos end
+    if not from then return pos end
+    if not GridNav or not GridNav.IsTraversableFromTo then return pos end
+
+    local ok, traversable = pcall(GridNav.IsTraversableFromTo, from, pos, false, nil)
+    if ok and traversable == true then return pos end
+
+    -- Длинный путь: доверяем pathfinding Dota, прямой cell-check часто ложный
+    if not H.in_range2d(from, pos, 600) then return pos end
+
+    -- Короткий невалидный move — не дёргаем в стену
+    return from
+end
+
+function H.npcs_in_radius(pos, radius, team_type)
+    if not pos or not radius then return nil end
+    if bear and Entity and Entity.GetUnitsInRadius then
+        local list = sc(Entity.GetUnitsInRadius, bear, radius, team_type, true, true)
+        if list then return list end
+    end
+    if our_team and NPCs and NPCs.InRadius then
+        return sc(NPCs.InRadius, pos, radius, our_team, team_type, true, true)
+    end
+    return nil
+end
+
+local function find_nearest_camp(camp_pos_arg)
+    if not camp_pos_arg or not Camps or not Camps.GetAll or not Camp or not Camp.GetCampBox then
+        return nil
+    end
+
+    local camps = sc(Camps.GetAll)
+    if not camps then return nil end
+
+    local best_camp, best_dist = nil, math.huge
+    for _, c in ipairs(camps) do
+        local box = sc(Camp.GetCampBox, c)
+        if box and box.min and box.max then
+            local cx = (box.min:GetX() + box.max:GetX()) / 2
+            local cy = (box.min:GetY() + box.max:GetY()) / 2
+            local cz = (box.min:GetZ() + box.max:GetZ()) / 2
+            local center = Vector(cx, cy, cz)
+            local dist = d2(center, camp_pos_arg)
+            if dist < best_dist then
+                best_dist = dist
+                best_camp = c
+            end
+        end
+    end
+
+    if best_camp and best_dist < 900 then
+        return best_camp
+    end
+    return nil
+end
+
+local CAMP_TYPE_PULL_ADJ = {
+    [Enum.ECampType.ECampType_SMALL]   = 0,
+    [Enum.ECampType.ECampType_MEDIUM] = -1,
+    [Enum.ECampType.ECampType_LARGE]  = 1,
+    [Enum.ECampType.ECampType_ANCIENT] = 0,
+}
+
+function H.stack_pull_adjust(camp_pos, base_sec)
+    local sec = base_sec
+    if camp_pos and Camp and Camp.GetType then
+        local camp = find_nearest_camp(camp_pos)
+        if camp then
+            local camp_type = sc(Camp.GetType, camp)
+            if camp_type ~= nil then
+                sec = sec + (CAMP_TYPE_PULL_ADJ[camp_type] or 0)
+            end
+        end
+    end
+    return math.max(50, math.min(57, sec))
+end
+
+function H.load_config()
+    if not Config then return end
+    ui.panel_x:Set(Config.ReadInt(CONFIG_FILE, "panel_x", 760))
+    ui.panel_y:Set(Config.ReadInt(CONFIG_FILE, "panel_y", 150))
+    ui.aghs_x:Set(Config.ReadInt(CONFIG_FILE, "aghs_x", 760))
+    ui.aghs_y:Set(Config.ReadInt(CONFIG_FILE, "aghs_y", 70))
+end
+
+---@type fun()
+H.save_config = function()
+    if not Config then return end
+    Config.WriteInt(CONFIG_FILE, "panel_x", ui.panel_x:Get())
+    Config.WriteInt(CONFIG_FILE, "panel_y", ui.panel_y:Get())
+    Config.WriteInt(CONFIG_FILE, "aghs_x", ui.aghs_x:Get())
+    Config.WriteInt(CONFIG_FILE, "aghs_y", ui.aghs_y:Get())
+    config_dirty = false
+end
+
+H.mark_config_dirty = function()
+    config_dirty = true
+end
+
+local cfg = {
+    save = H.save_config,
+    mark = H.mark_config_dirty,
+}
+
+ui.panel_x:SetCallback(cfg.mark)
+ui.panel_y:SetCallback(cfg.mark)
+ui.aghs_x:SetCallback(cfg.mark)
+ui.aghs_y:SetCallback(cfg.mark)
+
 local function en(u)
     return enemy_team ~= nil and sc(Entity.GetTeamNum, u) == enemy_team
 end
@@ -680,7 +818,6 @@ end
 
 local function try_register_aggro_listener()
     if aggro_listener_ok then return end
-    if not ui.mirror_aggro_evt:Get() then return end
     if not Event or not Event.AddListener then return end
     pcall(function() Event.AddListener("dota_hero_on_gain_aggro") end)
     aggro_listener_ok = true
@@ -704,6 +841,28 @@ local function base_pos()
 end
 
 local function nearest_enemy_hero(pos)
+    if not pos or not our_team then return nil, math.huge end
+
+    if Heroes and Heroes.InRadius then
+        local list = sc(Heroes.InRadius, pos, 99999, our_team, Enum.TeamType.TEAM_ENEMY, true, true)
+        if list then
+            local best, bd = nil, math.huge
+            for _, h in ipairs(list) do
+                if h and alive(h) and h ~= hero and en(h) and not sc(Hero.IsClone, h) then
+                    local p = gp(h)
+                    if p then
+                        local d = d2(pos, p)
+                        if d < bd then
+                            bd = d
+                            best = h
+                        end
+                    end
+                end
+            end
+            return best, bd
+        end
+    end
+
     local best, bd = nil, math.huge
     for _, h in pairs(Heroes.GetAll()) do
         if h and alive(h) and h ~= hero and en(h)
@@ -812,7 +971,7 @@ local function ShiftColorHue(color, shiftAmount)
 end
 
 local function DrawShadowText(font, size, text, pos, color, shadowAlpha)
-    shadowAlpha = shadowAlpha or 160
+    shadowAlpha = shadowAlpha or 100
     local shadowColor = Color(0, 0, 0, shadowAlpha)
     Render.Text(font, size, text, Vec2(pos.x + 1, pos.y + 1), shadowColor)
     Render.Text(font, size, text, pos, color)
@@ -1153,7 +1312,7 @@ local function get_item_texture_path(item_name)
     if string.find(item_name, "recipe", 1, true) then
         return "panorama/images/items/recipe_png.vtex_c"
     end
-    local name = item_name:gsub("item_", "")
+    local name = item_name:gsub("^item_", "")
     return "panorama/images/items/" .. name .. "_png.vtex_c"
 end
 
@@ -1212,7 +1371,8 @@ local function draw_bear_panel(x, y, mode, aghs_ok, aghs_gate, hp_num, d_now, cu
     end)
 
     -- 2. Render Target (RT) Caching
-    local rtHandle = Render.FindOrCreateRT("glass_panel_bear", W, H)
+    panel_rt_handle = Render.FindOrCreateRT("glass_panel_bear", W, H)
+    local rtHandle = panel_rt_handle
     local sizeChanged = UIState.LastRTWidth ~= W or UIState.LastRTHeight ~= H
     local heightChanged = UIState.LastHeightProgress ~= UIState.HeightProgress
     
@@ -1626,12 +1786,22 @@ local function unit_has_aghs(unit)
     return false
 end
 
-local function has_aghs()
-    -- LD: аганим на герое даёт независимого медведя — героя проверяем в первую очередь
+H.has_scepter_upgrade = function()
     if unit_has_aghs(hero) then return true end
     if unit_has_aghs(bear) then return true end
-    if hero_has_ld_scepter_entangle() then return true end
     return false
+end
+
+cfg.scepter = H.has_scepter_upgrade
+
+H.has_aghs = function()
+    if H.has_scepter_upgrade() then return true end
+    return hero_has_ld_scepter_entangle()
+end
+
+H.can_use_independent_modes = function()
+    if not ui.only_aghs:Get() then return true end
+    return H.has_scepter_upgrade()
 end
 
 local function bear_ab(name)
@@ -1661,10 +1831,42 @@ local function ord(t, tgt, pos, ab, tag)
     local now = hum_now > 0 and hum_now or GameRules.GetGameTime()
     if is_manual_paused(now) then return end
     local order_id = SCRIPT_ORDER_ID .. (tag or "order")
+    local move_pos = pos
+    if move_pos and t ~= O_ATTACK and t ~= O_CAST_T then
+        move_pos = H.safe_move_pos(gp(bear), move_pos)
+    end
     Player.PrepareUnitOrders(
-        player, t, tgt, pos, ab, ISSUER, bear,
+        player, t, tgt, move_pos, ab, ISSUER, bear,
         false, false, true, false, order_id, false
     )
+end
+
+function H.ord_attack(tgt, tag)
+    if not player or not bear or not alive(bear) or not tgt or not alive(tgt) then return end
+    local now = hum_now > 0 and hum_now or GameRules.GetGameTime()
+    if is_manual_paused(now) then return end
+    local order_id = SCRIPT_ORDER_ID .. (tag or "attack")
+    if Player and Player.AttackTarget then
+        Player.AttackTarget(player, bear, tgt, false, true, false, order_id, false)
+    else
+        ord(O_ATTACK, tgt, gp(tgt) or gp(bear), nil, tag or "attack")
+    end
+end
+
+function H.ord_move(pos, tag)
+    if not pos or not bear or not alive(bear) then return end
+    local now = hum_now > 0 and hum_now or GameRules.GetGameTime()
+    if is_manual_paused(now) then return end
+    local bpos = gp(bear)
+    if not bpos then return end
+    local order_id = SCRIPT_ORDER_ID .. (tag or "move")
+    local dest = H.safe_move_pos(bpos, pos)
+    if H.in_range2d(bpos, dest, 20) and not H.in_range2d(bpos, pos, 20) then return end
+    if NPC and NPC.MoveTo then
+        NPC.MoveTo(bear, dest, false, false, true, false, order_id, false)
+    else
+        ord(O_MOVE, nil, dest, nil, tag or "move")
+    end
 end
 
 local function ba(t)
@@ -1677,7 +1879,7 @@ local function ba(t)
     hum_last_tgt = t
     hum_last_atk = hum_now
     reset_hum_move()
-    ord(O_ATTACK, t, nil, nil)
+    H.ord_attack(t, "attack")
 end
 
 local function ba_force(t)
@@ -1685,13 +1887,14 @@ local function ba_force(t)
     hum_last_tgt = t
     hum_last_atk = hum_now
     reset_hum_move()
-    ord(O_ATTACK, t, nil, nil)
+    H.ord_attack(t, "attack_force")
 end
 
 local function bam(p)
     if not p then return end
     reset_hum_move()
-    ord(O_ATK_MV, nil, p, nil, "atk_move")
+    local dest = H.safe_move_pos(gp(bear), p)
+    ord(O_ATK_MV, nil, dest, nil, "atk_move")
 end
 
 local function bm(p, tag, allow_jitter)
@@ -1720,37 +1923,56 @@ local function bm(p, tag, allow_jitter)
         if not goal_changed and (hum_now - hum_last_mov) < min_int then return end
 
         local bpos = gp(bear)
-        if bpos and hum_goal_jittered and d2(bpos, hum_goal_jittered) < 90 then return end
+        if bpos and hum_goal_jittered and H.in_range2d(bpos, hum_goal_jittered, 90) then return end
 
         send_pos = hum_goal_jittered or p
     end
 
     hum_last_mov = hum_now
-    ord(O_MOVE, nil, send_pos, nil, tag or "move")
+    H.ord_move(send_pos, tag or "move")
 end
 
 local function bm_force(p, tag)
     if not p then return end
     reset_hum_move()
     hum_last_mov = hum_now
-    ord(O_MOVE, nil, p, nil, tag or "move")
+    H.ord_move(p, tag or "move")
 end
 
 local function bam_force(p)
     if not p then return end
     reset_hum_move()
     hum_last_mov = hum_now
-    ord(O_ATK_MV, nil, p, nil, "atk_move_force")
+    local dest = H.safe_move_pos(gp(bear), p)
+    ord(O_ATK_MV, nil, dest, nil, "atk_move_force")
 end
 
 local function bct(a, t)
     reset_hum_move()
-    ord(O_CAST_T, t, nil, a)
+    if not a or not t then return end
+    local order_id = SCRIPT_ORDER_ID .. "cast_target"
+    if Ability and Ability.CastTarget then
+        Ability.CastTarget(a, t, false, true, false, order_id)
+    else
+        ord(O_CAST_T, t, gp(t) or gp(bear), a, "cast_target")
+    end
 end
 
 local function bcn(a)
     reset_hum_move()
     ord(O_CAST_N, nil, nil, a)
+end
+
+H.handle_aghs_gate_blocked = function(bpos)
+    reset_farm_state()
+    reset_stack_state()
+    mirror_tgt = nil
+    if hero and alive(hero) then
+        local hp = gp(hero)
+        if hp and d2(bpos, hp) > FOL_STOP then
+            bm(hp, "aghs_gate_follow", false)
+        end
+    end
 end
 
 local function hgive(it)
@@ -1762,7 +1984,7 @@ local function hgive(it)
     if not hp or not bp2 then return end
     if d2(hp, bp2) > GIVE_D then return end
 
-    Player.PrepareUnitOrders(player, O_GIVE, bear, nil, it, ISSUER, hero, false)
+    Player.PrepareUnitOrders(player, O_GIVE, bear, bp2, it, ISSUER, hero, false)
 end
 
 local function is_invisible(unit)
@@ -1853,8 +2075,21 @@ local function use_bear_items(target, is_hero)
         def.lock_until = now + 0.05
         return
     end
+
+    -- 3. Silver Edge / Shadow Blade (break + gap close)
+    local silver = bear_item("item_silver_edge") or bear_item("item_invis_sword")
+    if silver and is_combat and dist > 150 and dist <= 600 then
+        local invis_active = sc(Entity.HasModifier, bear, "modifier_item_silver_edge_windwalk")
+            or sc(Entity.HasModifier, bear, "modifier_item_invisibility_edge")
+            or sc(Entity.HasModifier, bear, "modifier_item_shadow_blade")
+        if not invis_active and sc(Ability.IsCastable, silver, bear_mana) then
+            bcn(silver)
+            def.lock_until = now + 0.05
+            return
+        end
+    end
     
-    -- 3. Mjollnir active shield on bear itself
+    -- 4. Mjollnir active shield on bear itself
     local mjollnir = bear_item("item_mjollnir")
     if mjollnir and sc(Ability.IsCastable, mjollnir, bear_mana) then
         if is_combat or (is_farm and dist <= 300) then
@@ -1864,7 +2099,7 @@ local function use_bear_items(target, is_hero)
         end
     end
     
-    -- 4. Abyssal Blade
+    -- 5. Abyssal Blade
     local abyssal = bear_item("item_abyssal_blade")
     if abyssal and is_combat and dist <= 150 and sc(Ability.IsCastable, abyssal, bear_mana) then
         bct(abyssal, target)
@@ -1872,7 +2107,7 @@ local function use_bear_items(target, is_hero)
         return
     end
     
-    -- 5. Orchid / Bloodthorn
+    -- 6. Orchid / Bloodthorn
     local orchid = bear_item("item_orchid") or bear_item("item_bloodthorn")
     if orchid and is_combat and dist <= 900 and sc(Ability.IsCastable, orchid, bear_mana) then
         local is_silenced = sc(NPC.HasState, target, Enum.ModifierState.MODIFIER_STATE_SILENCED)
@@ -1884,7 +2119,7 @@ local function use_bear_items(target, is_hero)
         end
     end
     
-    -- 6. Nullifier
+    -- 7. Nullifier
     local nullifier = bear_item("item_nullifier")
     if nullifier and is_combat and dist <= 900 and sc(Ability.IsCastable, nullifier, bear_mana) then
         bct(nullifier, target)
@@ -1892,7 +2127,7 @@ local function use_bear_items(target, is_hero)
         return
     end
     
-    -- 7. Halberd
+    -- 8. Halberd
     local halberd = bear_item("item_heavens_halberd")
     if halberd and is_combat and dist <= 650 and sc(Ability.IsCastable, halberd, bear_mana) then
         local is_disarmed = sc(NPC.HasState, target, Enum.ModifierState.MODIFIER_STATE_DISARMED)
@@ -1905,7 +2140,7 @@ local function use_bear_items(target, is_hero)
         end
     end
     
-    -- 8. Harpoon
+    -- 9. Harpoon
     local harpoon = bear_item("item_harpoon")
     if harpoon and is_combat and dist > 300 and dist <= 700 and sc(Ability.IsCastable, harpoon, 0) then
         bct(harpoon, target)
@@ -1913,7 +2148,7 @@ local function use_bear_items(target, is_hero)
         return
     end
     
-    -- 9. Solar Crest / Pavise
+    -- 10. Solar Crest / Pavise
     local solar = bear_item("item_solar_crest") or bear_item("item_pavise")
     if solar and is_combat and sc(Ability.IsCastable, solar, 0) then
         local cast_target = bear
@@ -1928,7 +2163,7 @@ local function use_bear_items(target, is_hero)
         return
     end
     
-    -- 10. Black King Bar (BKB)
+    -- 11. Black King Bar (BKB)
     local bkb = bear_item("item_black_king_bar")
     if bkb and is_combat and sc(Ability.IsCastable, bkb, 0) then
         local is_disabled = sc(NPC.HasState, bear, Enum.ModifierState.MODIFIER_STATE_STUNNED)
@@ -1955,60 +2190,76 @@ end
 -- =========================================================
 -- NEUTRALS
 -- =========================================================
+H.is_neutral_unit = function(u)
+    if not u then return false end
+    local name = sc(NPC.GetUnitName, u)
+    return name
+        and string.find(name, "npc_dota_neutral_", 1, true)
+        and sc(Entity.IsAlive, u) == true
+        and not sc(NPC.IsWaitingToSpawn, u)
+        and not sc(NPC.IsInvulnerable, u)
+end
+
 local function build_neutral_cache()
     neutral_cache = {}
-    local list = npc_cache or NPCs.GetAll()
-    for _, u in pairs(list) do
-        if u then
-            local name = sc(NPC.GetUnitName, u)
-            if name and string.find(name, "npc_dota_neutral_", 1, true)
-                and sc(Entity.IsAlive, u) == true
-                and not sc(NPC.IsWaitingToSpawn, u)
-                and not sc(NPC.IsInvulnerable, u) then
-                local p = sc(Entity.GetAbsOrigin, u)
-                if p then
-                    neutral_cache[#neutral_cache + 1] = { unit = u, pos = p }
+    local function add(u, p)
+        neutral_cache[#neutral_cache + 1] = { unit = u, pos = p }
+    end
+
+    if bear and Entity and Entity.GetUnitsInRadius then
+        local list = sc(Entity.GetUnitsInRadius, bear, 5000, Enum.TeamType.TEAM_ENEMY, true, true)
+        if list then
+            for _, u in ipairs(list) do
+                if H.is_neutral_unit(u) then
+                    local p = sc(Entity.GetAbsOrigin, u)
+                    if p then add(u, p) end
                 end
             end
+            return
+        end
+    end
+
+    local list = npc_cache or NPCs.GetAll()
+    for _, u in pairs(list) do
+        if H.is_neutral_unit(u) then
+            local p = sc(Entity.GetAbsOrigin, u)
+            if p then add(u, p) end
         end
     end
 end
 
 local function find_neutrals(center, radius)
-    local best, bd, cnt = nil, math.huge, 0
+    local best, best_ds, cnt = nil, math.huge, 0
+    local radius_sqr = radius * radius
+
+    local function consider(u, p)
+        if not H.is_neutral_unit(u) or not p then return end
+        local ds = H.d2sqr(p, center)
+        if ds <= radius_sqr then
+            cnt = cnt + 1
+            if ds < best_ds then
+                best_ds = ds
+                best = u
+            end
+        end
+    end
 
     if neutral_cache then
         for _, e in ipairs(neutral_cache) do
-            local d = d2(e.pos, center)
-            if d <= radius then
-                cnt = cnt + 1
-                if d < bd then
-                    bd   = d
-                    best = e.unit
-                end
+            consider(e.unit, e.pos)
+        end
+    elseif center and our_team and NPCs and NPCs.InRadius then
+        local list = sc(NPCs.InRadius, center, radius, our_team, Enum.TeamType.TEAM_ENEMY, true, true)
+        if list then
+            for _, u in ipairs(list) do
+                consider(u, gp(u))
             end
         end
     else
         local list = npc_cache or NPCs.GetAll()
         for _, u in pairs(list) do
-            if u then
-                local name = sc(NPC.GetUnitName, u)
-                if name and string.find(name, "npc_dota_neutral_", 1, true)
-                    and sc(Entity.IsAlive, u) == true
-                    and not sc(NPC.IsWaitingToSpawn, u)
-                    and not sc(NPC.IsInvulnerable, u) then
-                    local p = sc(Entity.GetAbsOrigin, u)
-                    if p then
-                        local d = d2(p, center)
-                        if d <= radius then
-                            cnt = cnt + 1
-                            if d < bd then
-                                bd   = d
-                                best = u
-                            end
-                        end
-                    end
-                end
+            if H.is_neutral_unit(u) then
+                consider(u, sc(Entity.GetAbsOrigin, u))
             end
         end
     end
@@ -2017,30 +2268,20 @@ local function find_neutrals(center, radius)
 end
 
 local function find_strike_center(camp_pos_arg)
-    if not Camps or not Camps.GetAll then
+    local camp = find_nearest_camp(camp_pos_arg)
+    if not camp or not Camp or not Camp.GetCampBox then
         return camp_pos_arg
     end
 
-    local camps = sc(Camps.GetAll)
-    if not camps then return camp_pos_arg end
-
-    local best_camp, best_dist = nil, math.huge
-    for _, c in ipairs(camps) do
-        local box = sc(Camp.GetCampBox, c)
-        if box and box.min and box.max then
-            local cx = (box.min:GetX() + box.max:GetX()) / 2
-            local cy = (box.min:GetY() + box.max:GetY()) / 2
-            local cz = (box.min:GetZ() + box.max:GetZ()) / 2
-            local center = Vector(cx, cy, cz)
-            local d = d2(center, camp_pos_arg)
-            if d < best_dist then
-                best_dist = d
-                best_camp = center
-            end
-        end
+    local box = sc(Camp.GetCampBox, camp)
+    if box and box.min and box.max then
+        local cx = (box.min:GetX() + box.max:GetX()) / 2
+        local cy = (box.min:GetY() + box.max:GetY()) / 2
+        local cz = (box.min:GetZ() + box.max:GetZ()) / 2
+        return Vector(cx, cy, cz)
     end
 
-    return best_camp or camp_pos_arg
+    return camp_pos_arg
 end
 
 local function get_midas_creep_value(u)
@@ -2063,11 +2304,12 @@ local function do_midas(bpos)
     if not midas or not sc(Ability.IsCastable, midas, 0) then return false end
 
     local best_val, best_creep = 0, nil
-    local list = npc_cache or NPCs.GetAll()
-    for _, u in pairs(list) do
+    local radius = 600
+
+    local function consider(u)
         if u and alive(u) and en(u) and sc(NPC.IsAncient, u) ~= true then
             local p = gp(u)
-            if p and d2(p, bpos) <= 600 then
+            if p and H.in_range2d(p, bpos, radius) then
                 local val = get_midas_creep_value(u)
                 if val > best_val then
                     best_val = val
@@ -2075,6 +2317,14 @@ local function do_midas(bpos)
                 end
             end
         end
+    end
+
+    local list = H.npcs_in_radius(bpos, radius, Enum.TeamType.TEAM_ENEMY)
+    if list then
+        for _, u in ipairs(list) do consider(u) end
+    else
+        local fallback = npc_cache or NPCs.GetAll()
+        for _, u in pairs(fallback) do consider(u) end
     end
 
     if best_creep then
@@ -2085,34 +2335,55 @@ local function do_midas(bpos)
 end
 
 local function find_nearest_friendly_creep(pos)
-    local best, bd = nil, math.huge
-    local list = npc_cache or NPCs.GetAll()
-    for _, u in pairs(list) do
+    local best, best_ds = nil, math.huge
+
+    local function consider(u)
         if u and alive(u) and not en(u) then
             local name = gn(u)
             if string.find(name, "npc_dota_creep_", 1, true) then
                 local p = gp(u)
                 if p then
-                    local d = d2(p, pos)
-                    if d < bd then
-                        bd = d
+                    local ds = H.d2sqr(p, pos)
+                    if ds < best_ds then
+                        best_ds = ds
                         best = u
                     end
                 end
             end
         end
     end
+
+    local list = H.npcs_in_radius(pos, 1200, Enum.TeamType.TEAM_FRIEND)
+    if list then
+        for _, u in ipairs(list) do consider(u) end
+    else
+        local fallback = npc_cache or NPCs.GetAll()
+        for _, u in pairs(fallback) do consider(u) end
+    end
     return best
 end
 
 local function friendly_creep_near(pos, radius)
-    local list = npc_cache or NPCs.GetAll()
-    for _, u in pairs(list) do
+    local list = H.npcs_in_radius(pos, radius, Enum.TeamType.TEAM_FRIEND)
+    if list then
+        for _, u in ipairs(list) do
+            if u and alive(u) and not en(u) then
+                local name = gn(u)
+                if string.find(name, "npc_dota_creep_", 1, true) then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
+    local fallback = npc_cache or NPCs.GetAll()
+    for _, u in pairs(fallback) do
         if u and alive(u) and not en(u) then
             local name = gn(u)
             if string.find(name, "npc_dota_creep_", 1, true) then
                 local p = gp(u)
-                if p and d2(p, pos) <= radius then
+                if p and H.in_range2d(p, pos, radius) then
                     return true
                 end
             end
@@ -2127,13 +2398,23 @@ end
 
 local function enemy_creeps_in_radius(bpos, radius)
     local count = 0
-    local list = npc_cache or NPCs.GetAll()
-    for _, u in pairs(list) do
+    local list = H.npcs_in_radius(bpos, radius, Enum.TeamType.TEAM_ENEMY)
+    if list then
+        for _, u in ipairs(list) do
+            if u and alive(u) and en(u) and is_lane_creep_name(gn(u)) then
+                count = count + 1
+            end
+        end
+        return count
+    end
+
+    local fallback = npc_cache or NPCs.GetAll()
+    for _, u in pairs(fallback) do
         if u and alive(u) and en(u) then
             local name = gn(u)
             if is_lane_creep_name(name) then
                 local p = gp(u)
-                if p and d2(p, bpos) <= radius then
+                if p and H.in_range2d(p, bpos, radius) then
                     count = count + 1
                 end
             end
@@ -2144,27 +2425,43 @@ end
 
 local function allied_creeps_pushing(pos, from_pos)
     if not pos then return false end
-    local list = npc_cache or NPCs.GetAll()
-    for _, u in pairs(list) do
+    local search_r = ui.push_follow_wave:Get() and 2800 or 1400
+
+    local function consider(u, p)
+        local dist_struct = d2(p, pos)
+        if dist_struct <= 1400 then return true end
+        if ui.push_follow_wave:Get() and dist_struct <= 2800 then
+            if from_pos and dist_struct < d2(from_pos, pos) + 500 then
+                return true
+            end
+            if NPC.IsRunning and sc(NPC.IsRunning, u) then
+                return true
+            end
+            if NPC.IsAttacking and sc(NPC.IsAttacking, u) then
+                return true
+            end
+        end
+        return false
+    end
+
+    local list = H.npcs_in_radius(pos, search_r, Enum.TeamType.TEAM_FRIEND)
+    if list then
+        for _, u in ipairs(list) do
+            if u and alive(u) and not en(u) and is_lane_creep_name(gn(u)) then
+                local p = gp(u)
+                if p and consider(u, p) then return true end
+            end
+        end
+        return false
+    end
+
+    local fallback = npc_cache or NPCs.GetAll()
+    for _, u in pairs(fallback) do
         if u and alive(u) and not en(u) then
             local name = gn(u)
             if is_lane_creep_name(name) then
                 local p = gp(u)
-                if p then
-                    local dist_struct = d2(p, pos)
-                    if dist_struct <= 1400 then return true end
-                    if ui.push_follow_wave:Get() and dist_struct <= 2800 then
-                        if from_pos and dist_struct < d2(from_pos, pos) + 500 then
-                            return true
-                        end
-                        if NPC.IsRunning and sc(NPC.IsRunning, u) then
-                            return true
-                        end
-                        if NPC.IsAttacking and sc(NPC.IsAttacking, u) then
-                            return true
-                        end
-                    end
-                end
+                if p and consider(u, p) then return true end
             end
         end
     end
@@ -2205,37 +2502,46 @@ local function score_push_creep(u, name, d, bpos, bear_range, avg_dmg, tower_pha
 end
 
 local function find_push_creeps(bpos, creep_r)
-    local list = npc_cache or NPCs.GetAll()
     local search_r = math.max(creep_r, 1800)
     local bear_range = (sc(NPC.GetAttackRange, bear) or 150) + (sc(NPC.GetAttackRangeBonus, bear) or 0)
     local avg_dmg = get_bear_damage()
     local tower_phase = enemy_creeps_in_radius(bpos, creep_r) == 0
+    local attack_r = bear_range + 250
+    local attack_r_sqr = attack_r * attack_r
+    local search_r_sqr = search_r * search_r
 
     local best_attack, best_attack_score = nil, -99999
     local best_chase, best_chase_dist = nil, math.huge
 
-    for _, u in pairs(list) do
-        if u and alive(u) and en(u) then
-            local name = gn(u)
-            if is_lane_creep_name(name) then
-                local p = gp(u)
-                if p then
-                    local d = d2(p, bpos)
-                    if d <= search_r then
-                        local score = score_push_creep(u, name, d, bpos, bear_range, avg_dmg, tower_phase)
-                        if d <= bear_range + 250 then
-                            if score > best_attack_score then
-                                best_attack_score = score
-                                best_attack = u
-                            end
-                        elseif d < best_chase_dist then
-                            best_chase_dist = d
-                            best_chase = u
+    local function consider(u)
+        if u and alive(u) and en(u) and is_lane_creep_name(gn(u)) then
+            local p = gp(u)
+            if p then
+                local ds = H.d2sqr(p, bpos)
+                if ds <= search_r_sqr then
+                    local d = math.sqrt(ds)
+                    local name = gn(u)
+                    local score = score_push_creep(u, name, d, bpos, bear_range, avg_dmg, tower_phase)
+                    if ds <= attack_r_sqr then
+                        if score > best_attack_score then
+                            best_attack_score = score
+                            best_attack = u
                         end
+                    elseif d < best_chase_dist then
+                        best_chase_dist = d
+                        best_chase = u
                     end
                 end
             end
         end
+    end
+
+    local list = H.npcs_in_radius(bpos, search_r, Enum.TeamType.TEAM_ENEMY)
+    if list then
+        for _, u in ipairs(list) do consider(u) end
+    else
+        local fallback = npc_cache or NPCs.GetAll()
+        for _, u in pairs(fallback) do consider(u) end
     end
 
     return best_attack, best_chase, tower_phase
@@ -2369,15 +2675,19 @@ local function get_follow_front_goal()
 end
 
 local function find_harass_hero(bpos, creep_r)
-    if not ui.lane_harass:Get() or not hero or not alive(hero) then return nil end
+    if not ui.lane_harass:Get() or not hero or not alive(hero) or not our_team then return nil end
     local hp = gp(hero)
     if not hp then return nil end
     local harass_r = ui.lane_harass_r:Get() or 600
     local best, best_score = nil, -99999
-    for _, h in pairs(Heroes.GetAll()) do
+
+    local list = (Heroes and Heroes.InRadius)
+        and sc(Heroes.InRadius, hp, harass_r, our_team, Enum.TeamType.TEAM_ENEMY, true, true)
+
+    local function consider(h)
         if h and alive(h) and en(h) and not sc(NPC.IsIllusion, h) and not sc(Hero.IsClone, h) then
             local p = gp(h)
-            if p and d2(p, hp) <= harass_r and d2(p, bpos) <= creep_r then
+            if p and H.in_range2d(p, hp, harass_r) and H.in_range2d(p, bpos, creep_r) then
                 local score = 1000 - d2(p, bpos)
                 if score > best_score then
                     best_score = score
@@ -2385,6 +2695,12 @@ local function find_harass_hero(bpos, creep_r)
                 end
             end
         end
+    end
+
+    if list then
+        for _, h in ipairs(list) do consider(h) end
+    else
+        for _, h in pairs(Heroes.GetAll()) do consider(h) end
     end
     return best
 end
@@ -2443,8 +2759,8 @@ local function juggle_tower_aggro(bpos)
                 local target = sc(Tower.GetAttackTarget, t)
                 if target == bear then
                     local friendly_creep = find_nearest_friendly_creep(bpos)
-                    if friendly_creep and d2(gp(friendly_creep), tp) <= 900 then
-                        ord(O_ATTACK, friendly_creep, nil, nil)
+                    if friendly_creep and H.in_range2d(gp(friendly_creep), tp, 900) then
+                        H.ord_attack(friendly_creep, "tower_aggro_swap")
                         return true
                     else
                         local retreat_pos = base_pos()
@@ -2551,46 +2867,73 @@ local function do_aghs(bpos)
     end
 
     local ent_r  = ui.ent_r:Get()
-    local best, bd = nil, math.huge
+    local best, best_ds = nil, math.huge
+    local ent_r_sqr = ent_r * ent_r
 
-    for _, h in pairs(Heroes.GetAll()) do
-        if h and alive(h) and h ~= hero and en(h)
-        and not sc(NPC.IsIllusion, h)
-        and not sc(Hero.IsClone, h) then
-            local p = gp(h)
-            if p then
-                local d = d2(p, bpos)
-                if d <= ent_r and d < bd then
-                    bd = d
-                    best = h
+    if our_team and Heroes and Heroes.InRadius then
+        local heroes = sc(Heroes.InRadius, bpos, ent_r, our_team, Enum.TeamType.TEAM_ENEMY, true, true)
+        if heroes then
+            for _, h in ipairs(heroes) do
+                if h and alive(h) and h ~= hero and en(h)
+                and not sc(Hero.IsClone, h) then
+                    local p = gp(h)
+                    if p then
+                        local ds = H.d2sqr(p, bpos)
+                        if ds <= ent_r_sqr and ds < best_ds then
+                            best_ds = ds
+                            best = h
+                        end
+                    end
                 end
             end
         end
-    end
-
-    if not best and ui.push:Get() and ui.ent_creeps:Get() then
-        local list = npc_cache or NPCs.GetAll()
-        for _, u in pairs(list) do
-            if u and alive(u) and en(u) then
-                local nm = gn(u)
-                if string.find(nm, "npc_dota_creep_", 1, true) then
-                    local p = gp(u)
-                    if p then
-                        local d = d2(p, bpos)
-                        if d <= ent_r and d < bd then
-                            bd   = d
-                            best = u
-                        end
+    else
+        for _, h in pairs(Heroes.GetAll()) do
+            if h and alive(h) and h ~= hero and en(h)
+            and not sc(NPC.IsIllusion, h)
+            and not sc(Hero.IsClone, h) then
+                local p = gp(h)
+                if p and H.in_range2d(p, bpos, ent_r) then
+                    local ds = H.d2sqr(p, bpos)
+                    if ds < best_ds then
+                        best_ds = ds
+                        best = h
                     end
                 end
             end
         end
     end
 
+    if not best and ui.push:Get() and ui.ent_creeps:Get() then
+        local function consider_creep(u)
+            if u and alive(u) and en(u) then
+                local nm = gn(u)
+                if string.find(nm, "npc_dota_creep_", 1, true) then
+                    local p = gp(u)
+                    if p then
+                        local ds = H.d2sqr(p, bpos)
+                        if ds <= ent_r_sqr and ds < best_ds then
+                            best_ds = ds
+                            best = u
+                        end
+                    end
+                end
+            end
+        end
+
+        local creeps = H.npcs_in_radius(bpos, ent_r, Enum.TeamType.TEAM_ENEMY)
+        if creeps then
+            for _, u in ipairs(creeps) do consider_creep(u) end
+        else
+            local fallback = npc_cache or NPCs.GetAll()
+            for _, u in pairs(fallback) do consider_creep(u) end
+        end
+    end
+
     if best then
         -- 7.40: If using Lone Druid's Entangle (hero ability), issue via hero player order
-        if ld_entangle and hero and player then
-            Player.PrepareUnitOrders(player, O_CAST_T, best, nil, ab, ISSUER, hero, false)
+        if ld_entangle and hero then
+            Ability.CastTarget(ab, best, false, true, false, SCRIPT_ORDER_ID .. "entangle_hero")
         else
             bct(ab, best)
         end
@@ -2826,7 +3169,7 @@ local function next_camp(bpos, now, skip)
     local best_pos, best_id, best_dist = nil, nil, math.huge
     local _, min, sec = game_min_sec()
     local hero_pos = hero and alive(hero) and gp(hero)
-    local has_ag = has_aghs()
+    local has_indep_aghs = H.has_scepter_upgrade()
     local skip_ancients = not ui.farm_ancients:Get() or not is_strong_enough_for_ancients()
 
     for _, c in ipairs(CAMPS) do
@@ -2834,7 +3177,7 @@ local function next_camp(bpos, now, skip)
             local cleared_min = fc[c.id] or -1
             if cleared_min < min or sec >= 59 then
                 local eligible = true
-                if not has_ag and hero_pos then
+                if not has_indep_aghs and hero_pos then
                     if d2(c.p, hero_pos) > 1000 then
                         eligible = false
                     end
@@ -2883,8 +3226,8 @@ end
 local function do_farm(bpos, now)
     if entangle_cast_this_tick then return end
 
-    -- 0. Disarm & separation awareness
-    if not has_aghs() and hero and alive(hero) then
+    -- 0. Disarm & separation awareness (only without scepter — independent bear needs aghs)
+    if not H.has_scepter_upgrade() and hero and alive(hero) then
         local hp = gp(hero)
         if hp then
             if d2(bpos, hp) > 1050 or (camp_pos and d2(camp_pos, hp) > 1100) then
@@ -3014,7 +3357,7 @@ end
 local function do_push(bpos)
     if entangle_cast_this_tick then return end
 
-    if not has_aghs() and hero and alive(hero) then
+    if not H.has_scepter_upgrade() and hero and alive(hero) then
         local hp = gp(hero)
         if hp and d2(bpos, hp) > 1050 then
             bm(hp, "push_disarm_safety", false)
@@ -3073,11 +3416,6 @@ local function next_stack_camp(bpos)
     return best
 end
 
-local function can_use_independent_modes()
-    if not ui.only_aghs:Get() then return true end
-    return has_aghs()
-end
-
 local function do_stack(bpos)
     if not ui.stack_enable:Get() then
         reset_stack_state()
@@ -3105,7 +3443,7 @@ local function do_stack(bpos)
     end
 
     local bear_speed = sc(NPC.GetMovementSpeed, bear) or 300
-    local base_aggro = ui.stack_aggro_sec:Get()
+    local base_aggro = H.stack_pull_adjust(st.camp_pos, ui.stack_aggro_sec:Get())
 
     if not st.camp_pos or st.phase == "idle" then
         local c = next_stack_camp(bpos)
@@ -3114,6 +3452,7 @@ local function do_stack(bpos)
         st.camp_pos      = c.camp
         st.pull_pos      = c.pull
         st.strike_center = find_strike_center(c.camp)
+        base_aggro = H.stack_pull_adjust(st.camp_pos, ui.stack_aggro_sec:Get())
     end
 
     local dist_to_camp = d2(bpos, st.camp_pos)
@@ -3395,21 +3734,22 @@ local function on_tick(now)
         return
     end
 
-    -- Premium HUD: Auto-Midas
-    if do_midas(bpos) then
+    -- Premium HUD: Auto-Midas (farm action — respect aghs gate)
+    if H.can_use_independent_modes() and do_midas(bpos) then
         npc_cache = nil
         neutral_cache = nil
         return
     end
 
-    local aghs = has_aghs()
+    local aghs = H.has_aghs()
 
-    if aghs then
+    if aghs and H.has_scepter_upgrade() then
         entangle_cast_this_tick = do_aghs(bpos)
     end
 
     if ui.push:Get() then
-        if not can_use_independent_modes() then
+        if not H.can_use_independent_modes() then
+            H.handle_aghs_gate_blocked(bpos)
             npc_cache = nil
             neutral_cache = nil
             return
@@ -3428,7 +3768,8 @@ local function on_tick(now)
         end
 
     elseif ui.farm:Get() then
-        if not can_use_independent_modes() then
+        if not H.can_use_independent_modes() then
+            H.handle_aghs_gate_blocked(bpos)
             npc_cache = nil
             neutral_cache = nil
             return
@@ -3605,7 +3946,7 @@ function ld.OnFrame()
             local show_warn = ui.show_warning:Get() 
                 and (ui.push:Get() or ui.farm:Get()) 
                 and ui.only_aghs:Get() 
-                and not has_aghs()
+                and not cfg.scepter()
 
             if show_warn then
                 local wx, wy = ui.aghs_x:Get(), ui.aghs_y:Get()
@@ -3620,6 +3961,10 @@ function ld.OnFrame()
 
         elseif not is_down then
             -- Кнопку отпустили — сбрасываем захват
+            if drag_state.was_down and (drag_state.main_active or drag_state.aghs_active) then
+                cfg.mark()
+                cfg.save()
+            end
             drag_state.main_active = false
             drag_state.aghs_active = false
         end
@@ -3670,6 +4015,8 @@ function ld.OnFrame()
             elseif isOverReset then
                 ui.panel_x:Set(760)
                 ui.panel_y:Set(150)
+                cfg.mark()
+                cfg.save()
             else
                 if not UIState.Collapsed then
                     -- Проверка клика по кнопке FARM
@@ -3694,7 +4041,7 @@ function ld.OnFrame()
     if ui.show_warning:Get()
     and (ui.push:Get() or ui.farm:Get())
     and ui.only_aghs:Get()
-    and not has_aghs() then
+    and not cfg.scepter() then
         local wx, wy = ui.aghs_x:Get(), ui.aghs_y:Get()
 
         local wlines = {
@@ -3717,9 +4064,9 @@ function ld.OnFrame()
     if not ui.show_panel:Get() then return end
 
     local x, y      = ui.panel_x:Get(), ui.panel_y:Get()
-    local mode       = mode_name(now)
-    local aghs_ok    = has_aghs()
     local now        = GameRules.GetGameTime()
+    local mode       = mode_name(now)
+    local aghs_ok    = cfg.scepter()
     local d_now      = panic_active(now)
     local hp_num     = nil
 
@@ -3766,6 +4113,24 @@ function ld.OnFrame()
     end
 end
 
+function ld.OnScriptsLoaded()
+    try_register_aggro_listener()
+    H.load_config()
+end
+
+function ld.OnThemeUpdate()
+    BT.last_sync = -999
+    if panel_rt_handle and Render and Render.MarkDirtyRT then
+        pcall(Render.MarkDirtyRT, panel_rt_handle)
+    end
+end
+
+function ld.OnGameEnd()
+    if config_dirty then cfg.save() end
+    npc_cache = nil
+    neutral_cache = nil
+end
+
 -- =========================================================
 -- MAIN
 -- =========================================================
@@ -3780,8 +4145,6 @@ function ld.OnUpdate()
         manual_until = 0
         return
     end
-
-    try_register_aggro_listener()
 
     if not hero then
         player = Players.GetLocal()
