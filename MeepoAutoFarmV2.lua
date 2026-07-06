@@ -31,6 +31,10 @@ local RESPAWN_WAIT_DISTANCE = 760
 local EMPTY_LOCK_EXTRA = 1.5
 local ENEMY_AVOID_TIME = 12
 local DEFAULT_ENEMY_RADIUS = 1800
+local FARM_ATTACK_RANGE = 340
+local ESCAPE_MEMORY_RADIUS_RATIO = 0.38
+local MAPHACK_FLEE_MAX_AGE = 4
+local FIGHTING_FLEE_RADIUS_RATIO = 0.52
 local FAST_WAIT_WINDOW = 3.5
 local STACK_PREP_WINDOW = 5.5
 local BURST_POOF_MIN_CREEPS = 3
@@ -39,10 +43,6 @@ local SMART_MODE_COOLDOWN = 8
 local PUSH_SUPPORT_RADIUS = 950
 local PUSH_WAVE_RADIUS = 900
 local PUSH_STRUCTURE_RADIUS = 1450
-local PUSH_ICON_CANDIDATES = {
-    "C:/Umbrella/images/MenuIcons/Dota/creep_cutie.png",
-    "images/MenuIcons/Dota/creep_cutie.png",
-}
 local LANE_ORDER = {"top", "mid", "bot"}
 local LANE_PATHS = {
     top = {
@@ -75,32 +75,34 @@ local DOTA_ICON = {
     meepo = "panorama/images/heroes/icons/npc_dota_hero_meepo_png.vtex_c",
     ransack = "panorama/images/spellicons/meepo_ransack_png.vtex_c",
     poof = "panorama/images/spellicons/meepo_poof_png.vtex_c",
-    divided = "panorama/images/spellicons/meepo_divided_we_stand_png.vtex_c",
     mega = "panorama/images/spellicons/meepo_megameepo_png.vtex_c",
-    tpscroll = "panorama/images/items/tpscroll_png.vtex_c",
-    blink = "panorama/images/items/blink_png.vtex_c",
-    phase = "panorama/images/items/phase_boots_png.vtex_c",
 }
-local FA_ICON = {
-    map = "\u{f279}",
+local FA = {
+    gear = "\u{f013}",
+    play = "\u{f04b}",
+    leaf = "\u{f06c}",
+    arrow = "\u{f061}",
     warning = "\u{f071}",
     eye = "\u{f06e}",
-    bug = "\u{f188}",
+    map = "\u{f279}",
     clock = "\u{f017}",
     pause = "\u{f04c}",
     expand = "\u{f065}",
     radius = "\u{f1db}",
     heart = "\u{f004}",
     radar = "\u{f1eb}",
-    road = "\u{f018}",
-    image = "\u{f03e}",
-    anchor = "\u{f245}",
     bind = "\u{f084}",
-    flask = "\u{f0c3}",
-    medkit = "\u{f0f9}",
-    building = "\u{f1ad}",
-    cube = "\u{f1b2}",
     users = "\u{f0c0}",
+    bolt = "\u{f0e7}",
+    flask = "\u{f0c3}",
+    bug = "\u{f188}",
+    anchor = "\u{f245}",
+    image = "\u{f03e}",
+    tower = "\u{f1ad}",
+    road = "\u{f018}",
+    cubes = "\u{f009}",
+    mana = "\u{f0c3}",
+    tp = "\u{f072}",
 }
 local MAP_IMAGE_PATHS = {
     "assets/meepo_farm_minimap.png",
@@ -171,6 +173,8 @@ local state = {
     pushBindPrev = false,
     smartModeSwitchAt = 0,
     unitFightCamp = {},
+    pushLaneByUnit = {},
+    pushJungleByUnit = {},
     tickCache = newTickCache(),
     mapCamps = nil,
     mapCampsAncients = nil
@@ -248,9 +252,11 @@ end
 
 local locale = {
     tab = {en = "AutoFarm V2", ru = "Автофарм V2", cn = "自动刷野 V2"},
-    group_main = {en = "Control", ru = "Управление", cn = "控制"},
-    group_farm = {en = "Farm", ru = "Фарм", cn = "刷野"},
-    group_push = {en = "Push", ru = "Пуш", cn = "推线"},
+    group_main = {en = FA.play .. " Control", ru = FA.play .. " Управление", cn = FA.play .. " 控制"},
+    group_farm = {en = FA.leaf .. " Farm", ru = FA.leaf .. " Фарм", cn = FA.leaf .. " 刷野"},
+    group_push = {en = FA.arrow .. " Push", ru = FA.arrow .. " Пуш", cn = FA.arrow .. " 推线"},
+    group_safety = {en = FA.warning .. " Safety", ru = FA.warning .. " Безопасность", cn = FA.warning .. " 安全"},
+    group_display = {en = FA.eye .. " Display", ru = FA.eye .. " Отображение", cn = FA.eye .. " 显示"},
 
     ui_enable = {en = "Enable", ru = "Включить", cn = "启用"},
     ui_farm = {en = "Farm", ru = "Фарм", cn = "刷野"},
@@ -308,7 +314,7 @@ local locale = {
     ui_status_gap = {en = "Status row gap", ru = "Шаг статусов", cn = "状态行距"},
 
     gear_script = {en = "Timing", ru = "Тайминги", cn = "时序"},
-    gear_hud = {en = "HUD", ru = "Интерфейс", cn = "界面"},
+    gear_hud = {en = "Layout", ru = "Расположение", cn = "布局"},
     gear_camps = {en = "Camps", ru = "Кемпы", cn = "野点"},
     gear_poof = {en = "Poof", ru = "Пуф", cn = "忽悠"},
     gear_safety = {en = "Safety", ru = "Защита", cn = "安全"},
@@ -356,7 +362,7 @@ local locale = {
     tip_manual = {en = "After your own order to a Meepo, the script pauses that unit for this long.", ru = "После твоего ордера Meepo скрипт не трогает эту единицу столько секунд.", cn = "你手动给米波下达指令后，脚本会暂停控制该单位这么久。"},
     tip_farmers = {en = "Choose which controlled Meepos the farm mode may use.", ru = "Выбирает, каких контролируемых Meepo можно использовать для фарма.", cn = "选择刷野模式可控制哪些米波。"},
     tip_poof = {en = "Use Poof for moving between camps and/or extra jungle damage.", ru = "Использовать Пуф для перемещения между кемпами и/или дополнительного урона.", cn = "使用忽悠在野点间移动和/或补充刷野伤害。"},
-    tip_push = {en = "Lane push mode. Meepo pairs spread across lanes with the most enemy creep pressure and avoid enemy heroes via vision and maphack.", ru = "Режим пуша линий. Пары Meepo распределяются по линиям с максимальным давлением вражеских крипов и избегают героев через видимость и maphack.", cn = "推线模式。米波双人组会分散到敌方兵线压力最大的线路，并通过视野与地图挂避开敌方英雄。"},
+    tip_push = {en = "Lane push mode. Each Meepo pushes its own lane (top/mid/bot). On visible enemy hero — Poof to main Meepo.", ru = "Режим пуша линий. Каждый Meepo пушит свою линию (top/mid/bot). При видимом враге — Poof к основному Meepo.", cn = "推线模式。每个米波独立推一条线（上/中/下）。看到敌方英雄时 Poof 到主米波。"},
     tip_push_structures = {en = "Allow push mode to switch from wave control into structure pressure when the lane is supported.", ru = "Разрешает пуш-режиму переходить от контроля крипов к давлению по строениям, когда линия поддержана.", cn = "允许推线模式在兵线站稳后转为压制建筑。"},
     tip_push_maphack = {en = "Uses last enemy hero positions from maphack to skip dangerous lanes during push.", ru = "Использует последние позиции вражеских героев из maphack, чтобы не пушить опасные линии.", cn = "推线时使用地图挂记录的最后敌方英雄位置，跳过危险线路。"},
     tip_maphack_avoid = {en = "Uses maphack last-seen positions when avoiding enemies in farm and push.", ru = "Использует maphack при избегании врагов в фарме и пуше.", cn = "刷野和推线躲避敌人时使用地图挂最后可见位置。"},
@@ -422,28 +428,6 @@ if not statusFont and Render and Render.LoadFont then
     statusFont = Render.LoadFont("Verdana", 12, 400)
 end
 
-local saveManaImage = nil
-if Render and Render.LoadSvgString then
-    saveManaImage = Render.LoadSvgString(
-        [[<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-<path fill="#6BB8FF" d="M9 2h6v2l-1 .9V10l5.1 8.3A2.5 2.5 0 0 1 17 22H7a2.5 2.5 0 0 1-2.1-3.7L10 10V4.9L9 4V2Zm2.4 9L7 18.2a.8.8 0 0 0 .7 1.2h8.6a.8.8 0 0 0 .7-1.2L12.6 11h-1.2Zm-1.6 4h4.4l1.2 2H8.6l1.2-2Z"/>
-</svg>]],
-        Vec2(18, 18),
-        SCRIPT_ID .. ".save_mana_icon"
-    )
-end
-
-local pushCreepImage = nil
-if Render and Render.LoadImage then
-    for _, path in ipairs(PUSH_ICON_CANDIDATES) do
-        local handle = Render.LoadImage(path)
-        if type(handle) == "number" and handle > 0 then
-            pushCreepImage = handle
-            break
-        end
-    end
-end
-
 local statusColor = {
     farm = Color(110, 235, 150, 255),
     move = Color(120, 190, 255, 255),
@@ -471,7 +455,7 @@ end
 
 local function makeGear(widget, name)
     if widget and widget.Gear then
-        return widget:Gear(name, "\u{f013}", true)
+        return widget:Gear(name, FA.gear, true)
     end
     return nil
 end
@@ -483,37 +467,10 @@ local function displayName(widget, text)
     return widget
 end
 
-local function applyWidgetImage(widget, imagePath)
-    if widget and imagePath and type(widget.Image) == "function" then
-        widget:Image(imagePath)
+local function applyFaIcon(widget, icon)
+    if widget and icon and type(widget.Icon) == "function" then
+        widget:Icon(icon)
     end
-end
-
-local function isMenuImagePath(value)
-    return type(value) == "string" and value ~= "" and value:find("panorama/", 1, true) == 1
-end
-
----@param widget any
-local function applyMenuVisual(widget, visual)
-    if not widget or not visual then return end
-
-    if isMenuImagePath(visual) then
-        applyWidgetImage(widget, visual)
-    elseif type(widget.Icon) == "function" then
-        widget:Icon(visual)
-    end
-end
-
----@param widget any
-local function applyWidgetImageHandleOrIcon(widget, imageHandle, visual)
-    if not widget then return end
-
-    if imageHandle and type(widget.ImageHandle) == "function" then
-        widget:ImageHandle(imageHandle)
-        return
-    end
-
-    applyMenuVisual(widget, visual)
 end
 
 local function createTab()
@@ -542,6 +499,8 @@ menuNodes.tab = createTab()
 menuNodes.main = createGroup(menuNodes.tab, "Control")
 menuNodes.farm = createGroup(menuNodes.tab, "Farm")
 menuNodes.push = createGroup(menuNodes.tab, "Push")
+menuNodes.safety = createGroup(menuNodes.tab, "Safety")
+menuNodes.display = createGroup(menuNodes.tab, "Display")
 
 ui.enabled = withTooltip(
     menuNodes.main and menuNodes.main.Switch and menuNodes.main:Switch("Enable script", false, DOTA_ICON.meepo),
@@ -559,19 +518,17 @@ ui.farmKey = withTooltip(
 )
 displayName(ui.farmKey, "Farm Key")
 ui.autoPush = withTooltip(
-    menuNodes.main and menuNodes.main.Switch and menuNodes.main:Switch("Auto Push", false),
+    menuNodes.main and menuNodes.main.Switch and menuNodes.main:Switch("Auto Push", false, FA.road),
     "Dedicated lane push mode. Meepo pairs choose the best lane using live creep, structure, and danger state."
 )
 displayName(ui.autoPush, "Auto Push")
-applyWidgetImageHandleOrIcon(ui.autoPush, pushCreepImage, FA_ICON.road)
 ui.pushKey = withTooltip(
-    menuNodes.main and menuNodes.main.Bind and menuNodes.main:Bind("Toggle push key", KEY_NONE),
+    menuNodes.main and menuNodes.main.Bind and menuNodes.main:Bind("Toggle push key", KEY_NONE, FA.road),
     "Press once to switch all Meepos into lane push mode, press again to stop."
 )
 displayName(ui.pushKey, "Push Key")
-applyWidgetImageHandleOrIcon(ui.pushKey, pushCreepImage, FA_ICON.road)
 ui.smartMode = withTooltip(
-    menuNodes.main and menuNodes.main.Switch and menuNodes.main:Switch("Smart Farm/Push", false, DOTA_ICON.divided),
+    menuNodes.main and menuNodes.main.Switch and menuNodes.main:Switch("Smart Farm/Push", false, FA.cubes),
     "Auto-switches between farm and push based on camp and lane pressure."
 )
 displayName(ui.smartMode, "Smart Farm/Push")
@@ -581,12 +538,11 @@ ui.megameepoHold = withTooltip(
 )
 displayName(ui.megameepoHold, "Megameepo hold")
 ui.mapKey = withTooltip(
-    menuNodes.main and menuNodes.main.Bind and menuNodes.main:Bind("Farm map key", KEY_NONE, FA_ICON.map),
+    menuNodes.main and menuNodes.main.Bind and menuNodes.main:Bind("Farm map key", KEY_NONE, FA.map),
     "Opens the camp picker panel."
 )
 displayName(ui.mapKey, "Map")
 menuNodes.scriptGear = makeGear(ui.enabled, "Script timing")
-menuNodes.hudGear = makeGear(ui.mapKey, "HUD")
 if ui.farmKey and ui.farmKey.Properties then
     ui.farmKey:Properties("Meepo AutoFarm V2", "toggle", true)
 end
@@ -607,11 +563,9 @@ if ui.autoPush and ui.autoPush.SetCallback and ui.pushKey and ui.pushKey.SetTogg
     end, true)
 end
 ui.orderDelay = menuNodes.scriptGear and menuNodes.scriptGear.Slider and menuNodes.scriptGear:Slider("Order delay", 120, 900, 320, function(v) return v .. " ms" end)
-applyMenuVisual(ui.orderDelay, FA_ICON.clock)
 ui.orderJitter = menuNodes.scriptGear and menuNodes.scriptGear.Slider and menuNodes.scriptGear:Slider("Order jitter", 0, 220, 60, function(v) return v .. " ms" end)
-applyMenuVisual(ui.orderJitter, FA_ICON.clock)
 ui.pathCheck = withTooltip(
-    menuNodes.scriptGear and menuNodes.scriptGear.Switch and menuNodes.scriptGear:Switch("Path check", true, FA_ICON.map),
+    menuNodes.scriptGear and menuNodes.scriptGear.Switch and menuNodes.scriptGear:Switch("Path check", true, FA.map),
     "Skips move orders that fail GridNav path validation."
 )
 displayName(ui.pathCheck, "Path check")
@@ -620,6 +574,7 @@ ui.manualPause = withTooltip(
     "After your own order to a Meepo, the script pauses that unit for this long."
 )
 displayName(ui.manualPause, "Manual pause")
+
 ui.farmers = withTooltip(
     menuNodes.farm and menuNodes.farm.Combo and menuNodes.farm:Combo("Farmers", {
         L("farmer_any_unselected"),
@@ -630,180 +585,159 @@ ui.farmers = withTooltip(
     "Choose which controlled Meepos the farm mode may use."
 )
 displayName(ui.farmers, "Farmers")
-if ui.farmers and ui.farmers.Image then
-    ui.farmers:Image(DOTA_ICON.meepo)
-end
+applyFaIcon(ui.farmers, FA.users)
 menuNodes.farmersGear = makeGear(ui.farmers, "Camp logic")
 ui.poofUsage = withTooltip(
     menuNodes.farm and menuNodes.farm.MultiCombo and menuNodes.farm:MultiCombo("Poof Usage", {L("poof_move"), L("poof_damage")}, {L("poof_move")}),
     "Use Poof for moving between camps and/or extra jungle damage."
 )
 displayName(ui.poofUsage, "Poof")
-if ui.poofUsage and ui.poofUsage.Image then
-    ui.poofUsage:Image(DOTA_ICON.poof)
-end
+applyFaIcon(ui.poofUsage, FA.bolt)
 menuNodes.poofGear = makeGear(ui.poofUsage, "Poof tuning")
 ui.saveMana = menuNodes.farm and menuNodes.farm.Slider and menuNodes.farm:Slider("Save Mana", 0, 90, 40, function(v) return v .. "%" end)
-applyWidgetImageHandleOrIcon(ui.saveMana, saveManaImage, FA_ICON.flask)
-ui.joinRadius = menuNodes.farmersGear and menuNodes.farmersGear.Slider and menuNodes.farmersGear:Slider("Pack join radius", 250, 950, 560, function(v) return v .. " u." end)
-applyMenuVisual(ui.joinRadius, FA_ICON.expand)
-ui.campRadius = menuNodes.farmersGear and menuNodes.farmersGear.Slider and menuNodes.farmersGear:Slider("Camp creep radius", 450, 1100, 760, function(v) return v .. " u." end)
-applyMenuVisual(ui.campRadius, FA_ICON.radius)
-ui.farmAncients = withTooltip(
-    menuNodes.farmersGear and menuNodes.farmersGear.Switch and menuNodes.farmersGear:Switch("Farm ancient camps", false, FA_ICON.cube),
-    "Ancients stay ignored until this is enabled."
-)
-displayName(ui.farmAncients, "Ancients")
-ui.flexGroups = withTooltip(
-    menuNodes.farmersGear and menuNodes.farmersGear.Switch and menuNodes.farmersGear:Switch("Flexible groups", true, DOTA_ICON.divided),
-    "Allows solo scouts, triples on big camps, and uneven Meepo counts."
-)
-displayName(ui.flexGroups, "Flexible groups")
-ui.groupMin = menuNodes.farmersGear and menuNodes.farmersGear.Slider and menuNodes.farmersGear:Slider("Min group size", 1, 3, 1, "%d")
-applyMenuVisual(ui.groupMin, FA_ICON.users)
-ui.groupMax = menuNodes.farmersGear and menuNodes.farmersGear.Slider and menuNodes.farmersGear:Slider("Max group size", 1, 3, 3, "%d")
-applyMenuVisual(ui.groupMax, FA_ICON.users)
-ui.stackPrep = withTooltip(
-    menuNodes.farmersGear and menuNodes.farmersGear.Switch and menuNodes.farmersGear:Switch("Stack prep timing", true, FA_ICON.clock),
-    "Sends groups to empty camps shortly before the minute spawn."
-)
-displayName(ui.stackPrep, "Stack prep timing")
 ui.smartReserve = withTooltip(
-    menuNodes.farm and menuNodes.farm.Switch and menuNodes.farm:Switch("Smart reserve", true, DOTA_ICON.divided),
+    menuNodes.farm and menuNodes.farm.Switch and menuNodes.farm:Switch("Smart reserve", true, FA.cubes),
     "Idle Meepos scout camps, help push, or return for mana instead of standing still."
 )
 displayName(ui.smartReserve, "Smart reserve")
 ui.useMobility = withTooltip(
-    menuNodes.farm and menuNodes.farm.Switch and menuNodes.farm:Switch("Mobility items", true, DOTA_ICON.blink),
+    menuNodes.farm and menuNodes.farm.Switch and menuNodes.farm:Switch("Mobility items", true, FA.arrow),
     "Uses Blink, Swift Blink, or Phase Boots for long moves when Poof is unavailable."
 )
 displayName(ui.useMobility, "Mobility items")
-ui.avoidEnemies = withTooltip(
-    menuNodes.farm and menuNodes.farm.Switch and menuNodes.farm:Switch("Avoid visible enemies", true, FA_ICON.warning),
-    "When a visible enemy hero gets near a clone, it leaves that area and keeps farming safer camps."
+ui.joinRadius = menuNodes.farmersGear and menuNodes.farmersGear.Slider and menuNodes.farmersGear:Slider("Pack join radius", 250, 950, 560, function(v) return v .. " u." end)
+ui.campRadius = menuNodes.farmersGear and menuNodes.farmersGear.Slider and menuNodes.farmersGear:Slider("Camp creep radius", 450, 1100, 760, function(v) return v .. " u." end)
+ui.farmAncients = withTooltip(
+    menuNodes.farmersGear and menuNodes.farmersGear.Switch and menuNodes.farmersGear:Switch("Farm ancient camps", false, FA.warning),
+    "Ancients stay ignored until this is enabled."
 )
-displayName(ui.avoidEnemies, "Avoid Enemies")
-menuNodes.safetyGear = makeGear(ui.avoidEnemies, "Safety")
-
-ui.pushStructures = withTooltip(
-    menuNodes.push and menuNodes.push.Switch and menuNodes.push:Switch("Structure focus", true, FA_ICON.building),
-    "Allow push mode to switch from wave control into structure pressure when the lane is supported."
+displayName(ui.farmAncients, "Ancients")
+ui.flexGroups = withTooltip(
+    menuNodes.farmersGear and menuNodes.farmersGear.Switch and menuNodes.farmersGear:Switch("Flexible groups", true, FA.cubes),
+    "Allows solo scouts, triples on big camps, and uneven Meepo counts."
 )
-displayName(ui.pushStructures, "Structure focus")
-ui.pushTowerSafety = withTooltip(
-    menuNodes.push and menuNodes.push.Switch and menuNodes.push:Switch("Tower safety", true, FA_ICON.heart),
-    "Skips structure pressure when enemy heroes are near the tower."
+displayName(ui.flexGroups, "Flexible groups")
+ui.groupMin = menuNodes.farmersGear and menuNodes.farmersGear.Slider and menuNodes.farmersGear:Slider("Min group size", 1, 3, 1, "%d")
+ui.groupMax = menuNodes.farmersGear and menuNodes.farmersGear.Slider and menuNodes.farmersGear:Slider("Max group size", 1, 3, 3, "%d")
+ui.stackPrep = withTooltip(
+    menuNodes.farmersGear and menuNodes.farmersGear.Switch and menuNodes.farmersGear:Switch("Stack prep timing", true, FA.clock),
+    "Sends groups to empty camps shortly before the minute spawn."
 )
-displayName(ui.pushTowerSafety, "Tower safety")
-ui.pushUseMaphack = withTooltip(
-    menuNodes.push and menuNodes.push.Switch and menuNodes.push:Switch("Push maphack danger", true, FA_ICON.radar),
-    "Uses last enemy hero positions from maphack to skip dangerous lanes during push."
-)
-displayName(ui.pushUseMaphack, "Push maphack danger")
-menuNodes.pushGear = makeGear(ui.pushUseMaphack, "Lane danger")
-ui.pushSupportRadius = withTooltip(
-    menuNodes.pushGear and menuNodes.pushGear.Slider and menuNodes.pushGear:Slider("Support radius", 650, 1400, PUSH_SUPPORT_RADIUS, function(v) return v .. " u." end),
-    "How wide an allied wave cluster must be to count as support for pushing."
-)
-displayName(ui.pushSupportRadius, "Support radius")
-applyMenuVisual(ui.pushSupportRadius, FA_ICON.expand)
-ui.pushWaveRadius = withTooltip(
-    menuNodes.pushGear and menuNodes.pushGear.Slider and menuNodes.pushGear:Slider("Wave scan radius", 650, 1400, PUSH_WAVE_RADIUS, function(v) return v .. " u." end),
-    "How far enemy lane creeps are considered part of the same push front."
-)
-displayName(ui.pushWaveRadius, "Wave scan radius")
-applyMenuVisual(ui.pushWaveRadius, FA_ICON.radius)
-ui.pushStructureRadius = withTooltip(
-    menuNodes.pushGear and menuNodes.pushGear.Slider and menuNodes.pushGear:Slider("Structure scan radius", 900, 2200, PUSH_STRUCTURE_RADIUS, function(v) return v .. " u." end),
-    "How far towers and barracks can influence the chosen push lane."
-)
-displayName(ui.pushStructureRadius, "Structure scan radius")
-applyMenuVisual(ui.pushStructureRadius, FA_ICON.building)
-ui.pushMaphackMemory = menuNodes.pushGear and menuNodes.pushGear.Slider and menuNodes.pushGear:Slider("Maphack memory", 8, 35, 22, function(v) return v .. " sec" end)
-applyMenuVisual(ui.pushMaphackMemory, FA_ICON.clock)
-
-ui.maphackAvoid = withTooltip(
-    menuNodes.safetyGear and menuNodes.safetyGear.Switch and menuNodes.safetyGear:Switch("Maphack avoid", true, FA_ICON.radar),
-    "Uses maphack last-seen positions when avoiding enemies in farm and push."
-)
-displayName(ui.maphackAvoid, "Maphack avoid")
-ui.enemyAvoidRadius = menuNodes.safetyGear and menuNodes.safetyGear.Slider and menuNodes.safetyGear:Slider("Enemy avoid radius", 800, 2600, DEFAULT_ENEMY_RADIUS, function(v) return v .. " u." end)
-applyMenuVisual(ui.enemyAvoidRadius, FA_ICON.radar)
-ui.tpEscape = withTooltip(
-    menuNodes.safetyGear and menuNodes.safetyGear.Switch and menuNodes.safetyGear:Switch("TP escape fallback", true, DOTA_ICON.tpscroll),
-    "If Poof is not available during danger, the script can try TP/Travels before walking away."
-)
-displayName(ui.tpEscape, "TP fallback")
-ui.retreatLow = withTooltip(
-    menuNodes.safetyGear and menuNodes.safetyGear.Switch and menuNodes.safetyGear:Switch("Retreat low HP Meepos", true, FA_ICON.heart),
-    "Low HP controlled Meepos are sent toward fountain and excluded from pack farm."
-)
-displayName(ui.retreatLow, "Low HP Retreat")
-ui.shrineMana = withTooltip(
-    menuNodes.safetyGear and menuNodes.safetyGear.Switch and menuNodes.safetyGear:Switch("Low mana to base", true, FA_ICON.flask),
-    "Low mana Meepos walk toward fountain while staying out of farm groups."
-)
-displayName(ui.shrineMana, "Low mana to base")
-ui.retreatHp = menuNodes.safetyGear and menuNodes.safetyGear.Slider and menuNodes.safetyGear:Slider("Retreat HP", 10, 70, 28, function(v) return v .. "%" end)
-applyMenuVisual(ui.retreatHp, FA_ICON.heart)
+displayName(ui.stackPrep, "Stack prep timing")
 
 ui.poofDistance = menuNodes.poofGear and menuNodes.poofGear.Slider and menuNodes.poofGear:Slider("Poof move distance", 700, 2600, 1350, function(v) return v .. " u." end)
-applyMenuVisual(ui.poofDistance, DOTA_ICON.poof)
 ui.poofCooldown = menuNodes.poofGear and menuNodes.poofGear.Slider and menuNodes.poofGear:Slider("Poof retry delay", 1, 8, 3, function(v) return v .. " sec" end)
-applyMenuVisual(ui.poofCooldown, FA_ICON.clock)
 ui.burstPoof = withTooltip(
     menuNodes.poofGear and menuNodes.poofGear.Switch and menuNodes.poofGear:Switch("Burst Poof", true, DOTA_ICON.poof),
     "Coordinates damage Poof from the whole group on large camps."
 )
 displayName(ui.burstPoof, "Burst Poof")
 ui.burstPoofCreeps = menuNodes.poofGear and menuNodes.poofGear.Slider and menuNodes.poofGear:Slider("Burst creep count", 2, 6, 3, "%d")
-applyMenuVisual(ui.burstPoofCreeps, DOTA_ICON.poof)
+
+ui.pushStructures = withTooltip(
+    menuNodes.push and menuNodes.push.Switch and menuNodes.push:Switch("Structure focus", true, FA.tower),
+    "Allow push mode to switch from wave control into structure pressure when the lane is supported."
+)
+displayName(ui.pushStructures, "Structure focus")
+ui.pushTowerSafety = withTooltip(
+    menuNodes.push and menuNodes.push.Switch and menuNodes.push:Switch("Tower safety", true, FA.warning),
+    "Skips structure pressure when enemy heroes are near the tower."
+)
+displayName(ui.pushTowerSafety, "Tower safety")
+ui.pushUseMaphack = withTooltip(
+    menuNodes.push and menuNodes.push.Switch and menuNodes.push:Switch("Push maphack danger", true, FA.radar),
+    "Uses last enemy hero positions from maphack to skip dangerous lanes during push."
+)
+displayName(ui.pushUseMaphack, "Push maphack danger")
+menuNodes.pushGear = makeGear(ui.pushUseMaphack, "Lane radii")
+ui.pushSupportRadius = withTooltip(
+    menuNodes.pushGear and menuNodes.pushGear.Slider and menuNodes.pushGear:Slider("Support radius", 650, 1400, PUSH_SUPPORT_RADIUS, function(v) return v .. " u." end),
+    "How wide an allied wave cluster must be to count as support for pushing."
+)
+displayName(ui.pushSupportRadius, "Support radius")
+ui.pushWaveRadius = withTooltip(
+    menuNodes.pushGear and menuNodes.pushGear.Slider and menuNodes.pushGear:Slider("Wave scan radius", 650, 1400, PUSH_WAVE_RADIUS, function(v) return v .. " u." end),
+    "How far enemy lane creeps are considered part of the same push front."
+)
+displayName(ui.pushWaveRadius, "Wave scan radius")
+ui.pushStructureRadius = withTooltip(
+    menuNodes.pushGear and menuNodes.pushGear.Slider and menuNodes.pushGear:Slider("Structure scan radius", 900, 2200, PUSH_STRUCTURE_RADIUS, function(v) return v .. " u." end),
+    "How far towers and barracks can influence the chosen push lane."
+)
+displayName(ui.pushStructureRadius, "Structure scan radius")
+ui.pushMaphackMemory = menuNodes.pushGear and menuNodes.pushGear.Slider and menuNodes.pushGear:Slider("Maphack memory", 8, 35, 22, function(v) return v .. " sec" end)
+
+ui.avoidEnemies = withTooltip(
+    menuNodes.safety and menuNodes.safety.Switch and menuNodes.safety:Switch("Avoid visible enemies", true, FA.warning),
+    "When a visible enemy hero gets near a clone, it leaves that area and keeps farming safer camps."
+)
+displayName(ui.avoidEnemies, "Avoid Enemies")
+menuNodes.safetyGear = makeGear(ui.avoidEnemies, "Avoid tuning")
+
+ui.maphackAvoid = withTooltip(
+    menuNodes.safetyGear and menuNodes.safetyGear.Switch and menuNodes.safetyGear:Switch("Maphack avoid", true, FA.radar),
+    "Uses maphack last-seen positions when avoiding enemies in farm and push."
+)
+displayName(ui.maphackAvoid, "Maphack avoid")
+ui.enemyAvoidRadius = menuNodes.safetyGear and menuNodes.safetyGear.Slider and menuNodes.safetyGear:Slider("Enemy avoid radius", 800, 2600, DEFAULT_ENEMY_RADIUS, function(v) return v .. " u." end)
+ui.tpEscape = withTooltip(
+    menuNodes.safetyGear and menuNodes.safetyGear.Switch and menuNodes.safetyGear:Switch("TP escape fallback", true, FA.tp),
+    "If Poof is not available during danger, the script can try TP/Travels before walking away."
+)
+displayName(ui.tpEscape, "TP fallback")
+ui.retreatLow = withTooltip(
+    menuNodes.safety and menuNodes.safety.Switch and menuNodes.safety:Switch("Retreat low HP Meepos", true, FA.heart),
+    "Low HP controlled Meepos are sent toward fountain and excluded from pack farm."
+)
+displayName(ui.retreatLow, "Low HP Retreat")
+ui.shrineMana = withTooltip(
+    menuNodes.safety and menuNodes.safety.Switch and menuNodes.safety:Switch("Low mana to base", true, FA.mana),
+    "Low mana Meepos walk toward fountain while staying out of farm groups."
+)
+displayName(ui.shrineMana, "Low mana to base")
+ui.retreatHp = menuNodes.safetyGear and menuNodes.safetyGear.Slider and menuNodes.safetyGear:Slider("Retreat HP", 10, 70, 28, function(v) return v .. "%" end)
 
 ui.showStatus = withTooltip(
-    menuNodes.hudGear and menuNodes.hudGear.Switch and menuNodes.hudGear:Switch("Portrait statuses", true, FA_ICON.eye),
+    menuNodes.display and menuNodes.display.Switch and menuNodes.display:Switch("Portrait statuses", true, FA.eye),
     "Draws compact Meepo statuses near the left portrait column."
 )
 displayName(ui.showStatus, "Portrait Status")
+menuNodes.hudGear = makeGear(ui.showStatus, "Layout")
+
 ui.statusVitals = withTooltip(
-    menuNodes.hudGear and menuNodes.hudGear.Switch and menuNodes.hudGear:Switch("Status HP/MP", true, FA_ICON.heart),
+    menuNodes.display and menuNodes.display.Switch and menuNodes.display:Switch("Status HP/MP", true, FA.heart),
     "Shows HP and mana percent in portrait status pills."
 )
 displayName(ui.statusVitals, "Status HP/MP")
 ui.debugOverlay = withTooltip(
-    menuNodes.hudGear and menuNodes.hudGear.Switch and menuNodes.hudGear:Switch("Debug Overlay", false, FA_ICON.bug),
+    menuNodes.display and menuNodes.display.Switch and menuNodes.display:Switch("Debug Overlay", false, FA.bug),
     "Shows current farm and push decisions, pair usage, and target selection."
 )
 displayName(ui.debugOverlay, "Debug Overlay")
 ui.statusAutoAnchor = withTooltip(
-    menuNodes.hudGear and menuNodes.hudGear.Switch and menuNodes.hudGear:Switch("Auto Portrait Anchor", true, FA_ICON.anchor),
+    menuNodes.display and menuNodes.display.Switch and menuNodes.display:Switch("Auto Portrait Anchor", true, FA.anchor),
     "Automatically aligns farm/push status pills next to the vertical clone portraits."
 )
 displayName(ui.statusAutoAnchor, "Auto Portrait Anchor")
 ui.mapGroupMarkers = withTooltip(
-    menuNodes.hudGear and menuNodes.hudGear.Switch and menuNodes.hudGear:Switch("Map Group Markers", true, FA_ICON.map),
+    menuNodes.display and menuNodes.display.Switch and menuNodes.display:Switch("Map Group Markers", true, FA.map),
     "Draws live farm and push objective markers on the opened map."
 )
 displayName(ui.mapGroupMarkers, "Map Group Markers")
 ui.mapAwareness = withTooltip(
-    menuNodes.hudGear and menuNodes.hudGear.Switch and menuNodes.hudGear:Switch("Map enemy dots", true, FA_ICON.radar),
+    menuNodes.display and menuNodes.display.Switch and menuNodes.display:Switch("Map enemy dots", true, FA.radar),
     "Draws last-seen enemy hero positions on the farm map."
 )
 displayName(ui.mapAwareness, "Map enemy dots")
 ui.mapImagePath = withTooltip(
-    menuNodes.hudGear and menuNodes.hudGear.Input and menuNodes.hudGear:Input("Map image path", "", FA_ICON.image),
+    menuNodes.hudGear and menuNodes.hudGear.Input and menuNodes.hudGear:Input("Map image path", "", FA.image),
     "Optional minimap image path or URL. Empty value uses local override first, then the Dota minimap texture."
 )
 ui.debugX = menuNodes.hudGear and menuNodes.hudGear.Slider and menuNodes.hudGear:Slider("Debug X", 0, 1200, 310, "%d")
-applyMenuVisual(ui.debugX, FA_ICON.bug)
 ui.debugY = menuNodes.hudGear and menuNodes.hudGear.Slider and menuNodes.hudGear:Slider("Debug Y", 0, 900, 42, "%d")
-applyMenuVisual(ui.debugY, FA_ICON.bug)
 ui.statusX = menuNodes.hudGear and menuNodes.hudGear.Slider and menuNodes.hudGear:Slider("Status X", 0, 600, 112, "%d")
-applyMenuVisual(ui.statusX, FA_ICON.eye)
 ui.statusY = menuNodes.hudGear and menuNodes.hudGear.Slider and menuNodes.hudGear:Slider("Status Y", 0, 900, 42, "%d")
-applyMenuVisual(ui.statusY, FA_ICON.eye)
 ui.statusGap = menuNodes.hudGear and menuNodes.hudGear.Slider and menuNodes.hudGear:Slider("Status row gap", 35, 110, 73, "%d")
-applyMenuVisual(ui.statusGap, FA_ICON.expand)
-applyMenuVisual(ui.manualPause, FA_ICON.pause)
 
 local function setTooltip(widget, key)
     if widget and widget.ToolTip then
@@ -855,6 +789,8 @@ applyLocalization = function(force)
     displayName(menuNodes.main, L("group_main"))
     displayName(menuNodes.farm, L("group_farm"))
     displayName(menuNodes.push, L("group_push"))
+    displayName(menuNodes.safety, L("group_safety"))
+    displayName(menuNodes.display, L("group_display"))
 
     displayName(menuNodes.scriptGear, L("gear_script"))
     displayName(menuNodes.hudGear, L("gear_hud"))
@@ -986,6 +922,11 @@ local function resetTickCache()
     state.tickCache = newTickCache()
 end
 
+local function clearPushAssignments()
+    state.pushLaneByUnit = {}
+    state.pushJungleByUnit = {}
+end
+
 local function resetRuntimeState()
     state.lastTick = 0
     state.lastOrder = {}
@@ -1003,6 +944,8 @@ local function resetRuntimeState()
     state.activeGroups = {}
     state.smartModeSwitchAt = 0
     state.unitFightCamp = {}
+    state.pushLaneByUnit = {}
+    state.pushJungleByUnit = {}
     state.comboKeyWidget = nil
     state.comboKeyLookupAt = 0
     state.mapDragging = false
@@ -1093,6 +1036,7 @@ local function checkFarmToggleBind()
         ui.farmActive:Set(nextState)
         if nextState and ui.autoPush and ui.autoPush.Set then
             ui.autoPush:Set(false)
+            clearPushAssignments()
         end
     end
     state.farmBindPrev = pressed
@@ -1110,6 +1054,9 @@ local function checkPushToggleBind()
         ui.autoPush:Set(nextState)
         if nextState and ui.farmActive and ui.farmActive.Set then
             ui.farmActive:Set(false)
+        end
+        if not nextState then
+            clearPushAssignments()
         end
     end
     state.pushBindPrev = pressed
@@ -1423,7 +1370,12 @@ local function getControllableMeepos(localHero, player, playerId, team, t)
     return result
 end
 
+local assignPushLanesForUnits
 local buildPushGroups
+local simplePushTarget
+local lanePushDestination
+local laneRetreatDestination
+local assignPushLane
 local collectEnemyAwareness
 local syncSmartMode
 local pruneEnemyAvoid, rememberEnemyAvoid, enemyAvoidRadius, minDistanceToEnemyAvoid, collectVisibleEnemyHeroes
@@ -1773,252 +1725,181 @@ local function lanePathCenter(laneName)
     return path[math.floor((#path + 1) / 2)]
 end
 
-local function computeLaneAnchor(bucket, team)
-    local bestPos, bestPressure = nil, -1
-
-    for _, creep in ipairs(bucket.enemyCreeps) do
-        local pressure = laneDefensivePressure(creep.pos, team)
-        if pressure > bestPressure then
-            bestPressure = pressure
-            bestPos = creep.pos
-        end
-    end
-
-    if bestPos then return bestPos end
-
-    if #bucket.enemyCreeps > 0 then
-        local sx, sy, sz, count = 0, 0, 0, 0
-        for _, creep in ipairs(bucket.enemyCreeps) do
-            sx = sx + vecX(creep.pos)
-            sy = sy + vecY(creep.pos)
-            sz = sz + vecZ(creep.pos)
-            count = count + 1
-        end
-        return Vector(sx / count, sy / count, sz / count)
-    end
-
-    if pushStructuresEnabled() and #bucket.structures > 0 then
-        return bucket.structures[1].pos
-    end
-
-    return lanePathCenter(bucket.lane)
+local function laneProgressTowardEnemy(pos, team)
+    if not pos then return -math.huge end
+    return -dist2D(pos, enemyBasePosition(team))
 end
 
-local function laneThreatInfo(pos, awareness, t)
-    local danger, age, visibleNow = nearestAwarenessInfo(awareness, pos)
-    local memory = minDistanceToEnemyAvoid(pos, t)
-    local radius = enemyAvoidRadius()
-    local memoryAge = pushMaphackMemory()
-    local freshness = visibleNow and 1 or math.max(0, 1 - age / memoryAge)
-    local threatRadius = radius * (0.72 + freshness * 0.58)
-    local nearest = math.min(danger, memory)
-    local unsafe = nearest < threatRadius or memory < radius * 0.85
-    return unsafe, nearest, threatRadius, freshness, visibleNow
+local function lanePathTowardEnemy(laneName, team)
+    local path = LANE_PATHS[laneName]
+    if not path or #path == 0 then return nil end
+
+    local startProgress = laneProgressTowardEnemy(path[1], team)
+    local endProgress = laneProgressTowardEnemy(path[#path], team)
+    if endProgress >= startProgress then return path end
+
+    local reversed = {}
+    for i = #path, 1, -1 do
+        reversed[#reversed + 1] = path[i]
+    end
+    return reversed
 end
 
-local function buildLanePushObjective(laneName, bucket, units, team, t, awareness)
-    local anchor = computeLaneAnchor(bucket, team)
-    if not anchor then return nil, nil end
+local function lanePushDestinationImpl(laneName, team, unitPos)
+    local path = lanePathTowardEnemy(laneName, team)
+    if not path or #path == 0 or not unitPos then return nil end
 
-    local unsafe, dangerDist = laneThreatInfo(anchor, awareness, t)
-    if unsafe then return nil, nil end
-
-    local alliedLaneCreeps, enemyLaneCreeps = collectLaneCreeps(team, t)
-    local structures = bucket.structures
-    local bestWave, bestWaveScore = nil, -math.huge
-
-    for _, creep in ipairs(bucket.enemyCreeps) do
-        local d = dist2D(creep.pos, anchor)
-        if d <= pushWaveRadius() then
-            local score = 260
-                + pushTargetPriority(creep.name)
-                + laneDefensivePressure(creep.pos, team) * 420
-                - d * 0.24
-                - creep.hp * 0.08
-                - minDistanceToUnits(creep.pos, units) * 0.25
-            if score > bestWaveScore then
-                bestWave = creep.unit
-                bestWaveScore = score
-            end
+    local bestIndex, bestDist = 1, math.huge
+    for i, wp in ipairs(path) do
+        local d = dist2D(unitPos, wp)
+        if d < bestDist then
+            bestDist = d
+            bestIndex = i
         end
     end
 
-    local bestStructure, bestStructureScore = nil, -math.huge
-    if pushStructuresEnabled() then
-        for _, structure in ipairs(structures) do
-            local d = dist2D(structure.pos, anchor)
-            if d <= pushStructureRadius() then
-                local support = countEntriesNear(alliedLaneCreeps, structure.pos, pushSupportRadius())
-                local score = structurePushBonus(structure.kind, support) - d * 0.18
-                if widgetGet(ui.pushTowerSafety, true) then
-                    local structUnsafe = select(1, laneThreatInfo(structure.pos, awareness, t))
-                    if structUnsafe then
-                        score = score - 5000
-                    end
-                end
-                if score > bestStructureScore then
-                    bestStructure = structure.unit
-                    bestStructureScore = score
-                end
-            end
-        end
+    if bestDist < 420 and bestIndex < #path then
+        return path[bestIndex + 1]
     end
 
-    local target = bestWave
-    local reason = "enemy_wave"
-    if bestStructure and bestStructureScore > bestWaveScore + 180 then
-        target = bestStructure
-        reason = pushTargetLabel(bestStructure, "structure")
-    elseif not target and bestStructure then
-        target = bestStructure
-        reason = pushTargetLabel(bestStructure, "structure")
+    if bestDist >= 420 then
+        return path[bestIndex]
     end
 
-    local support = countEntriesNear(alliedLaneCreeps, anchor, pushSupportRadius())
-    return {
-        id = "push_" .. laneName,
-        lane = laneName,
-        center = anchor,
-        target = target,
-        count = target and 1 or 0,
-        isPush = true,
-        reason = reason,
-    }, {
-        label = pushTargetLabel(target, laneName),
-        lane = laneName,
-        score = bucket.pressure,
-        support = support,
-        danger = dangerDist,
-    }
+    return path[math.min(#path, bestIndex + 1)]
 end
 
-local function rankLanesForPush(buckets, team, t, awareness)
-    local ranked = {}
+lanePushDestination = lanePushDestinationImpl
 
-    for _, lane in ipairs(LANE_ORDER) do
-        local bucket = buckets[lane]
-        local anchor = computeLaneAnchor(bucket, team)
-        if anchor then
-            local unsafe, dangerDist, threatRadius = laneThreatInfo(anchor, awareness, t)
-            local score = bucket.pressure
-            if #bucket.enemyCreeps > 0 then
-                score = score + 120
-            end
-            if pushStructuresEnabled() and #bucket.structures > 0 then
-                score = score + 80
-            end
-            if unsafe then
-                score = score - 2400 - math.max(0, threatRadius - dangerDist) * 0.65
-            else
-                score = score + pushProgressScore(anchor, team) * 0.25
-            end
+local function laneRetreatDestinationImpl(laneName, team, unitPos)
+    local path = lanePathTowardEnemy(laneName, team)
+    if not path or #path == 0 or not unitPos then return basePosition(team) end
 
-            if score > 0 or #bucket.enemyCreeps > 0 or (#bucket.structures > 0 and pushStructuresEnabled()) then
-                ranked[#ranked + 1] = {
-                    lane = lane,
-                    bucket = bucket,
-                    anchor = anchor,
-                    score = score,
-                    safe = not unsafe,
-                    danger = dangerDist,
-                }
-            end
+    local bestIndex, bestDist = 1, math.huge
+    for i, wp in ipairs(path) do
+        local d = dist2D(unitPos, wp)
+        if d < bestDist then
+            bestDist = d
+            bestIndex = i
         end
     end
 
-    table.sort(ranked, function(a, b)
-        if a.safe ~= b.safe then return a.safe end
-        if a.score == b.score then return a.lane < b.lane end
-        return a.score > b.score
-    end)
+    if bestIndex > 1 and bestDist < 500 then
+        return path[bestIndex - 1]
+    end
 
-    return ranked
+    return path[1]
+end
+
+laneRetreatDestination = laneRetreatDestinationImpl
+
+assignPushLane = function(unit, lane)
+    if unit and lane then
+        local id = unitId(unit)
+        if not state.pushLaneByUnit[id] then
+            state.pushLaneByUnit[id] = lane
+        end
+    end
+end
+
+simplePushTarget = function(unit, lane, team, t)
+    local unitPos = origin(unit)
+    if not unitPos or not lane then return nil end
+
+    local buckets = buildLaneBuckets(team, t)
+    local bucket = buckets[lane]
+    if not bucket then return nil end
+
+    local bestCreep, bestCreepDist = nil, math.huge
+    for _, creep in ipairs(bucket.enemyCreeps or {}) do
+        local d = dist2D(unitPos, creep.pos)
+        if d < bestCreepDist then
+            bestCreepDist = d
+            bestCreep = creep.unit
+        end
+    end
+    if bestCreep and bestCreepDist <= pushWaveRadius() + 200 then
+        return bestCreep
+    end
+
+    if not pushStructuresEnabled() then return nil end
+
+    local bestStruct, bestStructDist = nil, math.huge
+    for _, structure in ipairs(bucket.structures or {}) do
+        local d = dist2D(unitPos, structure.pos)
+        if d < bestStructDist and d <= pushStructureRadius() then
+            bestStructDist = d
+            bestStruct = structure.unit
+        end
+    end
+
+    return bestStruct
+end
+
+assignPushLanesForUnits = function(units, team, t)
+    local laneCounts = {top = 0, mid = 0, bot = 0}
+
+    for _, unit in ipairs(units or {}) do
+        if state.pushJungleByUnit[unitId(unit)] then goto continue_count end
+        local lane = state.pushLaneByUnit[unitId(unit)]
+        if lane and laneCounts[lane] ~= nil then
+            laneCounts[lane] = laneCounts[lane] + 1
+        end
+        ::continue_count::
+    end
+
+    for _, unit in ipairs(units or {}) do
+        if state.pushJungleByUnit[unitId(unit)] then goto continue_assign end
+        if state.pushLaneByUnit[unitId(unit)] then goto continue_assign end
+
+        local bestLane, bestCount = "mid", math.huge
+        for _, lane in ipairs(LANE_ORDER) do
+            if laneCounts[lane] < bestCount then
+                bestCount = laneCounts[lane]
+                bestLane = lane
+            end
+        end
+
+        assignPushLane(unit, bestLane)
+        laneCounts[bestLane] = laneCounts[bestLane] + 1
+        ::continue_assign::
+    end
 end
 
 buildPushGroups = function(units, baseIndex, team, t)
+    assignPushLanesForUnits(units, team, t)
+
     local groups = {}
-    local reserves = {}
     local debug = {lanes = {}}
-    local awareness = collectEnemyAwareness(team, t)
-    for _, enemy in ipairs(awareness) do
-        if enemy.pos then
-            rememberEnemyAvoid(enemy.pos, t)
-        end
-    end
-    local buckets = buildLaneBuckets(team, t)
-    local ranked = rankLanesForPush(buckets, team, t, awareness)
 
     for _, unit in ipairs(units or {}) do
-        reserves[#reserves + 1] = unit
-    end
+        if state.pushJungleByUnit[unitId(unit)] then goto continue_group end
 
-    if #reserves < 2 then
-        return groups, reserves, nil
-    end
+        local lane = state.pushLaneByUnit[unitId(unit)] or "mid"
+        local unitPos = origin(unit)
+        local target = simplePushTarget(unit, lane, team, t)
+        local center = (unitPos and lanePushDestination(lane, team, unitPos)) or lanePathCenter(lane)
 
-    local pool = reserves
-    reserves = {}
-    local usedLanes = {}
+        local objective = {
+            id = "push_" .. lane .. "_" .. tostring(unitId(unit)),
+            lane = lane,
+            center = center,
+            target = target,
+            count = target and 1 or 0,
+            isPush = true,
+        }
 
-    while #pool >= 2 do
-        local pickedEntry = nil
-        for _, entry in ipairs(ranked) do
-            if not usedLanes[entry.lane] and entry.safe then
-                pickedEntry = entry
-                break
-            end
-        end
-
-        if not pickedEntry then
-            for _, entry in ipairs(ranked) do
-                if not usedLanes[entry.lane] then
-                    pickedEntry = entry
-                    break
-                end
-            end
-        end
-
-        if not pickedEntry then break end
-
-        local objective, debugInfo = buildLanePushObjective(pickedEntry.lane, pickedEntry.bucket, pool, team, t, awareness)
-        usedLanes[pickedEntry.lane] = true
-        if not objective then
-            goto continue_push
-        end
-
-        local chosen
-        chosen, pool = takeNearestUnits(pool, objective.center, 2)
-        if not chosen then break end
-
-        objective.id = "push_" .. pickedEntry.lane .. "_" .. tostring(baseIndex + #groups + 1)
-        local group = newGroup(baseIndex + #groups + 1, objective, chosen, "PUSH", 2)
+        local group = newGroup(baseIndex + #groups + 1, objective, {unit}, "PUSH", 1)
         groups[#groups + 1] = group
-
-        debug.lanes[#debug.lanes + 1] = string.format(
-            "%s:%s (%.0f)",
-            pickedEntry.lane,
-            debugInfo and debugInfo.label or "?",
-            pickedEntry.score or 0
-        )
-        if not debug.label and debugInfo then
-            debug.label = debugInfo.label
-            debug.score = debugInfo.score
-            debug.support = debugInfo.support
-            debug.danger = debugInfo.danger
-        end
-
-        ::continue_push::
-    end
-
-    for _, unit in ipairs(pool) do
-        reserves[#reserves + 1] = unit
+        debug.lanes[#debug.lanes + 1] = string.upper(lane)
+        ::continue_group::
     end
 
     if #debug.lanes == 0 then
         debug = nil
     end
 
-    return groups, reserves, debug
+    return groups, debug
 end
 
 syncSmartMode = function(t, team)
@@ -2040,6 +1921,7 @@ syncSmartMode = function(t, team)
     if isPushActive() and lanesWithCreeps == 0 and totalPressure < 200 then
         if ui.autoPush and ui.autoPush.Set then ui.autoPush:Set(false) end
         if ui.farmActive and ui.farmActive.Set then ui.farmActive:Set(true) end
+        clearPushAssignments()
         state.smartModeSwitchAt = t + SMART_MODE_COOLDOWN
         state.lastMode = "farm"
     elseif isFarmActive() and lanesWithCreeps >= 2 and totalPressure > 800 then
@@ -2713,6 +2595,38 @@ end
 end
 
 do
+local function collectFleeEnemies(team, t)
+    local result = {}
+    local seen = {}
+
+    for _, enemy in ipairs(collectVisibleEnemyHeroes(team, t) or {}) do
+        if enemy.pos then
+            local id = enemy.hero and unitId(enemy.hero) or nil
+            result[#result + 1] = {
+                hero = enemy.hero,
+                pos = enemy.pos,
+                visible = true,
+                age = 0,
+            }
+            if id then seen[id] = true end
+        end
+    end
+
+    if maphackAvoidEnabled() and collectEnemyAwareness then
+        for _, enemy in ipairs(collectEnemyAwareness(team, t) or {}) do
+            if enemy.pos and not enemy.visible and (enemy.age or 999) <= MAPHACK_FLEE_MAX_AGE then
+                local id = enemy.hero and unitId(enemy.hero) or nil
+                if not id or not seen[id] then
+                    result[#result + 1] = enemy
+                    if id then seen[id] = true end
+                end
+            end
+        end
+    end
+
+    return result
+end
+
 local function visibleEnemyNearUnit(unit, visibleEnemies, radius)
     local pos = origin(unit)
     if not pos then return nil end
@@ -2746,12 +2660,20 @@ local function canOrder(unit, orderType, target, pos, t)
     if orderType == "move" then
         local upos = origin(unit)
         if upos and pos and isWithin2D(upos, pos, 110) then return false end
-        if last and last.type == "move" and last.pos and pos and isWithin2D(last.pos, pos, 140) and t - last.time < 1.2 then
+        if last and last.type == "move" and last.pos and pos and isWithin2D(last.pos, pos, 140) and t - last.time < 0.55 then
             return false
         end
     elseif orderType == "attack" then
         if not target or not alive(target) then return false end
+        local upos = origin(unit)
+        local tpos = origin(target)
+        local inMelee = upos and tpos and isWithin2D(upos, tpos, FARM_ATTACK_RANGE + 40)
         local currentTarget = Entity.GetAttackTarget and Entity.GetAttackTarget(unit)
+        if inMelee and (not currentTarget or unitId(currentTarget) ~= unitId(target)) then
+            if not last or last.type ~= "attack" or last.targetId ~= unitId(target) or t - last.time >= 0.35 then
+                return true
+            end
+        end
         if currentTarget == target and last and t - last.time < 1.0 then return false end
         if last and last.type == "attack" and last.targetId == unitId(target) and t - last.time < 0.75 then
             return false
@@ -2780,6 +2702,7 @@ local function safeMovePosition(unit, pos)
 end
 
 local function tryMobilityMove(player, unit, pos, t)
+    if isPushActive() then return false end
     if not widgetGet(ui.useMobility, true) or not player or not unit or not pos then return false end
     if NPC.IsChannellingAbility(unit) == true then return false end
 
@@ -2883,6 +2806,18 @@ local function canUsePoofCandidate(unit, candidate)
         and isMeepo(candidate)
 end
 
+local function getMainMeepo()
+    if state.localHero and alive(state.localHero) then
+        return state.localHero
+    end
+    return nil
+end
+
+local function isPushLanerUnit(unit)
+    local id = unitId(unit)
+    return isPushActive() and state.pushLaneByUnit[id] and not state.pushJungleByUnit[id]
+end
+
 local function findBestPoofTarget(unit, destination, mode, anchorUnits)
     local unitPos = origin(unit)
     if not unitPos or not destination then return nil end
@@ -2931,6 +2866,23 @@ end
 
 local function tryPoof(unit, pos, t, mode, anchorUnits)
     if not unit or not pos then return false end
+    local id = unitId(unit)
+    local pushLaner = isPushLanerUnit(unit)
+
+    if pushLaner and mode ~= "escape" then
+        return false
+    end
+
+    local mainMeepo = nil
+    if pushLaner and mode == "escape" then
+        mainMeepo = getMainMeepo()
+        if not mainMeepo or unitId(unit) == unitId(mainMeepo) then return false end
+        if not canUsePoofCandidate(unit, mainMeepo) then return false end
+        pos = origin(mainMeepo) or pos
+        anchorUnits = { mainMeepo }
+    elseif isPushActive() and mode ~= "escape" and not state.pushJungleByUnit[id] then
+        return false
+    end
     if mode == "move" and not multiEnabled(ui.poofUsage, LAll("poof_move")) then return false end
     if mode == "damage" and not multiEnabled(ui.poofUsage, LAll("poof_damage")) then return false end
     if not canSpendMana(unit) then return false end
@@ -2944,14 +2896,17 @@ local function tryPoof(unit, pos, t, mode, anchorUnits)
     if mode == "damage" and distance > 575 then return false end
     if NPC.IsChannellingAbility(unit) == true then return false end
 
-    local id = unitId(unit)
     if t - (state.lastPoof[id] or 0) < widgetGet(ui.poofCooldown, 3) then return false end
 
     local poof = NPC.GetAbility(unit, "meepo_poof")
     local mana = NPC.GetMana(unit) or 0
     if poof and Ability.IsCastable(poof, mana) == true then
-        local target = findBestPoofTarget(unit, pos, mode, anchorUnits)
+        local target = pushLaner and mode == "escape" and mainMeepo
+            or findBestPoofTarget(unit, pos, mode, anchorUnits)
         if not target then return false end
+        if pushLaner and mode == "escape" and unitId(target) ~= unitId(mainMeepo) then
+            return false
+        end
 
         Ability.CastTarget(poof, target, false, true, false, ORDER_PREFIX .. "poof")
         state.lastPoof[id] = t
@@ -2959,6 +2914,61 @@ local function tryPoof(unit, pos, t, mode, anchorUnits)
     end
 
     return false
+end
+
+local function pushLanerRetreatPos(unit, team)
+    local unitPos = origin(unit)
+    local lane = state.pushLaneByUnit[unitId(unit)]
+    return (lane and unitPos and laneRetreatDestination(lane, team, unitPos)) or basePosition(team)
+end
+
+local function commandPushLaners(player, laners, team, t)
+    if not laners or #laners == 0 then return end
+
+    local fleeEnemies = widgetGet(ui.avoidEnemies, true) and collectVisibleEnemyHeroes(team, t) or {}
+    local fleeRadius = enemyAvoidRadius() * 0.5
+
+    for _, unit in ipairs(laners) do
+        local id = unitId(unit)
+        local lane = state.pushLaneByUnit[id] or "mid"
+        local laneTag = string.upper(lane) .. " "
+        state.unitCamp[id] = "push_" .. lane
+
+        if widgetGet(ui.avoidEnemies, true) then
+            local _, enemyPos = visibleEnemyNearUnit(unit, fleeEnemies, fleeRadius)
+            if enemyPos then
+                state.unitFightCamp[id] = nil
+                setStatus(unit, L("status_escape"), statusColor.danger)
+
+                local main = getMainMeepo()
+                local mainPos = main and origin(main)
+                if main and id ~= unitId(main) and mainPos then
+                    if tryPoof(unit, mainPos, t, "escape", { main }) then
+                        goto continue_push
+                    end
+                end
+
+                issueMove(player, unit, pushLanerRetreatPos(unit, team), t)
+                goto continue_push
+            end
+        end
+
+        local unitPos = origin(unit)
+        local target = simplePushTarget(unit, lane, team, t)
+
+        if target then
+            state.unitFightCamp[id] = state.unitCamp[id]
+            setStatus(unit, laneTag .. L("status_push"), statusColor.farm)
+            issueAttack(player, unit, target, t)
+        else
+            state.unitFightCamp[id] = nil
+            local dest = (unitPos and lanePushDestination(lane, team, unitPos)) or lanePathCenter(lane)
+            setStatus(unit, laneTag .. L("status_push"), statusColor.move)
+            issueMove(player, unit, dest, t)
+        end
+
+        ::continue_push::
+    end
 end
 
 local function tryTeleportEscape(unit, pos, t, team)
@@ -3023,19 +3033,21 @@ local function avoidVisibleEnemies(player, active, neutrals, team, t)
 
     pruneEnemyAvoid(t)
 
-    local visibleEnemies
-    if awarenessMaphackEnabled() and collectEnemyAwareness then
-        visibleEnemies = collectEnemyAwareness(team, t)
-    else
-        visibleEnemies = collectVisibleEnemyHeroes(team, t)
+    local fleeEnemies = collectFleeEnemies(team, t)
+    for _, enemy in ipairs(fleeEnemies) do
+        if enemy.visible and enemy.pos then
+            rememberEnemyAvoid(enemy.pos, t)
+        end
     end
 
     local dangerById = {}
     local radius = enemyAvoidRadius()
     for _, unit in ipairs(active) do
-        local _, enemyPos = visibleEnemyNearUnit(unit, visibleEnemies, radius)
+        local id = unitId(unit)
+        local fightRadius = state.unitFightCamp[id] and (radius * FIGHTING_FLEE_RADIUS_RATIO) or radius
+        local _, enemyPos = visibleEnemyNearUnit(unit, fleeEnemies, fightRadius)
         if enemyPos then
-            dangerById[unitId(unit)] = enemyPos
+            dangerById[id] = enemyPos
             rememberEnemyAvoid(enemyPos, t)
         end
     end
@@ -3045,12 +3057,16 @@ local function avoidVisibleEnemies(player, active, neutrals, team, t)
         local id = unitId(unit)
         local unitPos = origin(unit)
         local dangerPos = dangerById[id]
-        if not dangerPos and unitPos and minDistanceToEnemyAvoid(unitPos, t) <= radius * 0.65 then
-            dangerPos = unitPos
+        if not dangerPos and unitPos and not state.unitFightCamp[id] then
+            local memoryDist = minDistanceToEnemyAvoid(unitPos, t)
+            if memoryDist <= radius * ESCAPE_MEMORY_RADIUS_RATIO then
+                dangerPos = unitPos
+            end
         end
 
         if dangerPos then
             state.unitCamp[id] = nil
+            state.unitFightCamp[id] = nil
             setStatus(unit, L("status_escape"), statusColor.danger)
 
             local safePos = escapePositionFor(unit, neutrals, t, team)
@@ -3096,7 +3112,7 @@ local function shouldBurstPoof(group)
 end
 
 local function commandGroup(player, group, t, team)
-    if not group or not group.camp then return end
+    if not group or not group.camp or group.camp.isPush then return end
 
     local target = group.camp.target
     if target and not alive(target) then target = nil end
@@ -3131,11 +3147,15 @@ local function commandGroup(player, group, t, team)
     local nearCount = countNear(group.units, joinPos, widgetGet(ui.joinRadius, 560))
     local requiredCount = math.max(1, group.minSize or #group.units)
     local readyToAttack = target and nearCount >= requiredCount
-    local laneTag = group.camp.isPush and group.camp.lane and (string.upper(tostring(group.camp.lane)) .. " ") or ""
 
     for i, unit in ipairs(group.units) do
         local role = group.roles[unitId(unit)] or group.role
         state.unitCamp[unitId(unit)] = group.camp.id
+
+        local unitPos = origin(unit)
+        local unitJoinPos = joinPos
+        local atObjective = target and unitPos and isWithin2D(unitPos, unitJoinPos, FARM_ATTACK_RANGE)
+        local shouldAttack = target and (readyToAttack or atObjective)
 
         if role == "HELP" then
             setStatus(unit, L("status_help") .. " G" .. group.index, statusColor.help, group.index)
@@ -3143,39 +3163,111 @@ local function commandGroup(player, group, t, team)
             local left = group.camp.waitUntil and math.max(0, math.ceil(group.camp.waitUntil - t)) or math.ceil(secondsToNextMinute())
             setStatus(unit, "G" .. group.index .. " " .. L("status_wait") .. " " .. left, statusColor.wait, group.index)
         elseif not target then
-            local label = group.camp.isPush and (laneTag .. L("status_push")) or L("status_scout")
-            setStatus(unit, "G" .. group.index .. " " .. label, group.camp.isPush and statusColor.move or statusColor.scout, group.index)
-        elseif readyToAttack then
-            local label
-            if group.camp.isPush then
-                label = " " .. laneTag .. L("status_push")
-            else
-                label = requiredCount == 1 and (" " .. L("status_solo")) or (" " .. L("status_farm"))
-            end
+            setStatus(unit, "G" .. group.index .. " " .. L("status_scout"), statusColor.scout, group.index)
+        elseif shouldAttack then
+            local label = requiredCount == 1 and (" " .. L("status_solo")) or (" " .. L("status_farm"))
             setStatus(unit, "G" .. group.index .. label, statusColor.farm, group.index)
         else
-            local label = group.camp.isPush and (laneTag .. L("status_push")) or L("status_join")
-            setStatus(unit, "G" .. group.index .. " " .. label, statusColor.move, group.index)
+            setStatus(unit, "G" .. group.index .. " " .. L("status_join"), statusColor.move, group.index)
         end
 
-        if readyToAttack then
+        if shouldAttack then
             state.unitFightCamp[unitId(unit)] = group.camp.id
         elseif not target then
             state.unitFightCamp[unitId(unit)] = nil
         end
 
-        if readyToAttack and shouldBurstPoof(group) then
-            if not tryPoof(unit, joinPos, t, "damage", group.units) then
-                issueAttack(player, unit, target, t)
-            end
-        elseif not readyToAttack and tryPoof(unit, joinPos, t, "move", group.units) then
-            -- Poof order is enough for this tick.
-        elseif readyToAttack then
+        if shouldAttack then
             issueAttack(player, unit, target, t)
         else
-            issueMove(player, unit, formationPosition(joinPos, i, #group.units), t)
+            issueMove(player, unit, formationPosition(unitJoinPos, i, #group.units), t)
         end
     end
+end
+
+local function syncPushJungleRoles(active, totalCount)
+    if (totalCount or #active) < 4 then
+        state.pushJungleByUnit = {}
+        return
+    end
+
+    for id in pairs(state.pushJungleByUnit) do
+        local stillActive = false
+        for _, unit in ipairs(active) do
+            if unitId(unit) == id then
+                stillActive = true
+                break
+            end
+        end
+        if not stillActive then
+            state.pushJungleByUnit[id] = nil
+        end
+    end
+end
+
+local function ensurePushJungleFarmer(active, t, totalCount)
+    syncPushJungleRoles(active, totalCount)
+    if (totalCount or #active) < 4 then return end
+
+    for _, unit in ipairs(active) do
+        if state.pushJungleByUnit[unitId(unit)] then return end
+    end
+
+    local main = getMainMeepo()
+    if main then
+        for _, unit in ipairs(active) do
+            if unitId(unit) == unitId(main) then
+                local id = unitId(unit)
+                state.pushJungleByUnit[id] = true
+                state.pushLaneByUnit[id] = nil
+                return
+            end
+        end
+    end
+
+    local neutrals = collectNeutrals(t)
+    local infos = collectCampInfos(neutrals, t)
+    local bestUnit, bestScore = nil, -math.huge
+
+    for _, unit in ipairs(active) do
+        local pos = origin(unit)
+        if pos then
+            local score = 0
+            for _, info in ipairs(infos or {}) do
+                if info.target and (info.count or 0) > 0 then
+                    score = math.max(score, 1400 - dist2D(pos, info.center))
+                elseif not info.target then
+                    score = math.max(score, 700 - dist2D(pos, info.center))
+                end
+            end
+            if score > bestScore then
+                bestScore = score
+                bestUnit = unit
+            end
+        end
+    end
+
+    if bestUnit then
+        local id = unitId(bestUnit)
+        state.pushJungleByUnit[id] = true
+        state.pushLaneByUnit[id] = nil
+    end
+end
+
+local function splitPushLanersAndJunglers(active)
+    local laners, junglers = {}, {}
+    for _, unit in ipairs(active) do
+        if state.pushJungleByUnit[unitId(unit)] then
+            junglers[#junglers + 1] = unit
+        else
+            laners[#laners + 1] = unit
+        end
+    end
+    return laners, junglers
+end
+
+local function isPushLanePusher(unit)
+    return isPushActive() and not state.pushJungleByUnit[unitId(unit)]
 end
 
 runPackFarm = function(player, units, team, t)
@@ -3189,6 +3281,7 @@ runPackFarm = function(player, units, team, t)
 
     local active = {}
     local base = basePosition(team)
+    local candidates = {}
 
     for _, unit in ipairs(units) do
         if isManual(unit, t) then
@@ -3199,13 +3292,26 @@ runPackFarm = function(player, units, team, t)
         elseif widgetGet(ui.megameepoHold, true) and isMegameepoActive(state.localHero) and unitId(unit) == unitId(state.localHero) then
             state.unitCamp[unitId(unit)] = nil
             setStatus(unit, L("status_hold"), statusColor.manual)
-        elseif needsManaRefill(unit) then
+        else
+            candidates[#candidates + 1] = unit
+        end
+    end
+
+    if isPushActive() then
+        ensurePushJungleFarmer(candidates, t, #units)
+    end
+
+    for _, unit in ipairs(candidates) do
+        local sendToBase = needsManaRefill(unit) or shouldRetreat(unit)
+        if isPushActive() and isPushLanePusher(unit) then
+            active[#active + 1] = unit
+        elseif sendToBase then
             state.unitCamp[unitId(unit)] = nil
-            setStatus(unit, L("status_regen"), statusColor.base)
-            issueMove(player, unit, base, t)
-        elseif shouldRetreat(unit) then
-            state.unitCamp[unitId(unit)] = nil
-            setStatus(unit, L("status_base"), statusColor.base)
+            if needsManaRefill(unit) then
+                setStatus(unit, L("status_regen"), statusColor.base)
+            else
+                setStatus(unit, L("status_base"), statusColor.base)
+            end
             issueMove(player, unit, base, t)
         else
             active[#active + 1] = unit
@@ -3219,36 +3325,65 @@ runPackFarm = function(player, units, team, t)
     end
 
     local neutrals = collectNeutrals(t)
-    active = avoidVisibleEnemies(player, active, neutrals, team, t)
-    if #active == 0 then
-        storeActiveGroups(nil)
-        setDebugInfo("Meepo AutoFarm V2", {
-            "Active pairs: 0",
-            "All active Meepos are escaping or unavailable"
-        })
-        finalizeStatuses(units)
-        return
-    end
-
     local groups, reserves, pushDebug
-    if isPushActive() then
-        groups, reserves, pushDebug = buildPushGroups(active, 0, team, t)
-        handleReserveUnits(player, reserves, groups, t, team)
+    local pushLaners
 
+    if isPushActive() then
+        local laners, junglers = splitPushLanersAndJunglers(active)
+
+        if assignPushLanesForUnits then
+            assignPushLanesForUnits(laners, team, t)
+        end
+
+        pushLaners = laners
+        junglers = avoidVisibleEnemies(player, junglers, neutrals, team, t)
+
+        active = {}
+        for _, unit in ipairs(laners) do active[#active + 1] = unit end
+        for _, unit in ipairs(junglers) do active[#active + 1] = unit end
+
+        if #active == 0 then
+            storeActiveGroups(nil)
+            setDebugInfo("Meepo AutoFarm V2", {
+                "Active pairs: 0",
+                "All active Meepos are escaping or unavailable"
+            })
+            finalizeStatuses(units)
+            return
+        end
+
+        groups, pushDebug = buildPushGroups(laners, 0, team, t)
+
+        local farmGroups, farmReserves = {}, {}
+        if #junglers > 0 then
+            farmGroups, farmReserves = buildGroups(junglers, neutrals, t, team)
+            for _, group in ipairs(farmGroups) do
+                groups[#groups + 1] = group
+            end
+            handleReserveUnits(player, farmReserves, groups, t, team)
+        end
+
+        local jungleCount = #junglers
         local debugLines = {
-            string.format("Mode: PUSH | Push pairs: %d | Reserve: %d", #groups, #reserves),
+            string.format("Mode: PUSH | Lane pushers: %d | Jungle: %d | Groups: %d", #laners, jungleCount, #groups),
             string.format("Active Meepos: %d | Enemy memory: %d", #active, #state.enemyAvoid)
         }
-        if pushDebug then
-            if pushDebug.lanes and #pushDebug.lanes > 0 then
-                debugLines[#debugLines + 1] = "Lanes: " .. table.concat(pushDebug.lanes, " | ")
-            else
-                debugLines[#debugLines + 1] = string.format("Push target: %s", pushDebug.label or "front")
-                debugLines[#debugLines + 1] = string.format("Push score: %.0f | Support: %d | Danger: %.0f", pushDebug.score or 0, pushDebug.support or 0, pushDebug.danger or 0)
-            end
+        if pushDebug and pushDebug.lanes and #pushDebug.lanes > 0 then
+            debugLines[#debugLines + 1] = "Lanes: " .. table.concat(pushDebug.lanes, " | ")
         end
         setDebugInfo("Meepo AutoFarm V2", debugLines)
     else
+        active = avoidVisibleEnemies(player, active, neutrals, team, t)
+        if #active == 0 then
+            storeActiveGroups(nil)
+            setDebugInfo("Meepo AutoFarm V2", {
+                "Active pairs: 0",
+                "All active Meepos are escaping or unavailable"
+            })
+            finalizeStatuses(units)
+            return
+        end
+
         groups, reserves = buildGroups(active, neutrals, t, team)
         handleReserveUnits(player, reserves, groups, t, team)
         setDebugInfo("Meepo AutoFarm V2", {
@@ -3260,12 +3395,19 @@ runPackFarm = function(player, units, team, t)
     storeActiveGroups(groups)
 
     if #groups == 0 then
+        if isPushActive() and pushLaners and #pushLaners > 0 then
+            commandPushLaners(player, pushLaners, team, t)
+        end
         finalizeStatuses(units)
         return
     end
 
     for _, group in ipairs(groups) do
         commandGroup(player, group, t, team)
+    end
+
+    if isPushActive() and pushLaners then
+        commandPushLaners(player, pushLaners, team, t)
     end
 
     finalizeStatuses(units)
