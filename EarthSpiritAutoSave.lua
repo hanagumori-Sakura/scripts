@@ -1,7 +1,7 @@
 --[[
     Earth Spirit Auto Save
     Versus saves: Geomagnetic Grip, or Aghs Petrify (Blink if out of range).
-    Script by Euphoria
+    Script by 花曇り hanagumori
 --]]
 
 local Script = {}
@@ -30,6 +30,9 @@ local VERSUS_CONFIG_PREFIX = "versus_"
 local CHRONO_FREEZE_MOD = "modifier_faceless_void_chronosphere_freeze"
 local CHRONO_DEFAULT_RADIUS = 500
 local CHRONO_SAFE_MARGIN = 75
+local BLACK_HOLE_DEFAULT_RADIUS = 420
+local MARS_ARENA_DEFAULT_RADIUS = 550
+local DUEL_DEFAULT_RADIUS = 300
 local BLINK_LANDING_SCAN_STEP = 25
 local SAFE_CAST_ANGLE_STEP = math.pi / 12
 
@@ -63,6 +66,24 @@ local SAVE_HAZARD_MODIFIERS = {
         margin = CHRONO_SAFE_MARGIN,
         label = "chronosphere",
     },
+    {
+        allyMod = "modifier_enigma_black_hole_pull",
+        defaultRadius = BLACK_HOLE_DEFAULT_RADIUS,
+        margin = CHRONO_SAFE_MARGIN,
+        label = "black_hole",
+    },
+    {
+        allyMod = "modifier_mars_arena_of_blood_leash",
+        defaultRadius = MARS_ARENA_DEFAULT_RADIUS,
+        margin = CHRONO_SAFE_MARGIN,
+        label = "arena_of_blood",
+    },
+    {
+        allyMod = "modifier_legion_commander_duel",
+        defaultRadius = DUEL_DEFAULT_RADIUS,
+        margin = 50,
+        label = "duel",
+    },
 }
 
 local O_CAST_TARGET = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_TARGET
@@ -79,18 +100,33 @@ local BLINK_ITEMS = {
 local GRIP_BLOCKED_ALLY_MODIFIERS = {
     "modifier_legion_commander_duel",
     "modifier_faceless_void_chronosphere_freeze",
+    "modifier_winter_wyvern_winters_curse",
+}
+
+local ALLY_PETRIFY_MODIFIERS = {
+    "modifier_earthspirit_petrify",
+}
+
+local CAN_ACT_BLOCKED_STATES = {
+    Enum.ModifierState.MODIFIER_STATE_ROOTED,
+    Enum.ModifierState.MODIFIER_STATE_HEXED,
+    Enum.ModifierState.MODIFIER_STATE_MUTED,
+    Enum.ModifierState.MODIFIER_STATE_DISARMED,
+    Enum.ModifierState.MODIFIER_STATE_TAUNTED,
+    Enum.ModifierState.MODIFIER_STATE_COMMAND_RESTRICTED,
+    Enum.ModifierState.MODIFIER_STATE_FEARED,
 }
 
 local Icons = {
     enable = "\u{f00c}", -- check
     gear   = "\u{f013}", -- settings
-    flask  = "\u{f0c3}", -- mana threshold
+    mana   = "\u{f043}", -- droplet / mana threshold
     blink  = "panorama/images/items/blink_png.vtex_c",
     sparkles = "\u{f890}", -- abilities row
     panel       = "\u{f108}", -- hud panel
     panelHeader = "\u{e1ac}", -- hud panel header
     bug         = "\u{f188}", -- debug
-    versus = "\u{f05b}", -- crosshairs / threat picker
+    versus = "\u{f71d}", -- versus / threat picker
 }
 
 local SPELL_ICONS = {
@@ -118,7 +154,7 @@ local VERSUS_THREATS = {
     { id = "axe_berserkers_call", mods = { "modifier_axe_berserkers_call" }, default = true },
     { id = "legion_commander_duel", mods = { "modifier_legion_commander_duel" }, default = true },
     { id = "winter_wyvern_winters_curse", mods = { "modifier_winter_wyvern_winters_curse" }, default = true },
-    { id = "earthshaker_echo_slam", mods = { "modifier_earthshaker_fissure_stun" }, default = true },
+    { id = "earthshaker_echo_slam", mods = {}, default = true },
     { id = "earthshaker_fissure", mods = { "modifier_earthshaker_fissure_stun" }, default = false },
 
     -- Hard channeled / long disables
@@ -151,6 +187,23 @@ local VERSUS_THREATS = {
     { id = "void_spirit_aether_remnant", mods = { "modifier_void_spirit_aether_remnant_pull" }, default = true },
     { id = "hoodwink_bushwhack", mods = { "modifier_hoodwink_bushwhack_trap" }, default = true },
     { id = "rattletrap_hookshot", mods = { "modifier_rattletrap_hookshot" }, default = true },
+    { id = "rattletrap_power_cogs", mods = { "modifier_rattletrap_cog_push" }, default = false },
+    { id = "juggernaut_omni_slash", mods = { "modifier_juggernaut_omnislash" }, default = true },
+    { id = "huskar_life_break", mods = {
+        "modifier_huskar_life_break_slow",
+        "modifier_huskar_life_break_charge",
+    }, default = true },
+    { id = "life_stealer_infest", mods = {
+        "modifier_life_stealer_infest",
+        "modifier_life_stealer_infest_effect",
+    }, default = false },
+    { id = "dark_seer_vacuum", mods = { "modifier_dark_seer_vacuum" }, default = true },
+    { id = "magnataur_skewer", mods = {
+        "modifier_magnataur_skewer_movement",
+        "modifier_magnataur_skewer_impact",
+        "modifier_magnataur_skewer_slow",
+    }, default = true },
+    { id = "night_stalker_crippling_fear", mods = { "modifier_night_stalker_crippling_fear" }, default = true },
     { id = "kunkka_ghostship", mods = { "modifier_kunkka_ghostship_knockout" }, default = true },
     { id = "kunkka_torrent", mods = { "modifier_kunkka_torrent" }, default = false },
     { id = "spirit_breaker_charge_of_darkness", mods = { "modifier_spirit_breaker_charge_of_darkness" }, default = true },
@@ -162,7 +215,7 @@ local VERSUS_THREATS = {
     { id = "marci_grapple", mods = { "modifier_marci_grapple_stun" }, default = false },
 
     -- Roots / sleeps
-    { id = "snapfire_firesnap_cookie", mods = { "modifier_snapfire_firesnap_cookie_stun" }, default = false },
+    { id = "snapfire_firesnap_cookie", mods = { "modifier_snapfire_firesnap_cookie_stun" }, default = true },
     { id = "crystal_maiden_frostbite", mods = { "modifier_crystal_maiden_frostbite" }, default = true },
     { id = "naga_siren_ensnare", mods = { "modifier_naga_siren_ensnare" }, default = true },
     { id = "ember_spirit_searing_chains", mods = { "modifier_ember_spirit_searing_chains" }, default = true },
@@ -204,7 +257,7 @@ local VERSUS_THREATS = {
     { id = "nyx_assassin_impale", mods = { "modifier_nyx_assassin_impale" }, default = false },
     { id = "mirana_arrow", mods = { "modifier_mirana_arrow_stun" }, default = false },
     { id = "chaos_knight_chaos_bolt", mods = { "modifier_chaos_knight_chaos_bolt" }, default = false },
-    { id = "centaur_hoof_stomp", mods = { "modifier_centaur_hoof_stomp_stun" }, default = false },
+    { id = "centaur_hoof_stomp", mods = { "modifier_centaur_hoof_stomp" }, default = true },
     { id = "dragon_knight_dragon_tail", mods = { "modifier_dragon_knight_dragon_tail_stun" }, default = false },
     { id = "jakiro_ice_path", mods = { "modifier_jakiro_ice_path_stun" }, default = false },
     { id = "leshrac_split_earth", mods = { "modifier_leshrac_split_earth_stun" }, default = false },
@@ -278,6 +331,8 @@ local LoggerInstance = Logger and Logger("EarthSpiritAutoSave") or nil
 --#endregion
 
 --#region Helpers
+
+(function()
 
 local function SafeCall(fn, ...)
     if type(fn) ~= "function" then
@@ -674,8 +729,8 @@ local function HeroIconPath(unitName)
 end
 
 local function GetHealthPct(unit)
-    local hp = Entity.GetHealth(unit) or 0
-    local maxHp = Entity.GetMaxHealth(unit) or 1
+    local hp = SafeCall(Entity.GetHealth, unit) or 0
+    local maxHp = SafeCall(Entity.GetMaxHealth, unit) or 1
     if maxHp <= 0 then
         return 1
     end
@@ -712,10 +767,19 @@ local function CanAct(me)
         return false
     end
 
-    return not SafeCall(NPC.IsStunned, me)
-        and not SafeCall(NPC.IsSilenced, me)
-        and not SafeCall(NPC.HasState, me, Enum.ModifierState.MODIFIER_STATE_ROOTED)
-        and not SafeCall(NPC.IsChannellingAbility, me)
+    if SafeCall(NPC.IsStunned, me)
+        or SafeCall(NPC.IsSilenced, me)
+        or SafeCall(NPC.IsChannellingAbility, me) then
+        return false
+    end
+
+    for _, state in ipairs(CAN_ACT_BLOCKED_STATES) do
+        if SafeCall(NPC.HasState, me, state) then
+            return false
+        end
+    end
+
+    return true
 end
 
 local function CanCastAbility(me, ability)
@@ -819,6 +883,56 @@ local function Dist2D(a, b)
         return math.huge
     end
     return (b - a):Length2D()
+end
+
+--#endregion
+
+--#region Blink Validation
+
+local function IsBlinkPositionTraversable(origin, pos)
+    if not origin or not pos or not GridNav then
+        return true
+    end
+
+    if GridNav.IsTraversableFromTo then
+        return SafeCall(GridNav.IsTraversableFromTo, origin, pos, false, nil) == true
+    end
+
+    if GridNav.IsTraversable then
+        return SafeCall(GridNav.IsTraversable, pos, 0x1, 0x002) == true
+    end
+
+    return true
+end
+
+local function IsBlinkPositionVisible(pos)
+    if not pos or not FogOfWar or not FogOfWar.IsPointVisible then
+        return true
+    end
+    return SafeCall(FogOfWar.IsPointVisible, pos) ~= false
+end
+
+local function IsBlinkLandingValid(origin, pos)
+    if not pos then
+        return false
+    end
+    if not IsBlinkPositionTraversable(origin, pos) then
+        return false
+    end
+    return IsBlinkPositionVisible(pos)
+end
+
+--#endregion
+
+--#region Save Position & Hazards
+
+local function IsAllyUnderPetrify(ally)
+    for _, modifierName in ipairs(ALLY_PETRIFY_MODIFIERS) do
+        if SafeCall(NPC.HasModifier, ally, modifierName) then
+            return true
+        end
+    end
+    return false
 end
 
 local function IsPointInSaveHazard(pos, hazard)
@@ -980,7 +1094,8 @@ local function ScanSaveBlinkLanding(origin, allyPos, castRange, blinkRange, haza
                     origin.y + dy * tryDist,
                     origin.z
                 )
-                if IsValidSavePosition(landing, allyPos, castRange, hazard) then
+                if IsValidSavePosition(landing, allyPos, castRange, hazard)
+                    and IsBlinkLandingValid(origin, landing) then
                     if tryDist < bestDist then
                         bestDist = tryDist
                         bestPos = landing
@@ -988,7 +1103,8 @@ local function ScanSaveBlinkLanding(origin, allyPos, castRange, blinkRange, haza
                     break
                 end
             end
-        elseif distToRim >= BLINK_SAVE_MARGIN and distToRim < bestDist then
+        elseif distToRim >= BLINK_SAVE_MARGIN and distToRim < bestDist
+            and IsBlinkLandingValid(origin, rim) then
             bestDist = distToRim
             bestPos = rim
         end
@@ -1005,7 +1121,9 @@ local function ComputeBlinkTowardSavePos(origin, allyPos, targetPos, castRange, 
     end
 
     local dist = Dist2D(origin, targetPos)
-    if dist <= blinkRange and IsValidSavePosition(targetPos, allyPos, castRange, hazard) then
+    if dist <= blinkRange
+        and IsValidSavePosition(targetPos, allyPos, castRange, hazard)
+        and IsBlinkLandingValid(origin, targetPos) then
         return targetPos
     end
 
@@ -1023,7 +1141,8 @@ local function ComputeBlinkTowardSavePos(origin, allyPos, targetPos, castRange, 
             origin.y + dy * tryDist,
             origin.z
         )
-        if IsValidSavePosition(landing, allyPos, castRange, hazard) then
+        if IsValidSavePosition(landing, allyPos, castRange, hazard)
+            and IsBlinkLandingValid(origin, landing) then
             return landing
         end
     end
@@ -1054,11 +1173,15 @@ local function ComputeBlinkPosNearAlly(origin, allyPos, castRange, blinkRange)
 
     local dirX = toAlly.x / dist
     local dirY = toAlly.y / dist
-    return Vector(
+    local landing = Vector(
         origin.x + dirX * blinkDist,
         origin.y + dirY * blinkDist,
         origin.z
     )
+    if IsBlinkLandingValid(origin, landing) then
+        return landing
+    end
+    return nil
 end
 
 local function IsAllyInCastRange(ctx, ally, castRange)
@@ -1299,7 +1422,7 @@ local function ProcessPendingPetrify(ctx)
     end
 
     local ally = pending.ally
-    if not ally or not IsValidSaveAlly(ally) then
+    if not ally or not IsValidSaveAlly(ally) or IsAllyUnderPetrify(ally) then
         ClearPendingPetrify()
         return false
     end
@@ -1595,9 +1718,36 @@ local function AllyHasBeastmasterPrimalRoarThreat(ally)
     return false
 end
 
+local function AllyHasStunFromAbility(ally, abilityName)
+    local stunMod = SafeCall(NPC.GetModifier, ally, "modifier_stunned")
+    if not stunMod then
+        return false
+    end
+
+    local ability = SafeCall(Modifier.GetAbility, stunMod)
+    return ability and SafeCall(Ability.GetName, ability) == abilityName
+end
+
+local function AllyHasEarthshakerEchoSlamThreat(ally)
+    return AllyHasStunFromAbility(ally, "earthshaker_echo_slam")
+end
+
+local function AllyHasCentaurHoofStompThreat(ally)
+    if SafeCall(NPC.HasModifier, ally, "modifier_centaur_hoof_stomp") then
+        return true
+    end
+    return AllyHasStunFromAbility(ally, "centaur_hoof_stomp")
+end
+
 local function AllyMatchesVersusThreat(ally, threat)
     if threat.id == "beastmaster_primal_roar" then
         return AllyHasBeastmasterPrimalRoarThreat(ally)
+    end
+    if threat.id == "earthshaker_echo_slam" then
+        return AllyHasEarthshakerEchoSlamThreat(ally)
+    end
+    if threat.id == "centaur_hoof_stomp" then
+        return AllyHasCentaurHoofStompThreat(ally)
     end
 
     for _, modifierName in ipairs(threat.mods) do
@@ -1877,7 +2027,8 @@ local function InitializeUI()
 
     local ui = {}
 
-    ui.Enabled = group:Switch(L("Enable", "Включить"), false, Icons.enable)
+    local enabledDefault = SafeCall(Config.ReadInt, CONFIG_SECTION, "enabled", 0) == 1
+    ui.Enabled = group:Switch(L("Enable", "Включить"), enabledDefault, Icons.enable)
     WithTooltip(ui.Enabled, L(
         "Auto-save allies on Versus threats: Grip or Aghs Petrify.",
         "Автосейв союзников по Versus-угрозам: Grip или Aghs Petrify."))
@@ -1894,7 +2045,7 @@ local function InitializeUI()
 
     LoadVersusPrefs()
     ui.Versus = group:MultiSelect(
-        L("Use VS", "Use VS"),
+        L("Versus", "Versus"),
         BuildVersusMultiSelectItems(nil),
         false
     )
@@ -1909,8 +2060,12 @@ local function InitializeUI()
 
     local gear = ui.Enabled:Gear(L("Auto Save Settings", "Настройки Auto Save"), Icons.gear)
 
-    ui.ManaThreshold = gear:Slider(L("Min Mana %", "Мин. MP %"), 0, 100, 20, "%d%%")
-    MenuIcon(ui.ManaThreshold, Icons.flask)
+    local manaDefault = SafeCall(Config.ReadInt, CONFIG_SECTION, "mana_threshold", 20)
+    if type(manaDefault) ~= "number" or manaDefault < 0 or manaDefault > 100 then
+        manaDefault = 20
+    end
+    ui.ManaThreshold = gear:Slider(L("Min Mana %", "Мин. MP %"), 0, 100, manaDefault, "%d%%")
+    MenuIcon(ui.ManaThreshold, Icons.mana)
     WithTooltip(ui.ManaThreshold, L(
         "Do not cast saves while your mana is below this percentage.",
         "Не использовать сейв, пока ваша мана ниже этого процента."))
@@ -1984,7 +2139,15 @@ local function InitializeUI()
         end
     end
 
-    ui.Enabled:SetCallback(UpdateControls, true)
+    local function OnEnabledChanged()
+        SafeCall(Config.WriteInt, CONFIG_SECTION, "enabled", ui.Enabled:Get() and 1 or 0)
+        UpdateControls()
+    end
+
+    ui.Enabled:SetCallback(OnEnabledChanged, true)
+    ui.ManaThreshold:SetCallback(function()
+        SafeCall(Config.WriteInt, CONFIG_SECTION, "mana_threshold", ui.ManaThreshold:Get())
+    end, true)
 
     return ui
 end
@@ -2415,6 +2578,10 @@ end
 --#region Save Handlers
 
 local function GetAllySaveReason(ally)
+    if IsAllyUnderPetrify(ally) then
+        return nil
+    end
+
     local threatId, threatScore = GetAllyVersusThreat(ally)
     if threatId then
         return "versus:" .. threatId, threatScore or 0
@@ -2687,6 +2854,8 @@ function Script.OnScriptsLoaded()
     LoadVersusPrefs()
     SyncColors()
     fontPanel = ResolvePanelHeaderFont(PANEL_TITLE_TEXT) or 0
+    State.lastAllyScanTime = -100
+    State.lastAllySyncTime = -100
     State.lastVersusRosterKey = ""
     State.lastVersusSyncTime = -100
     State.panelHeaderFaFont = nil
@@ -2710,6 +2879,17 @@ function Script.OnGameEnd()
     State.saveQuietUntil = -100
     State.lastVersusRosterKey = ""
     State.lastVersusSyncTime = -100
+    State.lastAllyScanTime = -100
+    State.lastAllySyncTime = -100
+    State.lastDebugLogTime = -100
+    State.cachedAllies = {}
+    State.cachedAllyNames = {}
+    State.cachedAllyEntities = {}
+    State.allyEnabled = {}
+    State.wasMousePressed = false
+    PanelDrag.IsDragging = false
+    PanelDrag.OffsetX = 0
+    PanelDrag.OffsetY = 0
 end
 
 function Script.OnThemeUpdate()
@@ -2717,6 +2897,26 @@ function Script.OnThemeUpdate()
     fontPanel = ResolvePanelHeaderFont(PANEL_TITLE_TEXT) or 0
     State.panelHeaderFaFont = nil
     State.panelHeaderFaAvailable = nil
+end
+
+function Script.OnUpdateEx()
+    if not Engine.IsInGame() then
+        local now = os.clock()
+        if now - (State.lastVersusSyncTime or -100) >= ENEMY_ROSTER_SYNC_INTERVAL then
+            State.lastVersusSyncTime = now
+            if State.lastVersusRosterKey ~= "" then
+                ShowAllVersusThreats(false)
+            end
+        end
+        return
+    end
+
+    local me = Heroes.GetLocal()
+    if IsLocalEarthSpirit(me) then
+        local now = GlobalVars.GetCurTime() or 0
+        SyncVersusThreats(me, now)
+        SyncAllyTargets(me, now)
+    end
 end
 
 function Script.OnUpdate()
@@ -2760,6 +2960,8 @@ function Script.OnUpdate()
 
     TryAutoSave(ctx)
 end
+
+end)()
 
 --#endregion
 

@@ -2,7 +2,7 @@
     Cosmic Menu
     Full-screen cosmic overlay while the Umbrella menu is open.
     Accent colors always follow Menu.Style / OnThemeUpdate.
-    Script by Euphoria
+    Script by 花曇り hanagumori
 --]]
 
 local Script = {}
@@ -15,11 +15,15 @@ local CONSTANTS = {
     ANIMATION_DT_MAX = 0.05,
     PARTICLE_CONNECTION_DIST = 150,
     PARTICLE_MAX_CONNECTIONS = 3,
-    SHOOTING_STAR_TAIL_LENGTH = 20,
+    SHOOTING_STAR_TAIL_LENGTH = 24,
     SHOOTING_STAR_MAX_LIFETIME = 5,
+    SHOOTING_STAR_BURST_DURATION = 0.22,
     STAR_RAY_BRIGHTNESS_THRESHOLD = 0.8,
+    STAR_RAY_COUNT = 6,
+    STAR_GLINT_CHANCE = 0.06,
     SHOOTING_STAR_SPEED_MOD = 0.5,
     FADE_IN_DURATION = 1.5,
+    WORMHOLE_PARTICLE_BURST_DURATION = 0.5,
     QUALITY_LOW_THRESHOLD = 0.8,
     STAR_RAY_QUALITY_THRESHOLD = 0.85,
     WASH_ALPHA_BASE = 17,
@@ -35,7 +39,38 @@ local CONSTANTS = {
     MENU_CLOSE_FLICKER_FRAMES = 2,
     POOL_REBALANCE_HYSTERESIS = 18,
     QUALITY_COUNT_SMOOTH_SPEED = 2.0,
+    CUSTOM_PRESET_INDEX = 6,
+    BUILTIN_PRESET_COUNT = 5,
+    IDLE_PAUSE_DEFAULT = 3.0,
+    IDLE_THRESHOLD_MIN = 1.0,
+    IDLE_THRESHOLD_MAX = 15.0,
+    LINK_LOD_QUALITY_THRESHOLD = 0.9,
+    LINK_LOD_PARTICLE_THRESHOLD = 150,
+    LINK_LOD_CONNECTION_SCALE = 0.5,
+    PRESET_CUSTOM_MARK_BLOCK_FRAMES = 4,
+    SCREEN_MIN_W = 640,
+    SCREEN_MIN_H = 360,
+    SCREEN_MAX_W = 7680,
+    SCREEN_MAX_H = 4320,
+    ACCRETION_RING_SEGMENTS = 72,
+    GRAVITY_FILAMENT_COUNT = 6,
+    GRAVITY_FILAMENT_SEGMENTS = 28,
+    AMBIENT_NEBULA_RATIO = 0.42,
+    LINK_PULSE_QUALITY_THRESHOLD = 0.92,
+    GLOW_QUALITY_THRESHOLD = 0.82,
+    STANDARD_SNAP_WIDTH_TOLERANCE = 0.06,
 }
+
+local STANDARD_RESOLUTIONS = {
+    {1920, 1080}, {2560, 1440}, {3840, 2160}, {1600, 900}, {1366, 768},
+    {1280, 720}, {1280, 1024}, {1440, 900}, {2560, 1080}, {3440, 1440},
+    {1536, 864}, {2048, 1152}, {1680, 1050},
+}
+
+local DEFAULT_SCREEN_SIZE = Vec2(1920, 1080)
+
+local CONFIG_SECTION = "cosmic_menu"
+local LOG_PREFIX = "[CosmicMenu] "
 
 local QUALITY_PRESETS = {
     {
@@ -84,6 +119,8 @@ local QUALITY_PRESETS = {
         hudEdges = true,
         parallax = true,
         starRays = true,
+        accretionRing = true,
+        gravityFilaments = false,
     },
     {
         bgParticleCount = 350,
@@ -102,6 +139,8 @@ local QUALITY_PRESETS = {
         hudEdges = true,
         parallax = true,
         starRays = true,
+        accretionRing = true,
+        gravityFilaments = true,
     },
     {
         bgParticleCount = 30,
@@ -123,10 +162,26 @@ local QUALITY_PRESETS = {
         cursorStardust = false,
         particleSoftCore = false,
         particleCursorInteraction = false,
+        accretionRing = false,
+        gravityFilaments = false,
     },
 }
 
 local THEME_STYLE_KEYS = {"accent", "secondary", "highlight", "active", "text", "primary"}
+
+local PRESET_WIDGET_KEYS = {
+    "bgParticleCount", "starCount", "shootingStars", "shootingStarFreq", "stars",
+    "backgroundBlur", "blurIntensity", "particleConnections", "particleMaxConnections",
+    "ambientStreaks", "ambientStreakCount", "particleGlow", "vignette", "hudEdges",
+    "parallax", "starRays", "colorWash", "openRipple", "horizonGrid", "multiLayerStars",
+    "cursorStardust", "particleSoftCore", "particleCursorInteraction",
+    "accretionRing", "gravityFilaments",
+}
+
+local CONFIG_BOOL_KEYS = {
+    "enabled", "themeUseAccentOnly", "themeMonochrome", "pauseWhenIdle",
+    "backgroundOnly", "debugOverlay",
+}
 
 --#endregion
 
@@ -140,11 +195,22 @@ local State = {
     starsWasEnabled = nil,
     multiLayerWasEnabled = nil,
     lastQualityPreset = nil,
+    lastNamedPreset = 3,
     applyingPreset = false,
     displayPrimary = nil,
     displaySecondary = nil,
     targetPrimary = nil,
     targetSecondary = nil,
+    frameSettings = nil,
+    menuIdleTime = 0,
+    simulationPaused = false,
+    linkGridSkipFrame = false,
+    debugFont = nil,
+    lastDt = 0,
+    screenFallbackLogged = false,
+    blockCustomPresetMarks = 0,
+    cachedFullScreenSize = nil,
+    lastRawScreenSize = nil,
 }
 
 local openRippleTime = 0
@@ -174,8 +240,6 @@ local lastStarTargetCount = 0
 local lastStreakTargetCount = 0
 local baseScreenMinDim = nil
 local baseScreenArea = nil
-local adaptiveFallbackMaxW = 0
-local adaptiveFallbackMaxH = 0
 
 local screenSize = Vec2(1, 1)
 
@@ -187,6 +251,12 @@ local shootingStarPool = {}
 local ambientStreakPool = {}
 local ambientStreakActive = {}
 local linkSpatialGrid = {}
+
+local LoggerInstance = Logger and Logger("CosmicMenu") or nil
+local UpdateMenuControls = nil
+local GatherFrameSettings
+local IsCustomPresetMarkBlocked
+local ArmCustomPresetMarkBlock
 
 --#endregion
 
@@ -203,6 +273,65 @@ local function WidgetSet(widget, value)
     if widget and widget.Set then
         SafeCall(widget.Set, widget, value)
     end
+end
+
+local function WidgetGet(widget, default)
+    if not widget or not widget.Get then
+        return default
+    end
+    local ok, value = pcall(widget.Get, widget)
+    if ok and value ~= nil then
+        return value
+    end
+    return default
+end
+
+local function Log(level, message)
+    message = tostring(message)
+    if LoggerInstance and LoggerInstance[level] then
+        if pcall(LoggerInstance[level], LoggerInstance, message) then
+            return
+        end
+    end
+    if level == "error" or level == "warn" then
+        print(LOG_PREFIX .. message)
+    end
+end
+
+local function ConfigReadInt(key, default)
+    if not Config or not Config.ReadInt then
+        return default
+    end
+    local ok, value = pcall(Config.ReadInt, CONFIG_SECTION, key, default)
+    if ok and type(value) == "number" then
+        return value
+    end
+    return default
+end
+
+local function ConfigWriteInt(key, value)
+    if not Config or not Config.WriteInt then
+        return
+    end
+    SafeCall(Config.WriteInt, CONFIG_SECTION, key, value)
+end
+
+local function ConfigReadFloat(key, default)
+    if not Config or not Config.ReadFloat then
+        return default
+    end
+    local ok, value = pcall(Config.ReadFloat, CONFIG_SECTION, key, default)
+    if ok and type(value) == "number" then
+        return value
+    end
+    return default
+end
+
+local function ConfigWriteFloat(key, value)
+    if not Config or not Config.WriteFloat then
+        return
+    end
+    SafeCall(Config.WriteFloat, CONFIG_SECTION, key, value)
 end
 
 local function randomRangeSafe(minValue, maxValue)
@@ -369,150 +498,322 @@ local function updateScreenBaselines(size)
     end
 end
 
-local function getAdaptiveFallbackScreenSize()
-    local bestW = 0
-    local bestH = 0
-
-    local function considerCandidate(size)
-        if not size or not size.x or not size.y then
-            return
-        end
-
-        local cw = math.floor(size.x)
-        local ch = math.floor(size.y)
-        if cw > bestW then bestW = cw end
-        if ch > bestH then bestH = ch end
+local function isLikelyPartialViewport(size)
+    if not size or not size.x or not size.y then
+        return false
     end
 
-    considerCandidate(screenSize)
+    local w = size.x
+    local h = math.max(size.y, 1)
+    local aspect = w / h
 
-    if Input and Input.GetCursorPos then
-        local ok, x, y = pcall(Input.GetCursorPos)
-        if ok and type(x) == "number" and type(y) == "number" then
-            local estW = math.max(640, math.floor(x * 2))
-            local estH = math.max(360, math.floor(y * 2))
-            considerCandidate(Vec2(estW, estH))
-        end
-
-        ok, x, y = pcall(function() return Input:GetCursorPos() end)
-        if ok and type(x) == "number" and type(y) == "number" then
-            local estW = math.max(640, math.floor(x * 2))
-            local estH = math.max(360, math.floor(y * 2))
-            considerCandidate(Vec2(estW, estH))
-        end
+    -- Menu / overlay viewport while Umbrella menu is open (e.g. 1856x687).
+    if aspect > 2.05 then
+        return true
     end
 
-    if Menu and Menu.Pos and Menu.Size then
-        local okPos, menuPos = pcall(Menu.Pos)
-        local okSize, menuSize = pcall(Menu.Size)
-        if okPos and okSize and menuPos and menuSize and menuPos.x and menuPos.y and menuSize.x and menuSize.y then
-            local estW = math.max(640, math.floor((menuPos.x + menuSize.x) * 2))
-            local estH = math.max(360, math.floor((menuPos.y + menuSize.y) * 2))
-            considerCandidate(Vec2(estW, estH))
-        end
+    if w >= 1100 and h < w * 0.55 then
+        return true
     end
 
-    if bestW > adaptiveFallbackMaxW then
-        adaptiveFallbackMaxW = bestW
-    end
-    if bestH > adaptiveFallbackMaxH then
-        adaptiveFallbackMaxH = bestH
-    end
-
-    if adaptiveFallbackMaxW > 1 and adaptiveFallbackMaxH > 1 then
-        return Vec2(adaptiveFallbackMaxW, adaptiveFallbackMaxH)
-    end
-
-    return Vec2(1280, 720)
+    return false
 end
 
-local function GetBestScreenSize()
+local function snapFromPartialWidth(w)
+    local bestEntry = nil
+    local bestDiff = math.huge
+
+    for i = 1, #STANDARD_RESOLUTIONS do
+        local entry = STANDARD_RESOLUTIONS[i]
+        local rw = entry[1]
+        local rh = entry[2]
+        local aspect = rw / math.max(rh, 1)
+
+        if math.abs(aspect - (16 / 9)) < 0.02 then
+            local diff = math.abs(rw - w)
+            if diff < bestDiff then
+                bestDiff = diff
+                bestEntry = entry
+            end
+        end
+    end
+
+    if bestEntry and bestDiff <= bestEntry[1] * 0.08 then
+        return Vec2(bestEntry[1], bestEntry[2])
+    end
+
+    return nil
+end
+
+local function snapToStandardResolution(w, h)
+    local bestEntry = nil
+    local bestScore = math.huge
+
+    for i = 1, #STANDARD_RESOLUTIONS do
+        local entry = STANDARD_RESOLUTIONS[i]
+        local rw = entry[1]
+        local rh = entry[2]
+        local widthDiff = math.abs(rw - w) / rw
+
+        if widthDiff <= CONSTANTS.STANDARD_SNAP_WIDTH_TOLERANCE then
+            local heightDiff = math.abs(rh - h) / rh
+            local score = widthDiff * 2 + heightDiff
+            if score < bestScore then
+                bestScore = score
+                bestEntry = entry
+            end
+        end
+    end
+
+    if bestEntry then
+        return Vec2(bestEntry[1], bestEntry[2])
+    end
+
+    return nil
+end
+
+local function normalizeFullScreenSize(size)
+    if not size or not size.x or not size.y then
+        return Vec2(DEFAULT_SCREEN_SIZE.x, DEFAULT_SCREEN_SIZE.y)
+    end
+
+    local w = math.floor(size.x + 0.5)
+    local h = math.floor(size.y + 0.5)
+
+    if w < 1 or h < 1 then
+        return Vec2(DEFAULT_SCREEN_SIZE.x, DEFAULT_SCREEN_SIZE.y)
+    end
+
+    if isLikelyPartialViewport(size) then
+        local fromWidth = snapFromPartialWidth(w)
+        if fromWidth then
+            return fromWidth
+        end
+        return Vec2(w, math.floor(w * 9 / 16 + 0.5))
+    end
+
+    local snapped = snapToStandardResolution(w, h)
+    if snapped then
+        return snapped
+    end
+
+    if w < CONSTANTS.SCREEN_MIN_W then w = CONSTANTS.SCREEN_MIN_W end
+    if w > CONSTANTS.SCREEN_MAX_W then w = CONSTANTS.SCREEN_MAX_W end
+    if h < CONSTANTS.SCREEN_MIN_H then h = CONSTANTS.SCREEN_MIN_H end
+    if h > CONSTANTS.SCREEN_MAX_H then h = CONSTANTS.SCREEN_MAX_H end
+    return Vec2(w, h)
+end
+
+local function rememberRawScreenSize(size)
+    if size and size.x and size.y and size.x > 1 and size.y > 1 then
+        State.lastRawScreenSize = Vec2(size.x, size.y)
+    end
+end
+
+local function collectRawScreenCandidates()
     local candidates = {}
 
-    local function addCandidate(value, valueB)
+    local function pushCandidate(value, valueB)
         local normalized = normalizeScreenSize(value, valueB)
-        if normalized then
-            candidates[#candidates + 1] = normalized
+        if normalized and normalized.x > 1 and normalized.y > 1 then
+            rememberRawScreenSize(normalized)
+            candidates[#candidates + 1] = Vec2(normalized.x, normalized.y)
         end
     end
 
     if Render and Render.ScreenSize then
         local ok, size = SafeCall(Render.ScreenSize)
         if ok then
-            addCandidate(size)
+            pushCandidate(size)
         end
     end
 
     if Renderer and Renderer.GetScreenSize then
         local ok, size = SafeCall(Renderer.GetScreenSize)
         if ok then
-            addCandidate(size)
+            pushCandidate(size)
         end
     end
 
     if Engine and Engine.GetScreenSize then
         local ok, a, b = SafeCall(Engine.GetScreenSize)
         if ok then
-            addCandidate(a, b)
+            pushCandidate(a, b)
         end
     end
 
+    return candidates
+end
+
+local function isPlausibleScreenSize(size)
+    if not size or not size.x or not size.y then
+        return false
+    end
+
+    local w = math.floor(size.x)
+    local h = math.floor(size.y)
+    if w < CONSTANTS.SCREEN_MIN_W or h < CONSTANTS.SCREEN_MIN_H then
+        return false
+    end
+    if w > CONSTANTS.SCREEN_MAX_W or h > CONSTANTS.SCREEN_MAX_H then
+        return false
+    end
+
+    local aspect = w / math.max(h, 1)
+    if aspect < 0.55 or aspect > 2.05 then
+        return false
+    end
+
+    return true
+end
+
+local function resetScreenBaselines(size)
+    if not isPlausibleScreenSize(size) then
+        return
+    end
+
+    baseScreenMinDim = math.min(size.x, size.y)
+    baseScreenArea = size.x * size.y
+end
+
+local function scoreScreenCandidate(size, sourcePriority)
+    if not size or not size.x or not size.y then
+        return -1
+    end
+
+    local normalized = normalizeFullScreenSize(size)
+    if not isPlausibleScreenSize(normalized) then
+        return -1
+    end
+
+    local aspect = normalized.x / normalized.y
+    local aspectScore = 1 - math.min(math.abs(aspect - (16 / 9)), math.abs(aspect - (16 / 10))) * 0.35
+    local areaPenalty = 0
+    local area = normalized.x * normalized.y
+
+    if isLikelyPartialViewport(size) then
+        areaPenalty = areaPenalty + 0.45
+    end
+
+    if area > 3840 * 2160 then
+        areaPenalty = areaPenalty + 0.35
+    end
+
+    return sourcePriority + aspectScore * 0.25 - areaPenalty
+end
+
+local function pickBestFullScreenSize(candidates)
     local best = nil
-    local bestArea = 0
-    for i, candidate in ipairs(candidates) do
-        local area = candidate.x * candidate.y
-        if area > bestArea then
-            bestArea = area
-            best = candidate
+    local bestScore = -1
+
+    for i = 1, #candidates do
+        local raw = candidates[i]
+        State.lastRawScreenSize = raw
+        local normalized = normalizeFullScreenSize(raw)
+        if isPlausibleScreenSize(normalized) then
+            local score = scoreScreenCandidate(raw, 1.0)
+            if score > bestScore then
+                bestScore = score
+                best = normalized
+            end
         end
     end
+
+    return best
+end
+
+local function RefreshCachedFullScreenSize()
+    local candidates = collectRawScreenCandidates()
+    local best = pickBestFullScreenSize(candidates)
 
     if best then
-        updateScreenBaselines(best)
-        return Vec2(best.x, best.y)
+        State.cachedFullScreenSize = best
+        return best
+    end
+
+    if State.cachedFullScreenSize and isPlausibleScreenSize(State.cachedFullScreenSize) then
+        return State.cachedFullScreenSize
+    end
+
+    return nil
+end
+
+local function getAdaptiveFallbackScreenSize()
+    if State.lastRawScreenSize then
+        local fromRaw = normalizeFullScreenSize(State.lastRawScreenSize)
+        if isPlausibleScreenSize(fromRaw) then
+            return fromRaw
+        end
+    end
+
+    local candidates = collectRawScreenCandidates()
+    local best = pickBestFullScreenSize(candidates)
+    if best then
+        return best
+    end
+
+    return Vec2(DEFAULT_SCREEN_SIZE.x, DEFAULT_SCREEN_SIZE.y)
+end
+
+local function GetBestScreenSize()
+    local cached = RefreshCachedFullScreenSize()
+    if cached then
+        updateScreenBaselines(cached)
+        return Vec2(cached.x, cached.y)
     end
 
     local fallback = getAdaptiveFallbackScreenSize()
+    fallback = normalizeFullScreenSize(fallback)
     updateScreenBaselines(fallback)
+    if not State.screenFallbackLogged then
+        State.screenFallbackLogged = true
+        local rawText = State.lastRawScreenSize
+            and string.format(" (raw %dx%d)", State.lastRawScreenSize.x, State.lastRawScreenSize.y)
+            or ""
+        Log("warn", "Using screen size fallback: " .. fallback.x .. "x" .. fallback.y .. rawText)
+    end
     return fallback
 end
 
-local function GetScreenSize()
-    return GetBestScreenSize()
-end
-
 local function GetLiveRenderScreenSize()
+    local raw = nil
+
     if Render and Render.ScreenSize then
         local ok, size = SafeCall(Render.ScreenSize)
         if ok then
-            local normalized = normalizeScreenSize(size)
-            if normalized then
-                return Vec2(normalized.x, normalized.y)
-            end
+            raw = normalizeScreenSize(size)
         end
     end
 
-    if Renderer and Renderer.GetScreenSize then
+    if not raw and Renderer and Renderer.GetScreenSize then
         local ok, size = SafeCall(Renderer.GetScreenSize)
         if ok then
-            local normalized = normalizeScreenSize(size)
-            if normalized then
-                return Vec2(normalized.x, normalized.y)
-            end
+            raw = normalizeScreenSize(size)
         end
+    end
+
+    if raw then
+        State.lastRawScreenSize = Vec2(raw.x, raw.y)
+    end
+
+    if State.cachedFullScreenSize and isPlausibleScreenSize(State.cachedFullScreenSize) then
+        return Vec2(State.cachedFullScreenSize.x, State.cachedFullScreenSize.y)
+    end
+
+    if raw then
+        return normalizeFullScreenSize(raw)
     end
 
     return Vec2(screenSize.x, screenSize.y)
 end
 
 local function CaptureScreenSizeForMenuSession()
-    local size = GetBestScreenSize()
-    local liveSize = GetLiveRenderScreenSize()
-    if liveSize.x * liveSize.y > size.x * size.y then
-        size = liveSize
-    end
+    RefreshCachedFullScreenSize()
 
-    if not size or not size.x or not size.y or size.x <= 1 or size.y <= 1 then
+    local size = State.cachedFullScreenSize or GetBestScreenSize()
+    size = normalizeFullScreenSize(size)
+
+    if not isPlausibleScreenSize(size) then
         return
     end
 
@@ -522,7 +823,10 @@ local function CaptureScreenSizeForMenuSession()
         local heightRatio = size.y / previousSize.y
         if math.abs(widthRatio - 1) > 0.05 or math.abs(heightRatio - 1) > 0.05 then
             remapPoolPositionsForScreenChange(previousSize, size)
+            resetScreenBaselines(size)
         end
+    else
+        resetScreenBaselines(size)
     end
 
     screenSize = size
@@ -610,12 +914,6 @@ local function GetAnimationDt()
     end
 
     return clamp(fallbackDt, CONSTANTS.ANIMATION_DT_MIN, CONSTANTS.ANIMATION_DT_MAX)
-end
-
-local function getScreenScale()
-    local currentMinDim = math.min(screenSize.x or 1, screenSize.y or 1)
-    local baselineMinDim = baseScreenMinDim and math.max(baseScreenMinDim, 1) or math.max(currentMinDim, 1)
-    return clamp(currentMinDim / baselineMinDim, 0.75, 1.8)
 end
 
 local function getScreenAreaScale()
@@ -723,6 +1021,68 @@ local function assignStarLayer(star)
     end
 end
 
+local function configureShootingStarTrajectory(star, w, h)
+    local roll = math.random(1, 100)
+
+    if roll <= 55 then
+        star.startX = randomRangeSafe(0, w)
+        star.startY = math.random(-120, -20)
+        star.endX = star.startX + randomRangeSafe(math.floor(-w * 0.35), math.floor(w * 0.35))
+        star.endY = randomRangeSafe(math.floor(h * 0.6), h + 200)
+    elseif roll <= 85 then
+        local fromLeft = math.random() < 0.5
+        star.startX = fromLeft and math.random(-80, math.floor(w * 0.2)) or math.random(math.floor(w * 0.8), w + 80)
+        star.startY = math.random(-100, math.floor(h * 0.3))
+        star.endX = fromLeft and randomRangeSafe(math.floor(w * 0.5), w + 100) or randomRangeSafe(-100, math.floor(w * 0.5))
+        star.endY = randomRangeSafe(math.floor(h * 0.55), h + 150)
+    else
+        star.startX = math.random(-150, -20)
+        star.startY = randomRangeSafe(math.floor(h * 0.08), math.floor(h * 0.45))
+        star.endX = w + math.random(20, 150)
+        star.endY = star.startY + randomRangeSafe(math.floor(-h * 0.12), math.floor(h * 0.18))
+    end
+
+    local dx = star.endX - star.startX
+    local dy = star.endY - star.startY
+    local len = math.sqrt(dx * dx + dy * dy)
+    if len > 0.001 then
+        star.dirX = dx / len
+        star.dirY = dy / len
+    else
+        star.dirX = 0
+        star.dirY = 1
+    end
+end
+
+local function configureAmbientStreakType(streak, w, h, streakType)
+    streak.streakType = streakType or ((math.random() < CONSTANTS.AMBIENT_NEBULA_RATIO) and 1 or 2)
+
+    if streak.streakType == 1 then
+        local tilt = (math.random() * 2 - 1) * 0.12
+        streak.x = randomRangeSafe(-math.floor(w * 0.15), w)
+        streak.y = randomRangeSafe(math.floor(h * 0.1), math.floor(h * 0.85))
+        streak.length = math.random(180, 400)
+        streak.speed = math.random(3, 8) / 10
+        streak.angle = math.rad(-8) + tilt
+        streak.alpha = math.random(4, 10)
+        streak.width = math.random(3, 6)
+        streak.drift = (math.random() * 2 - 1) * 6
+    else
+        local tilt = (math.random() * 2 - 1) * 0.28
+        streak.x = randomRangeSafe(-math.floor(w * 0.3), w)
+        streak.y = randomRangeSafe(0, h)
+        streak.length = math.random(40, 120)
+        streak.speed = math.random(15, 35) / 10
+        streak.angle = math.rad(-18) + tilt
+        streak.alpha = math.random(12, 22)
+        streak.width = 1
+        streak.drift = (math.random() * 2 - 1) * 18
+    end
+
+    streak.progress = 0
+    streak.active = true
+end
+
 local function createStar()
     local w, h = GetSafeScreenDimensions()
     local star = {
@@ -732,6 +1092,11 @@ local function createStar()
         twinkleSpeed = math.random(1, 5),
         twinklePhase = math.random() * math.pi * 2,
         brightness = math.random(50, 100) / 100,
+        rayAngle = math.random() * math.pi * 2,
+        raySpinSpeed = (math.random() * 2 - 1) * 0.4,
+        glintEligible = math.random() < CONSTANTS.STAR_GLINT_CHANCE,
+        glintCooldown = math.random() * 10 + 4,
+        glintBoost = 0,
         layer = 2,
         active = true
     }
@@ -741,64 +1106,42 @@ end
 
 local function createShootingStar()
     local w, h = GetSafeScreenDimensions()
-    return {
-        startX = randomRangeSafe(0, w),
-        startY = math.random(-100, 0),
-        endX = randomRangeSafe(0, w),
-        endY = randomRangeSafe(h, h + 200),
+    local star = {
         progress = 0,
         speed = math.random(5, 20) / 10,
         size = math.random(2, 4),
         tail = {},
         lifetime = 0,
+        burstLife = nil,
+        burstStarted = false,
         active = false
     }
+    configureShootingStarTrajectory(star, w, h)
+    return star
 end
 
 local function createAmbientStreak()
     local w, h = GetSafeScreenDimensions()
-    local tilt = (math.random() * 2 - 1) * 0.18
-    local angle = math.rad(-12) + tilt
-    return {
-        x = randomRangeSafe(-w, w),
-        y = randomRangeSafe(0, h),
-        length = math.random(70, 220),
-        speed = math.random(8, 26) / 10,
-        angle = angle,
-        alpha = math.random(7, 18),
-        width = math.random(1, 2),
-        drift = (math.random() * 2 - 1) * 12,
-        progress = math.random(),
-        active = true,
-    }
+    local streak = { progress = math.random(), active = true }
+    configureAmbientStreakType(streak, w, h)
+    return streak
 end
 
 local function resetAmbientStreak(streak)
     local w, h = GetSafeScreenDimensions()
-    local tilt = (math.random() * 2 - 1) * 0.18
-    streak.x = randomRangeSafe(-math.floor(w * 0.25), w)
-    streak.y = randomRangeSafe(0, h)
-    streak.length = math.random(70, 220)
-    streak.speed = math.random(8, 26) / 10
-    streak.angle = math.rad(-12) + tilt
-    streak.alpha = math.random(7, 18)
-    streak.width = math.random(1, 2)
-    streak.drift = (math.random() * 2 - 1) * 12
-    streak.progress = 0
-    streak.active = true
+    configureAmbientStreakType(streak, w, h)
 end
 
 local function resetShootingStar(star)
     local w, h = GetSafeScreenDimensions()
 
-    star.startX = randomRangeSafe(0, w)
-    star.startY = math.random(-100, 0)
-    star.endX = randomRangeSafe(0, w)
-    star.endY = randomRangeSafe(h, h + 200)
+    configureShootingStarTrajectory(star, w, h)
     star.progress = 0
     star.speed = math.random(5, 20) / 10
     star.size = math.random(2, 4)
     star.lifetime = 0
+    star.burstLife = nil
+    star.burstStarted = false
     star.active = true
     star.tail = star.tail or {}
     clearList(star.tail)
@@ -921,6 +1264,12 @@ local function resetRuntimeState()
     resetParticleImpulses()
     openRippleTime = 0
     clearList(stardustTrail)
+    State.frameSettings = nil
+    State.menuIdleTime = 0
+    State.simulationPaused = false
+    State.linkGridSkipFrame = false
+    State.lastDt = 0
+    State.blockCustomPresetMarks = 0
 end
 
 local function getMenuStyleTable()
@@ -1026,6 +1375,13 @@ local function getThemeColors()
 
     if not secondaryColor then
         secondaryColor = deriveSecondaryColor(primaryColor)
+    end
+
+    if Script.themeUseAccentOnly and WidgetGet(Script.themeUseAccentOnly, false) then
+        secondaryColor = deriveSecondaryColor(primaryColor)
+    elseif Script.themeMonochrome and WidgetGet(Script.themeMonochrome, false) then
+        local gray = (primaryColor.r + primaryColor.g + primaryColor.b) / 3
+        secondaryColor = makeColor(gray, gray, gray, primaryColor.a or 255)
     end
 
     return primaryColor, secondaryColor
@@ -1173,6 +1529,45 @@ end
 
 --#region Atmosphere
 
+local function DrawSoftBloom(pos, radius, tintColor, alpha, intensity)
+    if alpha <= 0 or radius <= 0.2 then
+        return
+    end
+
+    intensity = intensity or 1
+    radius = math.min(radius, 120)
+    local warmCenter = mixColors(tintColor, makeColor(255, 255, 255, 255), 0.38)
+    local outerColor = colorWithAlpha(tintColor, math.floor(alpha * 0.24 * intensity))
+    local innerColor = colorWithAlpha(warmCenter, math.floor(alpha * 0.55 * intensity))
+
+    if Render and Render.CircleGradient then
+        Render.CircleGradient(pos, radius, outerColor, innerColor)
+        if qualityScale >= 0.92 and intensity > 1.05 then
+            Render.CircleGradient(pos, radius * 1.65, colorWithAlpha(tintColor, math.floor(alpha * 0.12 * intensity)), colorWithAlpha(tintColor, 0))
+        end
+    else
+        Render.FilledCircle(pos, radius * 0.9, colorWithAlpha(tintColor, math.floor(alpha * 0.28 * intensity)), 12)
+    end
+end
+
+local function DrawStarHalo(drawX, drawY, drawSize, coreColor, alpha, glintBoost)
+    local haloAlpha = math.floor(alpha * (0.28 + (glintBoost or 0) * 0.18))
+    if haloAlpha <= 0 then
+        return
+    end
+
+    Render.FilledCircle(Vec2(drawX, drawY), drawSize * 1.85, makeColor(coreColor.r, coreColor.g, coreColor.b, haloAlpha), 12)
+
+    if (glintBoost or 0) > 0.12 and Render and Render.CircleGradient then
+        Render.CircleGradient(
+            Vec2(drawX, drawY),
+            drawSize * (3.2 + glintBoost * 2),
+            colorWithAlpha(coreColor, math.floor(haloAlpha * 0.35)),
+            colorWithAlpha(coreColor, 0)
+        )
+    end
+end
+
 local function pushStardustPoint(x, y)
     table.insert(stardustTrail, 1, {x = x, y = y, life = 1.0})
     while #stardustTrail > CONSTANTS.STARDUST_MAX_POINTS do
@@ -1180,8 +1575,8 @@ local function pushStardustPoint(x, y)
     end
 end
 
-local function updateStardustTrail(dt, cursorPos, frameCursorDeltaLen)
-    if not Script.cursorStardust or not Script.cursorStardust:Get() then
+local function updateStardustTrail(dt, cursorPos, frameCursorDeltaLen, cursorStardustEnabled)
+    if not cursorStardustEnabled then
         if #stardustTrail > 0 then
             clearList(stardustTrail)
         end
@@ -1200,7 +1595,7 @@ local function updateStardustTrail(dt, cursorPos, frameCursorDeltaLen)
     end
 end
 
-local function DrawOpenRipple(width, height, primaryColor, fadeInAlpha)
+local function DrawWormholeOpen(width, height, primaryColor, secondaryColor, fadeInAlpha)
     if openRippleTime >= CONSTANTS.RIPPLE_DURATION then
         return
     end
@@ -1208,19 +1603,102 @@ local function DrawOpenRipple(width, height, primaryColor, fadeInAlpha)
     local t = openRippleTime / CONSTANTS.RIPPLE_DURATION
     local centerX = width * 0.5
     local centerY = height * 0.5
-    local maxRadius = math.sqrt(centerX * centerX + centerY * centerY) * 1.08
+    local maxRadius = math.sqrt(centerX * centerX + centerY * centerY) * 1.05
+    local ringCount = 4
+    local segments = clamp(math.floor(40 + qualityScale * 12), 36, 56)
 
-    for ring = 1, 2 do
-        local ringDelay = (ring - 1) * 0.14
-        local ringT = clamp((t - ringDelay) / (1 - ringDelay), 0, 1)
-        if ringT > 0 and ringT < 1 then
-            local radius = maxRadius * ringT
-            local alpha = math.floor((1 - ringT) * 52 * fadeInAlpha / ring)
-            if alpha > 0 then
-                Render.Circle(Vec2(centerX, centerY), radius, colorWithAlpha(primaryColor, alpha), 1.4)
+    for ring = 1, ringCount do
+        local ringDelay = (ring - 1) * 0.10
+        local ringT = clamp((t - ringDelay) / (1 - ringDelay * 0.82), 0, 1)
+        if ringT <= 0 or ringT >= 1 then
+            goto continue_wormhole_ring
+        end
+
+        local radius = maxRadius * ringT * (0.38 + ring * 0.16)
+        local twist = time * (1.15 + ring * 0.28) + ring * 1.1
+        local squash = 0.86 - ring * 0.035
+        local prevX, prevY
+
+        for step = 0, segments do
+            local angle = (step / segments) * math.pi * 2 + twist * (1 - ringT * 0.65)
+            local wobble = 1 + math.sin(angle * 3 + twist) * 0.05 * ringT
+            local x = centerX + math.cos(angle) * radius * wobble
+            local y = centerY + math.sin(angle) * radius * wobble * squash
+
+            if prevX then
+                local edgeFade = 1 - ringT
+                local alpha = math.floor(edgeFade * (50 - ring * 9) * fadeInAlpha)
+                if alpha > 1 then
+                    local ringColor = mixColors(primaryColor, secondaryColor, 0.2 + ring * 0.18)
+                    Render.Line(Vec2(prevX, prevY), Vec2(x, y), colorWithAlpha(ringColor, alpha), ring == 1 and 1.35 or 1.0)
+                end
+            end
+
+            prevX = x
+            prevY = y
+        end
+
+        ::continue_wormhole_ring::
+    end
+
+    local spiralArms = 3
+    for arm = 1, spiralArms do
+        local armPhase = (arm / spiralArms) * math.pi * 2 + time * 0.9
+        local armT = clamp(t * 1.15 - (arm - 1) * 0.08, 0, 1)
+        if armT > 0 and armT < 1 then
+            local prevX, prevY
+            local spiralSteps = 18
+            for step = 0, spiralSteps do
+                local spiralT = step / spiralSteps
+                local radius = maxRadius * 0.12 + spiralT * maxRadius * 0.55 * armT
+                local angle = armPhase + spiralT * math.pi * 1.6
+                local x = centerX + math.cos(angle) * radius
+                local y = centerY + math.sin(angle) * radius * 0.82
+
+                if prevX then
+                    local alpha = math.floor((1 - spiralT) * (1 - armT) * 36 * fadeInAlpha)
+                    if alpha > 1 then
+                        Render.Line(Vec2(prevX, prevY), Vec2(x, y), colorWithAlpha(secondaryColor, alpha), 0.9)
+                    end
+                end
+
+                prevX = x
+                prevY = y
             end
         end
     end
+
+    if t < 0.35 and Render and Render.CircleGradient then
+        local coreAlpha = math.floor((1 - t / 0.35) * 22 * fadeInAlpha)
+        if coreAlpha > 0 then
+            Render.CircleGradient(
+                Vec2(centerX, centerY),
+                maxRadius * 0.08 * (1 + t * 2),
+                colorWithAlpha(mixColors(primaryColor, makeColor(255, 255, 255, 255), 0.35), coreAlpha),
+                colorWithAlpha(primaryColor, 0)
+            )
+        end
+    end
+end
+
+local function computeAccretionScene(width, height)
+    local minDim = math.min(width, height)
+    local centerX = width * 0.5 + sceneParallaxX * 0.22
+    local centerY = height * 0.46 + sceneParallaxY * 0.18
+    local hotspotAngle = time * 0.42
+    local hotspotX = centerX + math.cos(hotspotAngle) * minDim * 0.31
+    local hotspotY = centerY + math.sin(hotspotAngle) * minDim * 0.11
+    local focalPhase = time * 0.38
+
+    return {
+        centerX = centerX,
+        centerY = centerY,
+        hotspotX = hotspotX,
+        hotspotY = hotspotY,
+        hotspotAngle = hotspotAngle,
+        focalPhase = focalPhase,
+        minDim = minDim,
+    }
 end
 
 local function DrawHorizonGrid(width, height, primaryColor, secondaryColor, fadeInAlpha)
@@ -1246,6 +1724,187 @@ local function DrawHorizonGrid(width, height, primaryColor, secondaryColor, fade
     end
 end
 
+local function DrawDeepSpaceGlow(width, height, primaryColor, secondaryColor, fadeInAlpha)
+    local centerX = width * 0.5 + sceneParallaxX * 0.35
+    local centerY = height * 0.42 + sceneParallaxY * 0.25
+    local radius = math.max(width, height) * 0.55
+    local pulse = 0.9 + math.sin(time * 0.45) * 0.1
+    local alpha = math.floor(12 * fadeInAlpha * pulse)
+
+    if alpha <= 0 then
+        return
+    end
+
+    if Render and Render.CircleGradient then
+        local coreTint = mixColors(primaryColor, secondaryColor, 0.35)
+        Render.CircleGradient(
+            Vec2(centerX, centerY),
+            radius,
+            colorWithAlpha(coreTint, alpha),
+            colorWithAlpha(primaryColor, 0)
+        )
+
+        local lobeX = centerX + sceneParallaxX * 0.18 + math.sin(time * 0.22) * width * 0.04
+        local lobeY = centerY + sceneParallaxY * 0.12 + math.cos(time * 0.19) * height * 0.03
+        local lobeAlpha = math.floor(alpha * 0.72)
+        if lobeAlpha > 0 then
+            Render.CircleGradient(
+                Vec2(lobeX, lobeY),
+                radius * 0.42,
+                colorWithAlpha(mixColors(secondaryColor, makeColor(255, 255, 255, 255), 0.15), lobeAlpha),
+                colorWithAlpha(secondaryColor, 0)
+            )
+        end
+    end
+end
+
+local function DrawAccretionRing(width, height, primaryColor, secondaryColor, fadeInAlpha)
+    if qualityScale < 0.72 then
+        return
+    end
+
+    local scene = computeAccretionScene(width, height)
+    local centerX = scene.centerX
+    local centerY = scene.centerY
+    local hotspotX = scene.hotspotX
+    local hotspotY = scene.hotspotY
+    local hotspotAngle = scene.hotspotAngle
+    local minDim = scene.minDim
+    local segments = CONSTANTS.ACCRETION_RING_SEGMENTS
+
+    local innerShadowAlpha = math.floor(18 * fadeInAlpha * (0.85 + math.sin(time * 0.55) * 0.15))
+    if innerShadowAlpha > 0 and Render and Render.CircleGradient then
+        Render.CircleGradient(
+            Vec2(centerX, centerY),
+            minDim * 0.18,
+            colorWithAlpha(makeColor(0, 0, 0, 255), innerShadowAlpha),
+            colorWithAlpha(makeColor(0, 0, 0, 255), 0)
+        )
+    end
+
+    for ring = 1, 2 do
+        local radiusX = minDim * (0.26 + ring * 0.07)
+        local radiusY = radiusX * (0.34 + ring * 0.06)
+        local rotation = time * (0.11 + ring * 0.035) + ring * 1.35
+        local tilt = 0.48 + ring * 0.12
+        local prevX, prevY, prevAngle
+
+        for step = 0, segments do
+            local angle = (step / segments) * math.pi * 2
+            local ex = math.cos(angle) * radiusX
+            local ey = math.sin(angle) * radiusY
+            local cosR = math.cos(rotation)
+            local sinR = math.sin(rotation)
+            local x = centerX + ex * cosR - ey * sinR * tilt
+            local y = centerY + ex * sinR + ey * cosR
+
+            if prevX then
+                local segAngle = (prevAngle + angle) * 0.5
+                local doppler = 0.5 + 0.5 * math.cos(segAngle - hotspotAngle)
+                local edgePulse = 0.65 + math.sin(time * 1.25 + angle * 4 + ring * 0.8) * 0.35
+                local alpha = math.floor((20 - ring * 5) * fadeInAlpha * edgePulse * (0.55 + doppler * 0.65))
+                if alpha > 1 then
+                    local coolMix = 0.15 + doppler * 0.45
+                    local ringColor = mixColors(
+                        mixColors(primaryColor, makeColor(170, 210, 255, 255), coolMix),
+                        secondaryColor,
+                        0.2 + ring * 0.25
+                    )
+                    Render.Line(
+                        Vec2(prevX, prevY),
+                        Vec2(x, y),
+                        colorWithAlpha(ringColor, alpha),
+                        ring == 1 and 1.15 or 0.85
+                    )
+                end
+            end
+
+            prevX = x
+            prevY = y
+            prevAngle = angle
+        end
+    end
+
+    local hotspotPulse = 0.8 + math.sin(time * 2.4) * 0.2
+    local hotspotAlpha = math.floor(28 * fadeInAlpha * hotspotPulse)
+    if hotspotAlpha > 0 then
+        Render.FilledCircle(Vec2(hotspotX, hotspotY), 2.4, colorWithAlpha(makeColor(255, 255, 255, 255), hotspotAlpha), 10)
+        Render.FilledCircle(Vec2(hotspotX, hotspotY), 5.5, colorWithAlpha(primaryColor, math.floor(hotspotAlpha * 0.45)), 12)
+        if Render and Render.CircleGradient then
+            Render.CircleGradient(
+                Vec2(hotspotX, hotspotY),
+                minDim * 0.07,
+                colorWithAlpha(mixColors(primaryColor, makeColor(255, 240, 220, 255), 0.35), math.floor(hotspotAlpha * 0.38)),
+                colorWithAlpha(primaryColor, 0)
+            )
+        end
+    end
+end
+
+local GRAVITY_FILAMENT_DEFS = {
+    {ax = 0.04, ay = 0.18, bx = 0.96, by = 0.62, bend = 0.22, phase = 0.0},
+    {ax = 0.08, ay = 0.72, bx = 0.92, by = 0.28, bend = 0.18, phase = 1.7},
+    {ax = 0.12, ay = 0.42, bx = 0.88, by = 0.88, bend = 0.15, phase = 3.1},
+    {ax = 0.02, ay = 0.55, bx = 0.78, by = 0.12, bend = 0.12, phase = 4.6},
+    {ax = 0.22, ay = 0.08, bx = 0.98, by = 0.48, bend = 0.14, phase = 5.9},
+    {ax = 0.18, ay = 0.92, bx = 0.82, by = 0.38, bend = 0.16, phase = 2.4},
+}
+
+local function DrawGravityFilaments(width, height, primaryColor, secondaryColor, fadeInAlpha)
+    if qualityScale < 0.75 then
+        return
+    end
+
+    local scene = computeAccretionScene(width, height)
+    local focalX = scene.centerX
+    local focalY = scene.centerY
+    local hotspotX = scene.hotspotX
+    local hotspotY = scene.hotspotY
+    local focalPhase = scene.focalPhase
+    local pullScale = scene.minDim * 0.11
+    local segments = CONSTANTS.GRAVITY_FILAMENT_SEGMENTS
+    local filamentCount = math.min(CONSTANTS.GRAVITY_FILAMENT_COUNT, #GRAVITY_FILAMENT_DEFS)
+    local hotspotBlend = 0.42 + math.sin(focalPhase) * 0.12
+    local attractX = lerp(focalX, hotspotX, hotspotBlend)
+    local attractY = lerp(focalY, hotspotY, hotspotBlend)
+
+    for i = 1, filamentCount do
+        local def = GRAVITY_FILAMENT_DEFS[i]
+        local prevX, prevY
+
+        for step = 0, segments do
+            local t = step / segments
+            local baseX = lerp(def.ax * width, def.bx * width, t)
+            local baseY = lerp(def.ay * height, def.by * height, t)
+            local pullWave = math.sin(t * math.pi) * def.bend
+            local dx = attractX - baseX
+            local dy = attractY - baseY
+            local dist = math.sqrt(dx * dx + dy * dy)
+            if dist < 0.001 then
+                dist = 0.001
+            end
+            local syncWave = math.sin(focalPhase + t * 4.2 + def.phase) * 7
+            local wave = math.sin(time * 0.38 + t * 5.5 + def.phase) * 6 + syncWave * 0.55
+            local hotspotPull = 1 + 0.35 * math.sin(focalPhase * 1.4 + def.phase)
+            local x = baseX + (dx / dist) * pullScale * pullWave * hotspotPull + wave
+            local y = baseY + (dy / dist) * pullScale * pullWave * 0.65 * hotspotPull + wave * 0.45
+
+            if prevX then
+                local edgeFade = 1 - math.abs(t - 0.5) * 0.55
+                local pulse = 0.72 + math.sin(time * 0.55 + def.phase + t * 3 + focalPhase * 0.6) * 0.28
+                local alpha = math.floor(16 * fadeInAlpha * edgeFade * pulse)
+                if alpha > 1 then
+                    local lineColor = mixColors(secondaryColor, primaryColor, t)
+                    Render.Line(Vec2(prevX, prevY), Vec2(x, y), colorWithAlpha(lineColor, alpha), 1)
+                end
+            end
+
+            prevX = x
+            prevY = y
+        end
+    end
+end
+
 local function DrawCursorStardust(primaryColor, secondaryColor, fadeInAlpha)
     local trailCount = #stardustTrail
     if trailCount == 0 then
@@ -1263,6 +1922,140 @@ local function DrawCursorStardust(primaryColor, secondaryColor, fadeInAlpha)
     end
 end
 
+local function DrawStarDiffractionRays(drawX, drawY, drawSize, alpha, rayAngle, glintBoost)
+    local rayCount = CONSTANTS.STAR_RAY_COUNT
+    local rayLength = drawSize * (4.2 + (glintBoost or 0) * 3.5)
+    local rayAlpha = math.floor(alpha * (0.42 + (glintBoost or 0) * 0.35))
+    if rayAlpha <= 0 then
+        return
+    end
+
+    for r = 0, rayCount - 1 do
+        local angle = rayAngle + (r / rayCount) * math.pi * 2
+        local lengthMul = 0.75 + ((r % 2 == 0) and 0.25 or 0.1) + (glintBoost or 0) * 0.2
+        local x1 = drawX + math.cos(angle) * drawSize
+        local y1 = drawY + math.sin(angle) * drawSize
+        local x2 = drawX + math.cos(angle) * rayLength * lengthMul
+        local y2 = drawY + math.sin(angle) * rayLength * lengthMul
+        local widthNow = (r % 2 == 0) and 1.0 or 0.65
+        Render.Line(Vec2(x1, y1), Vec2(x2, y2), Color(255, 255, 255, rayAlpha), widthNow)
+    end
+end
+
+local function DrawShootingStar(star, toRenderX, toRenderY, fadeInAlpha, primaryColor, secondaryColor)
+    local simX = star.startX + (star.endX - star.startX) * star.progress
+    local simY = star.startY + (star.endY - star.startY) * star.progress
+    local x = toRenderX(simX)
+    local y = toRenderY(simY)
+
+    if star.burstLife and star.burstLife > 0 then
+        local burstT = star.burstLife / CONSTANTS.SHOOTING_STAR_BURST_DURATION
+        local burstAlpha = math.floor(200 * burstT * fadeInAlpha)
+        local burstRadius = star.size * (3 + (1 - burstT) * 10)
+        if burstAlpha > 0 then
+            if Render and Render.CircleGradient then
+                Render.CircleGradient(
+                    Vec2(x, y),
+                    burstRadius * 2.2,
+                    colorWithAlpha(mixColors(secondaryColor, makeColor(255, 220, 180, 255), 0.4), math.floor(burstAlpha * 0.45)),
+                    colorWithAlpha(primaryColor, 0)
+                )
+            end
+            Render.FilledCircle(Vec2(x, y), burstRadius, colorWithAlpha(makeColor(255, 245, 220, 255), burstAlpha), 14)
+            for burstRay = 0, 5 do
+                local angle = burstRay / 6 * math.pi * 2 + star.progress * 4
+                local len = burstRadius * (1.2 + burstT)
+                Render.Line(
+                    Vec2(x, y),
+                    Vec2(x + math.cos(angle) * len, y + math.sin(angle) * len),
+                    colorWithAlpha(secondaryColor, math.floor(burstAlpha * 0.55)),
+                    0.8
+                )
+            end
+        end
+        return
+    end
+
+    local tailCount = #star.tail
+    if tailCount > 1 then
+        for i = 2, tailCount do
+            local t = i / tailCount
+            local prev = star.tail[i - 1]
+            local curr = star.tail[i]
+            local px = toRenderX(prev.x)
+            local py = toRenderY(prev.y)
+            local cx = toRenderX(curr.x)
+            local cy = toRenderY(curr.y)
+            local tailAlpha = math.floor(t * 210 * fadeInAlpha)
+            if tailAlpha > 1 then
+                local widthNow = math.max(0.5, star.size * t * 1.5)
+                local headColor = makeColor(210, 230, 255, tailAlpha)
+                local tailColor = makeColor(255, 170, 110, math.floor(tailAlpha * 0.85))
+                local lineColor = mixColors(headColor, tailColor, 1 - t, tailAlpha)
+                Render.Line(Vec2(px, py), Vec2(cx, cy), lineColor, widthNow)
+            end
+        end
+    end
+
+    Render.FilledCircle(Vec2(x, y), star.size * 3.2, Color(200, 220, 255, math.floor(65 * fadeInAlpha)), 14)
+    DrawSoftBloom(
+        Vec2(x, y),
+        star.size * 2.8,
+        mixColors(makeColor(220, 235, 255, 255), secondaryColor, 0.25),
+        math.floor(95 * fadeInAlpha),
+        0.85
+    )
+    Render.FilledCircle(Vec2(x, y), star.size, Color(255, 255, 255, math.floor(255 * fadeInAlpha)), 8)
+    Render.FilledCircle(Vec2(x, y), math.max(1, star.size * 0.45), Color(230, 240, 255, math.floor(180 * fadeInAlpha)), 6)
+end
+
+local function DrawAmbientStreak(streak, toRenderX, toRenderY, fadeInAlpha, primaryColor, secondaryColor, streakVisibility, sway)
+    local streakType = streak.streakType or 2
+    local simSx = streak.x + sway * 8
+    local simSy = streak.y + sway * 4
+    local simEx = simSx + math.cos(streak.angle) * streak.length
+    local simEy = simSy + math.sin(streak.angle) * streak.length
+    local sx = toRenderX(simSx)
+    local sy = toRenderY(simSy)
+    local ex = toRenderX(simEx)
+    local ey = toRenderY(simEy)
+    local alpha = math.floor(streak.alpha * streakVisibility)
+    if alpha <= 2 then
+        return
+    end
+
+    if streakType == 1 then
+        local bandAlpha = math.floor(alpha * 0.55)
+        local midX = (sx + ex) * 0.5
+        local midY = (sy + ey) * 0.5
+        if Render and Render.CircleGradient and qualityScale >= CONSTANTS.GLOW_QUALITY_THRESHOLD then
+            Render.CircleGradient(
+                Vec2(midX, midY),
+                math.min(streak.width * 7, 36),
+                colorWithAlpha(mixColors(primaryColor, secondaryColor, 0.35), bandAlpha),
+                colorWithAlpha(primaryColor, 0)
+            )
+        end
+        Render.Line(Vec2(sx, sy), Vec2(ex, ey), colorWithAlpha(mixColors(primaryColor, secondaryColor, 0.5), alpha), streak.width)
+        Render.Line(
+            Vec2(sx + math.cos(streak.angle) * 10, sy + math.sin(streak.angle) * 10),
+            Vec2(ex, ey),
+            colorWithAlpha(secondaryColor, math.floor(alpha * 0.35)),
+            math.max(1, streak.width - 1)
+        )
+    else
+        local headGlow = math.floor(alpha * 0.45)
+        Render.FilledCircle(Vec2(sx, sy), math.max(1.5, streak.width * 2), colorWithAlpha(secondaryColor, headGlow), 8)
+        Render.Line(Vec2(sx, sy), Vec2(ex, ey), colorWithAlpha(primaryColor, alpha), streak.width)
+        Render.Line(
+            Vec2(sx + math.cos(streak.angle) * 4, sy + math.sin(streak.angle) * 4),
+            Vec2(ex, ey),
+            colorWithAlpha(makeColor(255, 220, 180, alpha), math.floor(alpha * 0.5)),
+            math.max(1, streak.width)
+        )
+    end
+end
+
 --#endregion
 
 --#region Pools
@@ -1276,19 +2069,48 @@ local function ClearShootingStarPool()
     end
 end
 
-local function SyncEffectTogglePools()
-    local starsEnabled = Script.stars and Script.stars:Get()
+local function SyncEffectTogglePools(settings)
+    settings = settings or State.frameSettings
+    if not settings and GatherFrameSettings then
+        settings = GatherFrameSettings()
+    end
+    if not settings then
+        return
+    end
+
+    local starsEnabled = settings.stars
     if State.starsWasEnabled == true and not starsEnabled then
         deactivatePoolObjects(starPool)
         clearList(starActive)
     end
     State.starsWasEnabled = starsEnabled
 
-    local shootingEnabled = Script.shootingStars and Script.shootingStars:Get()
+    local shootingEnabled = settings.shootingStars
     if State.shootingStarsWasEnabled == true and not shootingEnabled then
         ClearShootingStarPool()
     end
     State.shootingStarsWasEnabled = shootingEnabled
+end
+
+IsCustomPresetMarkBlocked = function()
+    if State.applyingPreset then
+        return true
+    end
+    if (State.blockCustomPresetMarks or 0) > 0 then
+        return true
+    end
+    return false
+end
+
+ArmCustomPresetMarkBlock = function()
+    State.blockCustomPresetMarks = CONSTANTS.PRESET_CUSTOM_MARK_BLOCK_FRAMES
+end
+
+local function TickCustomPresetMarkBlock()
+    if (State.blockCustomPresetMarks or 0) <= 0 then
+        return
+    end
+    State.blockCustomPresetMarks = State.blockCustomPresetMarks - 1
 end
 
 local function ApplyQualityPreset(presetIndex)
@@ -1303,6 +2125,122 @@ local function ApplyQualityPreset(presetIndex)
     end
     State.applyingPreset = false
     State.lastQualityPreset = presetIndex
+    State.lastNamedPreset = presetIndex
+    ConfigWriteInt("last_named_preset", presetIndex)
+    ConfigWriteInt("quality_preset", presetIndex)
+    ArmCustomPresetMarkBlock()
+end
+
+local function MarkCustomPreset()
+    if IsCustomPresetMarkBlocked() then
+        return
+    end
+
+    local current = roundToInt(WidgetGet(Script.qualityPreset, CONSTANTS.CUSTOM_PRESET_INDEX))
+    if current ~= CONSTANTS.CUSTOM_PRESET_INDEX then
+        State.applyingPreset = true
+        WidgetSet(Script.qualityPreset, CONSTANTS.CUSTOM_PRESET_INDEX)
+        State.applyingPreset = false
+    end
+
+    State.lastQualityPreset = CONSTANTS.CUSTOM_PRESET_INDEX
+    ConfigWriteInt("quality_preset", CONSTANTS.CUSTOM_PRESET_INDEX)
+end
+
+local function SaveWidgetConfigValue(key)
+    local widget = Script[key]
+    if not widget or not widget.Get then
+        return
+    end
+
+    local value = WidgetGet(widget, nil)
+    if value == nil then
+        return
+    end
+
+    if type(value) == "boolean" then
+        ConfigWriteInt(key, value and 1 or 0)
+    elseif type(value) == "number" then
+        if math.floor(value) == value then
+            ConfigWriteInt(key, value)
+        else
+            ConfigWriteFloat(key, value)
+        end
+    end
+end
+
+local function LoadWidgetConfigValue(key)
+    local widget = Script[key]
+    if not widget then
+        return
+    end
+
+    local floatDefault = WidgetGet(widget, 0)
+    local intVal = ConfigReadInt(key, -999999)
+    if intVal ~= -999999 then
+        WidgetSet(widget, intVal)
+        return
+    end
+
+    local floatVal = ConfigReadFloat(key, -999999)
+    if floatVal ~= -999999 then
+        WidgetSet(widget, floatVal)
+        return
+    end
+
+    WidgetSet(widget, floatDefault)
+end
+
+local function SaveCustomPresetValues()
+    for i = 1, #PRESET_WIDGET_KEYS do
+        SaveWidgetConfigValue(PRESET_WIDGET_KEYS[i])
+    end
+end
+
+local function LoadCustomPresetValues()
+    for i = 1, #PRESET_WIDGET_KEYS do
+        LoadWidgetConfigValue(PRESET_WIDGET_KEYS[i])
+    end
+end
+
+local function LoadConfigProfile()
+    if not Config then
+        return
+    end
+
+    State.applyingPreset = true
+
+    for i = 1, #CONFIG_BOOL_KEYS do
+        local key = CONFIG_BOOL_KEYS[i]
+        local stored = ConfigReadInt(key, -1)
+        if stored >= 0 and Script[key] then
+            WidgetSet(Script[key], stored == 1)
+        end
+    end
+
+    local idleStored = ConfigReadInt("idleThreshold", -1)
+    if idleStored >= CONSTANTS.IDLE_THRESHOLD_MIN and Script.idleThreshold then
+        WidgetSet(Script.idleThreshold, idleStored)
+    end
+
+    State.lastNamedPreset = clamp(
+        ConfigReadInt("last_named_preset", State.lastNamedPreset),
+        1,
+        CONSTANTS.BUILTIN_PRESET_COUNT
+    )
+
+    local preset = ConfigReadInt("quality_preset", -1)
+    if preset >= 1 and preset <= CONSTANTS.BUILTIN_PRESET_COUNT then
+        WidgetSet(Script.qualityPreset, preset)
+        ApplyQualityPreset(preset)
+    elseif preset == CONSTANTS.CUSTOM_PRESET_INDEX then
+        WidgetSet(Script.qualityPreset, CONSTANTS.CUSTOM_PRESET_INDEX)
+        LoadCustomPresetValues()
+        State.lastQualityPreset = CONSTANTS.CUSTOM_PRESET_INDEX
+    end
+
+    State.applyingPreset = false
+    Log("info", "Config profile loaded")
 end
 
 local function MaybeApplyQualityPreset()
@@ -1310,10 +2248,31 @@ local function MaybeApplyQualityPreset()
         return
     end
 
-    local presetIndex = clamp(roundToInt(Script.qualityPreset:Get()), 1, #QUALITY_PRESETS)
+    local presetIndex = clamp(roundToInt(WidgetGet(Script.qualityPreset, 3)), 1, CONSTANTS.CUSTOM_PRESET_INDEX)
+    if presetIndex == CONSTANTS.CUSTOM_PRESET_INDEX then
+        if State.lastQualityPreset ~= CONSTANTS.CUSTOM_PRESET_INDEX then
+            State.lastQualityPreset = CONSTANTS.CUSTOM_PRESET_INDEX
+        end
+        return
+    end
+
     if State.lastQualityPreset ~= presetIndex then
         ApplyQualityPreset(presetIndex)
     end
+end
+
+local function ResetToNamedPreset()
+    local presetIndex = clamp(State.lastNamedPreset or 3, 1, CONSTANTS.BUILTIN_PRESET_COUNT)
+    State.applyingPreset = true
+    WidgetSet(Script.qualityPreset, presetIndex)
+    State.applyingPreset = false
+    ApplyQualityPreset(presetIndex)
+    SaveCustomPresetValues()
+    ArmCustomPresetMarkBlock()
+    if UpdateMenuControls then
+        UpdateMenuControls()
+    end
+    Log("info", "Reset to preset " .. presetIndex)
 end
 
 local function ClearSpatialGrid(grid)
@@ -1345,13 +2304,16 @@ local function BuildParticleSpatialGrid(particles, cellSize)
     end
 end
 
-local function DrawParticleLinks(particles, c1, c2, connectionDist, connectionDistSq, maxConnections, linkBaseAlpha, linkWidth, coloredLinks, fadeInAlpha, nodePhase)
+local function DrawParticleLinks(particles, c1, c2, connectionDist, connectionDistSq, maxConnections, linkBaseAlpha, linkWidth, coloredLinks, fadeInAlpha, nodePhase, cursorPos, enablePulse)
     if #particles < 2 then
         return
     end
 
     BuildParticleSpatialGrid(particles, connectionDist)
     local invCellSize = 1 / math.max(connectionDist, 1)
+    local cursorBoostRadius = connectionDist * 1.35
+    local cursorBoostRadiusSq = cursorBoostRadius * cursorBoostRadius
+    local pulseStrength = enablePulse and 1 or 0
 
     for i, p1 in ipairs(particles) do
         local connections = 0
@@ -1380,13 +2342,40 @@ local function DrawParticleLinks(particles, c1, c2, connectionDist, connectionDi
                         local j = entry.index
                         if j > i then
                             local p2 = entry.particle
-                            local dx = (p2.drawX or p2.x) - x1
-                            local dy = (p2.drawY or p2.y) - y1
+                            local x2 = p2.drawX or p2.x
+                            local y2 = p2.drawY or p2.y
+                            local dx = x2 - x1
+                            local dy = y2 - y1
                             local distSq = dx * dx + dy * dy
 
                             if distSq < connectionDistSq then
-                                local alpha = math.floor((1 - (distSq / connectionDistSq)) * linkBaseAlpha * fadeInAlpha)
+                                local distT = 1 - (distSq / connectionDistSq)
+                                local alpha = math.floor(distT * linkBaseAlpha * fadeInAlpha)
                                 if alpha > 0 then
+                                    local midX = (x1 + x2) * 0.5
+                                    local midY = (y1 + y2) * 0.5
+
+                                    if pulseStrength > 0 then
+                                        local ambientPulse = 0.72 + 0.28 * math.sin(time * 2.4 + (midX + midY) * 0.008 + nodePhase * 0.1)
+                                        local travelPhase = (time * 1.8 + i * 0.37 + j * 0.19) % 1
+                                        local travelBoost = 1 + 0.45 * math.sin(travelPhase * math.pi * 2)
+                                        alpha = math.floor(alpha * ambientPulse * travelBoost)
+                                    end
+
+                                    if cursorPos then
+                                        local cdx = midX - cursorPos.x
+                                        local cdy = midY - cursorPos.y
+                                        local cdistSq = cdx * cdx + cdy * cdy
+                                        if cdistSq < cursorBoostRadiusSq then
+                                            local proximity = 1 - (cdistSq / cursorBoostRadiusSq)
+                                            alpha = math.floor(alpha * (1 + 0.65 * proximity))
+                                        end
+                                    end
+
+                                    if alpha <= 0 then
+                                        goto continue_link
+                                    end
+
                                     local isConstellationLink = ((i * 31 + j * 17 + nodePhase) % 97 == 0)
                                     if isConstellationLink then
                                         alpha = math.floor(alpha * 1.7)
@@ -1402,17 +2391,18 @@ local function DrawParticleLinks(particles, c1, c2, connectionDist, connectionDi
                                             math.floor((p1Color.b + p2Color.b) * 0.5),
                                             alpha
                                         )
-                                        Render.Line(Vec2(p1.drawX or p1.x, p1.drawY or p1.y), Vec2(p2.drawX or p2.x, p2.drawY or p2.y), lineColor, lineWidthNow)
+                                        Render.Line(Vec2(x1, y1), Vec2(x2, y2), lineColor, lineWidthNow)
                                     else
-                                        Render.Line(Vec2(p1.drawX or p1.x, p1.drawY or p1.y), Vec2(p2.drawX or p2.x, p2.drawY or p2.y), Color(255, 255, 255, alpha), lineWidthNow)
+                                        Render.Line(Vec2(x1, y1), Vec2(x2, y2), Color(255, 255, 255, alpha), lineWidthNow)
                                     end
 
                                     if isConstellationLink then
                                         local nodeAlpha = math.floor(alpha * 0.8)
-                                        Render.FilledCircle(Vec2(p1.drawX or p1.x, p1.drawY or p1.y), 1.8, colorWithAlpha(c1, nodeAlpha), 12)
-                                        Render.FilledCircle(Vec2(p2.drawX or p2.x, p2.drawY or p2.y), 1.8, colorWithAlpha(c2, nodeAlpha), 12)
+                                        Render.FilledCircle(Vec2(x1, y1), 1.8, colorWithAlpha(c1, nodeAlpha), 12)
+                                        Render.FilledCircle(Vec2(x2, y2), 1.8, colorWithAlpha(c2, nodeAlpha), 12)
                                     end
                                 end
+                                ::continue_link::
                                 connections = connections + 1
                             end
                         end
@@ -1428,55 +2418,64 @@ end
 --#region Menu
 
 local Icons = {
-    tab = "\u{f186}",            -- moon
-    enable = "\u{f011}",         -- power-off
-    quality = "\u{f0ae}",        -- tachometer-alt
-    fadeIn = "\u{f358}",         -- fill-drip
-    blur = "\u{f0b0}",           -- filter
-    blurIntensity = "\u{f1de}",  -- sliders-h
-    colorWash = "\u{f53f}",      -- palette
-    vignette = "\u{f565}",       -- crop-alt
-    hudCorners = "\u{f5cb}",     -- border-all
-    streaks = "\u{f76d}",        -- meteor
-    streakCount = "\u{f03b}",    -- list-ol
-    parallax = "\u{f0b2}",       -- arrows-alt
-    parallaxStrength = "\u{f065}", -- expand-arrows-alt
-    starRays = "\u{f185}",       -- sun
-    particleCount = "\u{f1bb}",  -- project-diagram
-    particleSize = "\u{f111}",   -- circle
-    opacity = "\u{f06e}",        -- eye
-    softCore = "\u{f1db}",       -- circle-notch
-    glow = "\u{f0eb}",           -- lightbulb
-    glowSize = "\u{f185}",       -- sun
-    glowOpacity = "\u{f042}",    -- adjust
-    stars = "\u{f005}",          -- star
-    starCount = "\u{f4d8}",      -- star-of-life
-    shootingStars = "\u{f135}",  -- rocket
-    frequency = "\u{f017}",      -- clock
-    speed = "\u{f70c}",          -- person-running
-    drift = "\u{f72e}",          -- wind
-    twinkleSpeed = "\u{f0e7}",   -- bolt
-    twinkleAmount = "\u{f069}",  -- asterisk
-    links = "\u{f0c1}",          -- link
-    distance = "\u{f4a6}",       -- ruler-combined
-    linkOpacity = "\u{f06e}",    -- eye
-    linkWidth = "\u{f545}",      -- ruler-horizontal
-    perParticle = "\u{f126}",    -- code-branch
-    coloredLinks = "\u{f1fc}",   -- paint-brush
-    cursor = "\u{f245}",         -- mouse-pointer
-    cursorMode = "\u{f074}",     -- random (mode picker)
-    radius = "\u{f192}",         -- bullseye
-    force = "\u{f0e7}",          -- bolt
-    falloff = "\u{f201}",        -- chart-line
-    motionBoost = "\u{f062}",    -- arrow-up
-    threshold = "\u{f1ec}",      -- calculator
-    onlyMoving = "\u{f04b}",     -- play
-    damping = "\u{f862}",        -- wave-square
-    swirl = "\u{f2f1}",          -- sync-alt
-    ripple = "\u{f067}",         -- plus-circle
-    horizonGrid = "\u{f547}",    -- grip-lines
-    multiLayerStars = "\u{f5fd}", -- layer-group
-    stardust = "\u{f890}",       -- sparkles
+    tab = "\u{f76c}",              -- cloud-moon (cosmic tab)
+    enable = "\u{f00c}",            -- check
+    quality = "\u{f3fd}",           -- tachometer-alt-average
+    fadeIn = "\u{f358}",            -- fill-drip
+    blur = "\u{f56c}",              -- low-vision
+    blurIntensity = "\u{f1de}",     -- sliders-h
+    colorWash = "\u{f53f}",         -- palette
+    vignette = "\u{f111}",          -- circle (dark edges)
+    hudCorners = "\u{f5cb}",        -- border-all
+    streaks = "\u{f76d}",           -- meteor
+    streakCount = "\u{f0cb}",       -- list
+    parallax = "\u{f0b2}",          -- arrows-alt
+    parallaxStrength = "\u{f065}",  -- expand-arrows-alt
+    starRays = "\u{f185}",          -- sun
+    particleCount = "\u{f1bb}",     -- project-diagram (particle field)
+    particleSize = "\u{f111}",      -- circle
+    opacity = "\u{f06e}",           -- eye
+    softCore = "\u{f1db}",          -- circle-notch
+    glow = "\u{f0eb}",              -- lightbulb
+    glowSize = "\u{f067}",          -- plus-circle (size)
+    glowOpacity = "\u{f042}",       -- adjust
+    stars = "\u{f005}",             -- star
+    starCount = "\u{f4d8}",         -- star-of-life
+    shootingStars = "\u{f135}",     -- rocket
+    frequency = "\u{f017}",         -- clock
+    speed = "\u{f0e7}",             -- bolt
+    drift = "\u{f72e}",             -- wind
+    twinkleSpeed = "\u{f0d0}",      -- magic (twinkle rate)
+    twinkleAmount = "\u{f069}",     -- asterisk
+    links = "\u{f0c1}",             -- link
+    distance = "\u{f4a6}",          -- ruler-combined
+    linkOpacity = "\u{f1fc}",       -- paint-brush
+    linkWidth = "\u{f545}",         -- ruler-horizontal
+    perParticle = "\u{f126}",       -- code-branch
+    coloredLinks = "\u{f53f}",      -- palette
+    cursor = "\u{f245}",            -- mouse-pointer
+    cursorMode = "\u{f074}",        -- random (mode picker)
+    radius = "\u{f192}",            -- bullseye
+    force = "\u{f52d}",             -- compress-arrows-alt
+    falloff = "\u{f201}",           -- chart-line
+    motionBoost = "\u{f062}",       -- arrow-up
+    threshold = "\u{f1ec}",         -- calculator (threshold)
+    onlyMoving = "\u{f04b}",        -- play
+    damping = "\u{f862}",           -- wave-square
+    swirl = "\u{f2f1}",             -- sync-alt (vortex)
+    ripple = "\u{f1cd}",            -- dot-circle
+    horizonGrid = "\u{f547}",       -- grip-lines
+    multiLayerStars = "\u{f5fd}",   -- layer-group
+    stardust = "\u{f890}",          -- sparkles
+    reset = "\u{f2ea}",             -- undo
+    debug = "\u{f120}",             -- terminal
+    background = "\u{f03e}",        -- image
+    pause = "\u{f04c}",             -- pause
+    themeAccent = "\u{f53f}",       -- palette
+    themeMono = "\u{f042}",         -- adjust (contrast)
+    idle = "\u{f254}",              -- hourglass-half
+    accretionRing = "\u{f1db}",     -- circle-notch (orbit)
+    gravityFilaments = "\u{f0c1}",  -- link (filament)
 }
 
 local function WithTooltip(widget, en, ru)
@@ -1523,13 +2522,14 @@ function Script.OnScriptsLoaded()
         "Главный переключатель CosmicMenu"
     )
 
-    Script.qualityPreset = g_general:Slider(L("Quality Preset", "Пресет качества"), 1, 5, 3, function(value)
+    Script.qualityPreset = g_general:Slider(L("Quality Preset", "Пресет качества"), 1, CONSTANTS.CUSTOM_PRESET_INDEX, 3, function(value)
         local mode = roundToInt(value)
         if mode == 1 then return L("Low", "Низкий") end
         if mode == 2 then return L("Medium", "Средний") end
         if mode == 3 then return L("High", "Высокий") end
         if mode == 4 then return L("Ultra", "Ультра") end
         if mode == 5 then return L("Zen", "Дзен") end
+        if mode == CONSTANTS.CUSTOM_PRESET_INDEX then return L("Custom", "Свой") end
         return tostring(mode)
     end)
     applyIcon(Script.qualityPreset, Icons.quality)
@@ -1559,14 +2559,24 @@ function Script.OnScriptsLoaded()
     applyIcon(Script.parallaxStrength, Icons.parallaxStrength)
 
     Script.openRipple = WithTooltip(
-        g_backdrop:Switch(L("Open Ripple", "Волна при открытии"), true, Icons.ripple),
-        "Expanding ring when the menu opens",
-        "Расходящееся кольцо при открытии меню"
+        g_backdrop:Switch(L("Wormhole Open", "Червоточина при открытии"), true, Icons.ripple),
+        "Spiral wormhole rings when the menu opens; particles burst outward briefly",
+        "Спиральные кольца червоточины при открытии; частицы кратко разлетаются из центра"
     )
     Script.horizonGrid = WithTooltip(
         g_backdrop:Switch(L("Horizon Grid", "Синтвейв-сетка"), false, Icons.horizonGrid),
         "Perspective grid at the bottom of the screen",
         "Перспективная сетка внизу экрана"
+    )
+    Script.accretionRing = WithTooltip(
+        g_backdrop:Switch(L("Accretion Ring", "Кольцо аккреции"), false, Icons.accretionRing),
+        "Tilted orbital rings with a bright hotspot, like matter around a singularity",
+        "Наклонные орбитальные кольца с яркой точкой — как аккреционный диск"
+    )
+    Script.gravityFilaments = WithTooltip(
+        g_backdrop:Switch(L("Gravity Filaments", "Гравитационные нити"), false, Icons.gravityFilaments),
+        "Curved filaments bending toward the center, like warped spacetime",
+        "Изогнутые нити, стягивающиеся к центру — как искривлённое пространство"
     )
 
     local g_particles = main:Create(L("Particles", "Частицы"))
@@ -1662,8 +2672,426 @@ function Script.OnScriptsLoaded()
         "Лёгкий след из точек за курсором"
     )
 
-    State.lastQualityPreset = clamp(roundToInt(Script.qualityPreset:Get()), 1, #QUALITY_PRESETS)
+    local g_theme = main:Create(L("Theme", "Тема"))
+
+    Script.themeUseAccentOnly = WithTooltip(
+        g_theme:Switch(L("Accent Only", "Только акцент"), false, Icons.themeAccent),
+        "Derive secondary color from accent only",
+        "Вторичный цвет только из акцента"
+    )
+    Script.themeMonochrome = WithTooltip(
+        g_theme:Switch(L("Monochrome", "Монохром"), false, Icons.themeMono),
+        "Muted grayscale secondary tone",
+        "Приглушённый серый вторичный тон"
+    )
+
+    local g_perf = main:Create(L("Performance", "Производительность"))
+
+    Script.backgroundOnly = WithTooltip(
+        g_perf:Switch(L("Background Only", "Только фон"), false, Icons.background),
+        "Gradient, vignette and stars without particles or cursor FX",
+        "Градиент, виньетка и звёзды без частиц и эффектов курсора"
+    )
+    Script.pauseWhenIdle = WithTooltip(
+        g_perf:Switch(L("Pause When Idle", "Пауза без движения"), false, Icons.pause),
+        "Freeze simulation when the cursor is still",
+        "Останавливать симуляцию при неподвижном курсоре"
+    )
+    Script.idleThreshold = g_perf:Slider(
+        L("Idle Delay", "Задержка паузы"),
+        CONSTANTS.IDLE_THRESHOLD_MIN,
+        CONSTANTS.IDLE_THRESHOLD_MAX,
+        CONSTANTS.IDLE_PAUSE_DEFAULT,
+        "%.0fs"
+    )
+    applyIcon(Script.idleThreshold, Icons.idle)
+
+    Script.debugOverlay = WithTooltip(
+        g_perf:Switch(L("Debug Overlay", "Отладка"), false, Icons.debug),
+        "Show quality, counts and screen info on screen",
+        "Показывать качество, счётчики и экран на оверлее"
+    )
+
+    if g_general.Button then
+        Script.resetPresetButton = g_general:Button(
+            L("Reset to Preset", "Сбросить к пресету"),
+            function()
+                ResetToNamedPreset()
+            end,
+            true
+        )
+        applyIcon(Script.resetPresetButton, Icons.reset)
+        WithTooltip(
+            Script.resetPresetButton,
+            "Re-apply the last named quality preset (Low–Ultra–Zen)",
+            "Повторно применить последний именованный пресет (Низкий–Ультра–Дзен)"
+        )
+    end
+
+    local function attachCustomCallback(widget)
+        if widget and widget.SetCallback then
+            widget:SetCallback(function()
+                if IsCustomPresetMarkBlocked() then
+                    return
+                end
+                MarkCustomPreset()
+                SaveCustomPresetValues()
+                if UpdateMenuControls then
+                    UpdateMenuControls()
+                end
+            end, false)
+        end
+    end
+
+    State.applyingPreset = true
+
+  local presetTrackedWidgets = {
+        Script.fadeInEffect, Script.backgroundBlur, Script.blurIntensity, Script.colorWash,
+        Script.vignette, Script.hudEdges, Script.ambientStreaks, Script.ambientStreakCount,
+        Script.parallax, Script.parallaxStrength, Script.openRipple, Script.horizonGrid,
+        Script.accretionRing, Script.gravityFilaments,
+        Script.bgParticleCount, Script.shieldRadius, Script.particleBaseAlpha, Script.particleSoftCore,
+        Script.particleGlow, Script.particleGlowScale, Script.particleGlowAlpha,
+        Script.particleSpeedScale, Script.particleDrift, Script.particleTwinkleSpeedScale,
+        Script.particleTwinkleAmount, Script.stars, Script.starCount, Script.shootingStars,
+        Script.shootingStarFreq, Script.starRays, Script.multiLayerStars,
+        Script.particleConnections, Script.particleConnectionDist, Script.particleConnectionAlpha,
+        Script.particleConnectionWidth, Script.particleMaxConnections, Script.particleColoredLinks,
+        Script.particleCursorInteraction, Script.particleCursorMode, Script.particleCursorRadius,
+        Script.particleCursorForce, Script.particleCursorFalloff, Script.particleCursorMotionBoost,
+        Script.particleCursorMoveThreshold, Script.particleCursorOnlyMoving,
+        Script.particleCursorImpulseDamping, Script.particleCursorSwirl, Script.cursorStardust,
+    }
+
+    for i = 1, #presetTrackedWidgets do
+        attachCustomCallback(presetTrackedWidgets[i])
+    end
+
+    if Script.qualityPreset and Script.qualityPreset.SetCallback then
+        Script.qualityPreset:SetCallback(function()
+            if State.applyingPreset then
+                return
+            end
+            local presetIndex = clamp(roundToInt(WidgetGet(Script.qualityPreset, 3)), 1, CONSTANTS.CUSTOM_PRESET_INDEX)
+            ConfigWriteInt("quality_preset", presetIndex)
+            if presetIndex >= 1 and presetIndex <= CONSTANTS.BUILTIN_PRESET_COUNT then
+                ApplyQualityPreset(presetIndex)
+            elseif presetIndex == CONSTANTS.CUSTOM_PRESET_INDEX then
+                State.lastQualityPreset = CONSTANTS.CUSTOM_PRESET_INDEX
+                ConfigWriteInt("quality_preset", CONSTANTS.CUSTOM_PRESET_INDEX)
+            end
+            if UpdateMenuControls then
+                UpdateMenuControls()
+            end
+        end, false)
+    end
+
+    local function attachConfigFlagCallback(widget, key)
+        if widget and widget.SetCallback then
+            widget:SetCallback(function()
+                SaveWidgetConfigValue(key)
+                if key == "themeUseAccentOnly" or key == "themeMonochrome" then
+                    if key == "themeUseAccentOnly" and WidgetGet(Script.themeUseAccentOnly, false) then
+                        WidgetSet(Script.themeMonochrome, false)
+                        SaveWidgetConfigValue("themeMonochrome")
+                    end
+                    RefreshThemeCache()
+                end
+                if UpdateMenuControls then
+                    UpdateMenuControls()
+                end
+            end, true)
+        end
+    end
+
+    attachConfigFlagCallback(Script.enabled, "enabled")
+    attachConfigFlagCallback(Script.themeUseAccentOnly, "themeUseAccentOnly")
+    attachConfigFlagCallback(Script.themeMonochrome, "themeMonochrome")
+    attachConfigFlagCallback(Script.pauseWhenIdle, "pauseWhenIdle")
+    attachConfigFlagCallback(Script.backgroundOnly, "backgroundOnly")
+    attachConfigFlagCallback(Script.debugOverlay, "debugOverlay")
+    attachConfigFlagCallback(Script.idleThreshold, "idleThreshold")
+
+    UpdateMenuControls = function()
+        local masterEnabled = WidgetGet(Script.enabled, true)
+        local blurEnabled = WidgetGet(Script.backgroundBlur, false)
+        local streaksEnabled = WidgetGet(Script.ambientStreaks, true)
+        local parallaxEnabled = WidgetGet(Script.parallax, true)
+        local glowEnabled = WidgetGet(Script.particleGlow, true)
+        local starsEnabled = WidgetGet(Script.stars, true)
+        local shootingEnabled = WidgetGet(Script.shootingStars, true)
+        local linksEnabled = WidgetGet(Script.particleConnections, true)
+        local cursorEnabled = WidgetGet(Script.particleCursorInteraction, true)
+        local pauseIdle = WidgetGet(Script.pauseWhenIdle, false)
+        local backgroundOnly = WidgetGet(Script.backgroundOnly, false)
+        local accentOnly = WidgetGet(Script.themeUseAccentOnly, false)
+
+        local function setDisabled(widget, disabled)
+            if widget and widget.Disabled then
+                widget:Disabled(disabled)
+            end
+        end
+
+        setDisabled(Script.qualityPreset, not masterEnabled)
+        setDisabled(Script.fadeInEffect, not masterEnabled)
+        setDisabled(Script.resetPresetButton, not masterEnabled)
+        setDisabled(Script.backgroundBlur, not masterEnabled)
+        setDisabled(Script.blurIntensity, not masterEnabled or not blurEnabled)
+        setDisabled(Script.colorWash, not masterEnabled)
+        setDisabled(Script.vignette, not masterEnabled)
+        setDisabled(Script.hudEdges, not masterEnabled)
+        setDisabled(Script.ambientStreaks, not masterEnabled)
+        setDisabled(Script.ambientStreakCount, not masterEnabled or not streaksEnabled)
+        setDisabled(Script.parallax, not masterEnabled)
+        setDisabled(Script.parallaxStrength, not masterEnabled or not parallaxEnabled)
+        setDisabled(Script.openRipple, not masterEnabled)
+        setDisabled(Script.horizonGrid, not masterEnabled)
+        setDisabled(Script.accretionRing, not masterEnabled)
+        setDisabled(Script.gravityFilaments, not masterEnabled)
+        setDisabled(Script.bgParticleCount, not masterEnabled or backgroundOnly)
+        setDisabled(Script.shieldRadius, not masterEnabled or backgroundOnly)
+        setDisabled(Script.particleBaseAlpha, not masterEnabled or backgroundOnly)
+        setDisabled(Script.particleSoftCore, not masterEnabled or backgroundOnly)
+        setDisabled(Script.particleGlow, not masterEnabled or backgroundOnly)
+        setDisabled(Script.particleGlowScale, not masterEnabled or backgroundOnly or not glowEnabled)
+        setDisabled(Script.particleGlowAlpha, not masterEnabled or backgroundOnly or not glowEnabled)
+        setDisabled(Script.particleSpeedScale, not masterEnabled or backgroundOnly)
+        setDisabled(Script.particleDrift, not masterEnabled or backgroundOnly)
+        setDisabled(Script.particleTwinkleSpeedScale, not masterEnabled or backgroundOnly)
+        setDisabled(Script.particleTwinkleAmount, not masterEnabled or backgroundOnly)
+        setDisabled(Script.stars, not masterEnabled)
+        setDisabled(Script.starCount, not masterEnabled or not starsEnabled)
+        setDisabled(Script.shootingStars, not masterEnabled or backgroundOnly)
+        setDisabled(Script.shootingStarFreq, not masterEnabled or backgroundOnly or not shootingEnabled)
+        setDisabled(Script.starRays, not masterEnabled or not starsEnabled)
+        setDisabled(Script.multiLayerStars, not masterEnabled or not starsEnabled)
+        setDisabled(Script.particleConnections, not masterEnabled or backgroundOnly)
+        setDisabled(Script.particleConnectionDist, not masterEnabled or backgroundOnly or not linksEnabled)
+        setDisabled(Script.particleConnectionAlpha, not masterEnabled or backgroundOnly or not linksEnabled)
+        setDisabled(Script.particleConnectionWidth, not masterEnabled or backgroundOnly or not linksEnabled)
+        setDisabled(Script.particleMaxConnections, not masterEnabled or backgroundOnly or not linksEnabled)
+        setDisabled(Script.particleColoredLinks, not masterEnabled or backgroundOnly or not linksEnabled)
+        setDisabled(Script.particleCursorInteraction, not masterEnabled or backgroundOnly)
+        setDisabled(Script.particleCursorMode, not masterEnabled or backgroundOnly or not cursorEnabled)
+        setDisabled(Script.particleCursorRadius, not masterEnabled or backgroundOnly or not cursorEnabled)
+        setDisabled(Script.particleCursorForce, not masterEnabled or backgroundOnly or not cursorEnabled)
+        setDisabled(Script.particleCursorFalloff, not masterEnabled or backgroundOnly or not cursorEnabled)
+        setDisabled(Script.particleCursorMotionBoost, not masterEnabled or backgroundOnly or not cursorEnabled)
+        setDisabled(Script.particleCursorMoveThreshold, not masterEnabled or backgroundOnly or not cursorEnabled)
+        setDisabled(Script.particleCursorOnlyMoving, not masterEnabled or backgroundOnly or not cursorEnabled)
+        setDisabled(Script.particleCursorImpulseDamping, not masterEnabled or backgroundOnly or not cursorEnabled)
+        setDisabled(Script.particleCursorSwirl, not masterEnabled or backgroundOnly or not cursorEnabled)
+        setDisabled(Script.cursorStardust, not masterEnabled or backgroundOnly)
+        setDisabled(Script.themeUseAccentOnly, not masterEnabled)
+        setDisabled(Script.themeMonochrome, not masterEnabled or accentOnly)
+        setDisabled(Script.backgroundOnly, not masterEnabled)
+        setDisabled(Script.pauseWhenIdle, not masterEnabled)
+        setDisabled(Script.idleThreshold, not masterEnabled or not pauseIdle)
+        setDisabled(Script.debugOverlay, not masterEnabled)
+    end
+
+    if Script.enabled and Script.enabled.SetCallback then
+        Script.enabled:SetCallback(function()
+            SaveWidgetConfigValue("enabled")
+            UpdateMenuControls()
+        end, true)
+    end
+
+    State.applyingPreset = false
+    State.lastQualityPreset = clamp(roundToInt(WidgetGet(Script.qualityPreset, 3)), 1, CONSTANTS.CUSTOM_PRESET_INDEX)
+    LoadConfigProfile()
+    ArmCustomPresetMarkBlock()
+    UpdateMenuControls()
     RefreshThemeCache()
+end
+
+--#endregion
+
+--#region Frame settings
+
+GatherFrameSettings = function()
+    local backgroundOnly = WidgetGet(Script.backgroundOnly, false)
+
+    local settings = {
+        fadeInEffect = WidgetGet(Script.fadeInEffect, true),
+        backgroundBlur = WidgetGet(Script.backgroundBlur, false),
+        blurIntensity = WidgetGet(Script.blurIntensity, 0.35),
+        colorWash = WidgetGet(Script.colorWash, true),
+        vignette = WidgetGet(Script.vignette, true),
+        hudEdges = WidgetGet(Script.hudEdges, true),
+        ambientStreaks = WidgetGet(Script.ambientStreaks, true),
+        ambientStreakCount = WidgetGet(Script.ambientStreakCount, 16),
+        parallax = WidgetGet(Script.parallax, true),
+        parallaxStrength = WidgetGet(Script.parallaxStrength, 100),
+        openRipple = WidgetGet(Script.openRipple, true),
+        horizonGrid = WidgetGet(Script.horizonGrid, false),
+        accretionRing = WidgetGet(Script.accretionRing, false),
+        gravityFilaments = WidgetGet(Script.gravityFilaments, false),
+        bgParticleCount = WidgetGet(Script.bgParticleCount, 100),
+        particleSize = WidgetGet(Script.shieldRadius, 2),
+        particleBaseAlpha = WidgetGet(Script.particleBaseAlpha, 150),
+        particleSoftCore = WidgetGet(Script.particleSoftCore, true),
+        particleGlow = WidgetGet(Script.particleGlow, true),
+        particleGlowScale = WidgetGet(Script.particleGlowScale, 3),
+        particleGlowAlpha = WidgetGet(Script.particleGlowAlpha, 30),
+        particleSpeedScale = WidgetGet(Script.particleSpeedScale, 100),
+        particleDrift = WidgetGet(Script.particleDrift, 35),
+        particleTwinkleSpeedScale = WidgetGet(Script.particleTwinkleSpeedScale, 100),
+        particleTwinkleAmount = WidgetGet(Script.particleTwinkleAmount, 30),
+        stars = WidgetGet(Script.stars, true),
+        starCount = WidgetGet(Script.starCount, 200),
+        shootingStars = WidgetGet(Script.shootingStars, true),
+        shootingStarFreq = WidgetGet(Script.shootingStarFreq, 5),
+        starRays = WidgetGet(Script.starRays, true),
+        multiLayerStars = WidgetGet(Script.multiLayerStars, true),
+        particleConnections = WidgetGet(Script.particleConnections, true),
+        particleConnectionDist = WidgetGet(Script.particleConnectionDist, CONSTANTS.PARTICLE_CONNECTION_DIST),
+        particleConnectionAlpha = WidgetGet(Script.particleConnectionAlpha, 50),
+        particleConnectionWidth = WidgetGet(Script.particleConnectionWidth, 1),
+        particleMaxConnections = WidgetGet(Script.particleMaxConnections, CONSTANTS.PARTICLE_MAX_CONNECTIONS),
+        particleColoredLinks = WidgetGet(Script.particleColoredLinks, true),
+        particleCursorInteraction = WidgetGet(Script.particleCursorInteraction, true),
+        particleCursorMode = WidgetGet(Script.particleCursorMode, 1),
+        particleCursorRadius = WidgetGet(Script.particleCursorRadius, 180),
+        particleCursorForce = WidgetGet(Script.particleCursorForce, 3200),
+        particleCursorFalloff = WidgetGet(Script.particleCursorFalloff, 120),
+        particleCursorMotionBoost = WidgetGet(Script.particleCursorMotionBoost, 120),
+        particleCursorMoveThreshold = WidgetGet(Script.particleCursorMoveThreshold, 1),
+        particleCursorOnlyMoving = WidgetGet(Script.particleCursorOnlyMoving, true),
+        particleCursorImpulseDamping = WidgetGet(Script.particleCursorImpulseDamping, 90),
+        particleCursorSwirl = WidgetGet(Script.particleCursorSwirl, 60),
+        cursorStardust = WidgetGet(Script.cursorStardust, true),
+        pauseWhenIdle = WidgetGet(Script.pauseWhenIdle, false),
+        idleThreshold = WidgetGet(Script.idleThreshold, CONSTANTS.IDLE_PAUSE_DEFAULT),
+        backgroundOnly = backgroundOnly,
+        debugOverlay = WidgetGet(Script.debugOverlay, false),
+    }
+
+    if backgroundOnly then
+        settings.bgParticleCount = 0
+        settings.particleConnections = false
+        settings.particleCursorInteraction = false
+        settings.shootingStars = false
+        settings.cursorStardust = false
+        settings.particleGlow = false
+        settings.particleSoftCore = false
+    end
+
+    return settings
+end
+
+local function updateSceneParallax(cursorPos, cursorInteractionEnabled, w, h, dt, settings)
+    local parallaxEnabled = settings.parallax
+    local parallaxMul = (settings.parallaxStrength or 100) * 0.01
+    local targetParallaxX = 0
+    local targetParallaxY = 0
+
+    if cursorPos and parallaxEnabled then
+        local centerX = w * 0.5
+        local centerY = h * 0.5
+        targetParallaxX = clamp((cursorPos.x - centerX) / math.max(centerX, 1), -1, 1) * 16 * parallaxMul
+        targetParallaxY = clamp((cursorPos.y - centerY) / math.max(centerY, 1), -1, 1) * 10 * parallaxMul
+    end
+
+    local parallaxLerp = clamp(dt * (cursorPos and 4.5 or 3.0), 0, 1)
+    sceneParallaxX = lerp(sceneParallaxX, targetParallaxX, parallaxLerp)
+
+    if cursorPos and cursorInteractionEnabled then
+        cursorHaloX = cursorPos.x
+        cursorHaloY = cursorPos.y
+        sceneParallaxY = lerp(sceneParallaxY, targetParallaxY, parallaxLerp)
+        return
+    end
+
+    sceneParallaxY = lerp(sceneParallaxY, targetParallaxY, parallaxLerp)
+
+    if not cursorPos then
+        local haloOffsetLerp = clamp(dt * 6.0, 0, 1)
+        cursorHaloOffsetX = lerp(cursorHaloOffsetX, 0, haloOffsetLerp)
+        cursorHaloOffsetY = lerp(cursorHaloOffsetY, 0, haloOffsetLerp)
+        cursorHaloX = nil
+        cursorHaloY = nil
+    end
+end
+
+local function updateCursorHaloOffset(frameCursorDeltaX, frameCursorDeltaY, dt)
+    local targetHaloOffsetX = clamp(frameCursorDeltaX * 0.55, -18, 18)
+    local targetHaloOffsetY = clamp(frameCursorDeltaY * 0.55, -18, 18)
+    local haloOffsetLerp = clamp(dt * 8.0, 0, 1)
+    cursorHaloOffsetX = lerp(cursorHaloOffsetX, targetHaloOffsetX, haloOffsetLerp)
+    cursorHaloOffsetY = lerp(cursorHaloOffsetY, targetHaloOffsetY, haloOffsetLerp)
+end
+
+local function EnsureDebugFont()
+    if State.debugFont then
+        return State.debugFont
+    end
+    if not Render or not Render.LoadFont then
+        return nil
+    end
+    local ok, font = pcall(Render.LoadFont, "MuseoSansEx", Enum.FontCreate.FONTFLAG_ANTIALIAS)
+    if ok and font then
+        State.debugFont = font
+        return font
+    end
+    return nil
+end
+
+local function DrawDebugOverlay(settings, fadeInAlpha, renderW, renderH)
+    if not settings or not settings.debugOverlay then
+        return
+    end
+
+    renderW = renderW or screenSize.x
+    renderH = renderH or screenSize.y
+
+    local font = EnsureDebugFont()
+    local raw = State.lastRawScreenSize
+    local rawText = raw and string.format("%dx%d", raw.x, raw.y) or "n/a"
+    local lines = {
+        string.format("dt: %.3f  quality: %.2f", State.lastDt or 0, qualityScale),
+        string.format("particles: %d  stars: %d  streaks: %d", #bgParticleActive, #starActive, #ambientStreakActive),
+        string.format("sim: %s  idle: %.1fs", State.simulationPaused and "paused" or "active", State.menuIdleTime or 0),
+        string.format("screen: %dx%d  raw: %s", screenSize.x, screenSize.y, rawText),
+        string.format("render: %dx%d  cached: %s", renderW, renderH, State.cachedFullScreenSize and "yes" or "no"),
+        string.format("preset: %d  named: %d", roundToInt(WidgetGet(Script.qualityPreset, 3)), State.lastNamedPreset or 0),
+    }
+
+    local x = 12
+    local y = 12
+    local lineHeight = 14
+    local panelH = #lines * lineHeight + 10
+    local panelW = 360
+
+    Render.FilledRect(Vec2(x - 4, y - 4), Vec2(x + panelW, y + panelH), Color(0, 0, 0, math.floor(140 * fadeInAlpha)), 4)
+
+    if font and Render.Text then
+        for i, line in ipairs(lines) do
+            local alpha = math.floor(220 * fadeInAlpha)
+            pcall(Render.Text, font, 12, line, Vec2(x, y + (i - 1) * lineHeight), Color(180, 220, 255, alpha))
+        end
+    end
+end
+
+local function GetLinkLodSettings(settings, particleCount)
+    local maxConnections = settings.particleMaxConnections or CONSTANTS.PARTICLE_MAX_CONNECTIONS
+    local skipFrame = false
+
+    if qualityScale < CONSTANTS.LINK_LOD_QUALITY_THRESHOLD then
+        maxConnections = math.max(1, math.floor(maxConnections * CONSTANTS.LINK_LOD_CONNECTION_SCALE))
+    elseif qualityScale >= CONSTANTS.LINK_PULSE_QUALITY_THRESHOLD then
+        maxConnections = maxConnections + 1
+    end
+
+    if particleCount > CONSTANTS.LINK_LOD_PARTICLE_THRESHOLD then
+        maxConnections = math.max(1, maxConnections - 1)
+        if qualityScale < CONSTANTS.LINK_PULSE_QUALITY_THRESHOLD then
+            State.linkGridSkipFrame = not State.linkGridSkipFrame
+            skipFrame = State.linkGridSkipFrame
+        end
+    end
+
+    return maxConnections, skipFrame
 end
 
 --#endregion
@@ -1678,6 +3106,8 @@ local function IsMenuOpen()
 end
 
 local function UpdateCosmicSimulation(dt)
+    State.lastDt = dt
+    TickCustomPresetMarkBlock()
 
     if dt > 0.030 then
         qualityScale = clamp(qualityScale - 0.08, 0.82, 1.0)
@@ -1709,12 +3139,14 @@ local function UpdateCosmicSimulation(dt)
         menuClosedAccumulated = 0
         menuWasOpen = true
     else
+        RefreshCachedFullScreenSize()
         menuClosedFrames = menuClosedFrames + 1
         menuClosedAccumulated = menuClosedAccumulated + 1
 
         if menuClosedFrames >= CONSTANTS.MENU_CLOSE_FLICKER_FRAMES then
             menuWasOpen = false
             State.fadeInAlpha = 0
+            State.frameSettings = nil
             return
         end
 
@@ -1729,35 +3161,34 @@ local function UpdateCosmicSimulation(dt)
     time = time + dt
     StepThemeColorLerp(dt)
     MaybeApplyQualityPreset()
-    SyncEffectTogglePools()
 
-    if Script.multiLayerStars then
-        local multiLayerEnabled = Script.multiLayerStars:Get()
-        if State.multiLayerWasEnabled ~= multiLayerEnabled then
-            starLayerCounter = 0
-            for i, star in ipairs(starPool) do
-                if star.active then
-                    assignStarLayer(star)
-                end
+    local settings = GatherFrameSettings()
+    State.frameSettings = settings
+
+    SyncEffectTogglePools(settings)
+
+    if State.multiLayerWasEnabled ~= settings.multiLayerStars then
+        starLayerCounter = 0
+        for i, star in ipairs(starPool) do
+            if star.active then
+                assignStarLayer(star)
             end
-            State.multiLayerWasEnabled = multiLayerEnabled
         end
+        State.multiLayerWasEnabled = settings.multiLayerStars
     end
 
     local fadeInAlpha = 1
-    if Script.fadeInEffect and Script.fadeInEffect:Get() and fadeInTime < CONSTANTS.FADE_IN_DURATION then
+    if settings.fadeInEffect and fadeInTime < CONSTANTS.FADE_IN_DURATION then
         fadeInAlpha = fadeInTime / CONSTANTS.FADE_IN_DURATION
     end
     State.fadeInAlpha = fadeInAlpha
 
     local areaScale = getScreenAreaScale()
     local countQuality = qualityScaleForCounts
-    local bgTargetCount = clamp(roundToInt(Script.bgParticleCount:Get() * areaScale * countQuality), 20, 700)
-    local starsEnabled = Script.stars and Script.stars:Get()
-    local starTargetCount = starsEnabled and clamp(roundToInt(Script.starCount:Get() * areaScale * (0.88 + countQuality * 0.12)), 60, 700) or 0
-    local streakBase = Script.ambientStreakCount and Script.ambientStreakCount:Get() or 16
-    local streaksEnabled = Script.ambientStreaks and Script.ambientStreaks:Get()
-    local streakTargetCount = streaksEnabled and clamp(roundToInt(streakBase * areaScale * countQuality), 0, 28) or 0
+    local bgTargetCount = clamp(roundToInt(settings.bgParticleCount * areaScale * countQuality), 0, 700)
+    local starsEnabled = settings.stars
+    local starTargetCount = starsEnabled and clamp(roundToInt(settings.starCount * areaScale * (0.88 + countQuality * 0.12)), 60, 700) or 0
+    local streakTargetCount = settings.ambientStreaks and clamp(roundToInt(settings.ambientStreakCount * areaScale * countQuality), 0, 28) or 0
 
     lastBgTargetCount = rebalancePoolIfChanged(bgParticlePool, bgTargetCount, lastBgTargetCount, createBgParticle, function(particle)
         particle.impulseX = 0
@@ -1771,30 +3202,27 @@ local function UpdateCosmicSimulation(dt)
     collectActive(ambientStreakPool, ambientStreakActive)
 
     local w, h = screenSize.x, screenSize.y
-    local particleSpeedScale = (Script.particleSpeedScale and Script.particleSpeedScale:Get() or 100) * 0.01
-    local particleDrift = (Script.particleDrift and Script.particleDrift:Get() or 35) * 0.01
-    local particleTwinkleSpeedScale = (Script.particleTwinkleSpeedScale and Script.particleTwinkleSpeedScale:Get() or 100) * 0.01
-    local particleTwinkleAmount = (Script.particleTwinkleAmount and Script.particleTwinkleAmount:Get() or 30) * 0.01
+    local particleSpeedScale = settings.particleSpeedScale * 0.01
+    local particleDrift = settings.particleDrift * 0.01
+    local particleTwinkleSpeedScale = settings.particleTwinkleSpeedScale * 0.01
+    local particleTwinkleAmount = settings.particleTwinkleAmount * 0.01
     local wrapMargin = 50
-    local cursorInteractionEnabled = Script.particleCursorInteraction and Script.particleCursorInteraction:Get()
-    local cursorTrackingEnabled = cursorInteractionEnabled
-        or (Script.cursorStardust and Script.cursorStardust:Get())
-        or (Script.parallax and Script.parallax:Get())
+    local cursorInteractionEnabled = settings.particleCursorInteraction
+    local cursorTrackingEnabled = cursorInteractionEnabled or settings.cursorStardust or settings.parallax
     local cursorPos = nil
     local frameCursorDeltaX = 0
     local frameCursorDeltaY = 0
     local frameCursorDeltaLen = 0
-    local rawCursorMode = Script.particleCursorMode and Script.particleCursorMode:Get() or 1
-    local cursorMode = clamp(roundToInt(rawCursorMode), 1, 3)
-    local cursorRadius = Script.particleCursorRadius and Script.particleCursorRadius:Get() or 180
+    local cursorMode = clamp(roundToInt(settings.particleCursorMode), 1, 3)
+    local cursorRadius = settings.particleCursorRadius
     local cursorRadiusSq = cursorRadius * cursorRadius
-    local cursorForce = Script.particleCursorForce and Script.particleCursorForce:Get() or 3200
-    local cursorFalloffExp = (Script.particleCursorFalloff and Script.particleCursorFalloff:Get() or 120) * 0.01
-    local cursorMotionBoost = (Script.particleCursorMotionBoost and Script.particleCursorMotionBoost:Get() or 120) * 0.01
-    local cursorMoveThreshold = Script.particleCursorMoveThreshold and Script.particleCursorMoveThreshold:Get() or 1
-    local cursorOnlyMoving = Script.particleCursorOnlyMoving and Script.particleCursorOnlyMoving:Get()
-    local cursorImpulseDecay = clamp(1 - ((Script.particleCursorImpulseDamping and Script.particleCursorImpulseDamping:Get() or 90) * 0.01) * 4 * dt, 0, 1)
-    local cursorSwirl = (Script.particleCursorSwirl and Script.particleCursorSwirl:Get() or 0) * 0.01
+    local cursorForce = settings.particleCursorForce
+    local cursorFalloffExp = settings.particleCursorFalloff * 0.01
+    local cursorMotionBoost = settings.particleCursorMotionBoost * 0.01
+    local cursorMoveThreshold = settings.particleCursorMoveThreshold
+    local cursorOnlyMoving = settings.particleCursorOnlyMoving
+    local cursorImpulseDecay = clamp(1 - (settings.particleCursorImpulseDamping * 0.01) * 4 * dt, 0, 1)
+    local cursorSwirl = settings.particleCursorSwirl * 0.01
 
     if lastCursorModeApplied ~= cursorMode or lastCursorInteractionApplied ~= cursorInteractionEnabled then
         resetParticleImpulses()
@@ -1822,207 +3250,210 @@ local function UpdateCosmicSimulation(dt)
         lastCursorY = nil
     end
 
-    if cursorPos and cursorInteractionEnabled then
-        cursorHaloX = cursorPos.x
-        cursorHaloY = cursorPos.y
-        local targetHaloOffsetX = clamp(frameCursorDeltaX * 0.55, -18, 18)
-        local targetHaloOffsetY = clamp(frameCursorDeltaY * 0.55, -18, 18)
-        local haloOffsetLerp = clamp(dt * 8.0, 0, 1)
-
-        cursorHaloOffsetX = lerp(cursorHaloOffsetX, targetHaloOffsetX, haloOffsetLerp)
-        cursorHaloOffsetY = lerp(cursorHaloOffsetY, targetHaloOffsetY, haloOffsetLerp)
-
-        local centerX = w * 0.5
-        local centerY = h * 0.5
-        local parallaxEnabled = Script.parallax and Script.parallax:Get()
-        local parallaxMul = (Script.parallaxStrength and Script.parallaxStrength:Get() or 100) * 0.01
-        local targetParallaxX = 0
-        local targetParallaxY = 0
-
-        if parallaxEnabled then
-            targetParallaxX = clamp((cursorPos.x - centerX) / math.max(centerX, 1), -1, 1) * 16 * parallaxMul
-            targetParallaxY = clamp((cursorPos.y - centerY) / math.max(centerY, 1), -1, 1) * 10 * parallaxMul
+    if settings.pauseWhenIdle then
+        if frameCursorDeltaLen > cursorMoveThreshold then
+            State.menuIdleTime = 0
+        else
+            State.menuIdleTime = (State.menuIdleTime or 0) + dt
         end
-
-        local parallaxLerp = clamp(dt * 4.5, 0, 1)
-
-        sceneParallaxX = lerp(sceneParallaxX, targetParallaxX, parallaxLerp)
-        sceneParallaxY = lerp(sceneParallaxY, targetParallaxY, parallaxLerp)
-    elseif cursorPos then
-        local parallaxLerp = clamp(dt * 4.5, 0, 1)
-        local centerX = w * 0.5
-        local centerY = h * 0.5
-        local parallaxEnabled = Script.parallax and Script.parallax:Get()
-        local parallaxMul = (Script.parallaxStrength and Script.parallaxStrength:Get() or 100) * 0.01
-        local targetParallaxX = 0
-        local targetParallaxY = 0
-
-        if parallaxEnabled then
-            targetParallaxX = clamp((cursorPos.x - centerX) / math.max(centerX, 1), -1, 1) * 16 * parallaxMul
-            targetParallaxY = clamp((cursorPos.y - centerY) / math.max(centerY, 1), -1, 1) * 10 * parallaxMul
-        end
-
-        sceneParallaxX = lerp(sceneParallaxX, targetParallaxX, parallaxLerp)
-        sceneParallaxY = lerp(sceneParallaxY, targetParallaxY, parallaxLerp)
+        State.simulationPaused = State.menuIdleTime >= (settings.idleThreshold or CONSTANTS.IDLE_PAUSE_DEFAULT)
     else
-        local parallaxLerp = clamp(dt * 3.0, 0, 1)
-        local haloOffsetLerp = clamp(dt * 6.0, 0, 1)
-        sceneParallaxX = lerp(sceneParallaxX, 0, parallaxLerp)
-        sceneParallaxY = lerp(sceneParallaxY, 0, parallaxLerp)
-        cursorHaloOffsetX = lerp(cursorHaloOffsetX, 0, haloOffsetLerp)
-        cursorHaloOffsetY = lerp(cursorHaloOffsetY, 0, haloOffsetLerp)
-        cursorHaloX = nil
-        cursorHaloY = nil
+        State.menuIdleTime = 0
+        State.simulationPaused = false
     end
 
-    updateStardustTrail(dt, cursorPos, frameCursorDeltaLen)
+    local simDt = State.simulationPaused and 0 or dt
 
-    for i, particle in ipairs(bgParticleActive) do
-        particle.angle = particle.angle + (particle.angularVelocity or 0) * particleDrift * dt
+    if cursorPos and cursorInteractionEnabled then
+        updateCursorHaloOffset(frameCursorDeltaX, frameCursorDeltaY, dt)
+    end
 
-        local driftWave = math.sin(time * (particle.driftSpeed or 1) * math.max(0, particleTwinkleSpeedScale) + (particle.driftPhase or i))
-        local moveAngle = particle.angle + driftWave * 0.35 * particleDrift * (particle.driftStrength or 1)
-        local moveSpeed = particle.speed * 20 * dt * particleSpeedScale * (particle.depth or 1)
-        particle.x = particle.x + math.cos(moveAngle) * moveSpeed
-        particle.y = particle.y + math.sin(moveAngle) * moveSpeed
+    updateSceneParallax(cursorPos, cursorInteractionEnabled, w, h, dt, settings)
+    updateStardustTrail(dt, cursorPos, frameCursorDeltaLen, settings.cursorStardust)
 
-        local impulseX = (particle.impulseX or 0) * cursorImpulseDecay
-        local impulseY = (particle.impulseY or 0) * cursorImpulseDecay
+    if simDt > 0 then
+        if settings.openRipple and openRippleTime < CONSTANTS.WORMHOLE_PARTICLE_BURST_DURATION then
+            local burstT = 1 - (openRippleTime / CONSTANTS.WORMHOLE_PARTICLE_BURST_DURATION)
+            local cx = w * 0.5
+            local cy = h * 0.5
+            for _, particle in ipairs(bgParticleActive) do
+                local dx = particle.x - cx
+                local dy = particle.y - cy
+                local dist = math.sqrt(dx * dx + dy * dy)
+                if dist > 1 then
+                    local strength = burstT * 140 / dist
+                    particle.impulseX = (particle.impulseX or 0) + (dx / dist) * strength * simDt
+                    particle.impulseY = (particle.impulseY or 0) + (dy / dist) * strength * simDt
+                end
+            end
+        end
 
-        if cursorInteractionEnabled and cursorPos then
-            local dx = particle.x - cursorPos.x
-            local dy = particle.y - cursorPos.y
-            local distSq = dx * dx + dy * dy
+        for i, particle in ipairs(bgParticleActive) do
+            particle.angle = particle.angle + (particle.angularVelocity or 0) * particleDrift * simDt
 
-            if distSq < cursorRadiusSq and cursorRadius > 0 then
-                local allowInteraction = (not cursorOnlyMoving) or (frameCursorDeltaLen > cursorMoveThreshold)
-                if allowInteraction then
-                    local dist = math.sqrt(distSq)
-                    if dist < 0.001 then
-                        dist = 0.001
-                        dx = math.cos((particle.driftPhase or 0) + i)
-                        dy = math.sin((particle.driftPhase or 0) + i)
-                    end
+            local driftWave = math.sin(time * (particle.driftSpeed or 1) * math.max(0, particleTwinkleSpeedScale) + (particle.driftPhase or i))
+            local moveAngle = particle.angle + driftWave * 0.35 * particleDrift * (particle.driftStrength or 1)
+            local moveSpeed = particle.speed * 20 * simDt * particleSpeedScale * (particle.depth or 1)
+            particle.x = particle.x + math.cos(moveAngle) * moveSpeed
+            particle.y = particle.y + math.sin(moveAngle) * moveSpeed
 
-                    local nx = dx / dist
-                    local ny = dy / dist
-                    local t = clamp(1 - (dist / cursorRadius), 0, 1)
-                    local falloff = t ^ math.max(0.05, cursorFalloffExp)
-                    local moveNorm = clamp((frameCursorDeltaLen - cursorMoveThreshold) / 24, 0, 1)
-                    local boost = 1 + moveNorm * cursorMotionBoost
-                    local radialForce = cursorForce * falloff * boost
-                    local forceX = 0
-                    local forceY = 0
+            local impulseX = (particle.impulseX or 0) * cursorImpulseDecay
+            local impulseY = (particle.impulseY or 0) * cursorImpulseDecay
 
-                    if cursorMode == 1 then
-                        -- Repel: pure radial push away from cursor.
-                        forceX = nx * radialForce
-                        forceY = ny * radialForce
-                    elseif cursorMode == 2 then
-                        -- Swipe: directional push by cursor movement, almost no radial component.
-                        if frameCursorDeltaLen > 0.001 then
-                            local svx = frameCursorDeltaX / frameCursorDeltaLen
-                            local svy = frameCursorDeltaY / frameCursorDeltaLen
-                            local swipeForce = radialForce * (0.85 + cursorMotionBoost * 0.5)
-                            forceX = svx * swipeForce
-                            forceY = svy * swipeForce
-                        else
-                            -- No movement in swipe mode -> no force (keeps mode behavior distinct).
-                            forceX = 0
-                            forceY = 0
-                        end
-                    elseif cursorMode == 3 then
-                        -- Vortex: pure tangential swirl around cursor.
-                        local tangentX = -ny
-                        local tangentY = nx
-                        local swirlStrength = cursorSwirl
+            if cursorInteractionEnabled and cursorPos then
+                local dx = particle.x - cursorPos.x
+                local dy = particle.y - cursorPos.y
+                local distSq = dx * dx + dy * dy
 
-                        if swirlStrength == 0 then
-                            swirlStrength = 0.6
+                if distSq < cursorRadiusSq and cursorRadius > 0 then
+                    local allowInteraction = (not cursorOnlyMoving) or (frameCursorDeltaLen > cursorMoveThreshold)
+                    if allowInteraction then
+                        local dist = math.sqrt(distSq)
+                        if dist < 0.001 then
+                            dist = 0.001
+                            dx = math.cos((particle.driftPhase or 0) + i)
+                            dy = math.sin((particle.driftPhase or 0) + i)
                         end
 
-                        if frameCursorDeltaLen > 0.001 then
-                            local cross = frameCursorDeltaX * ny - frameCursorDeltaY * nx
-                            if cross < 0 then
+                        local nx = dx / dist
+                        local ny = dy / dist
+                        local t = clamp(1 - (dist / cursorRadius), 0, 1)
+                        local falloff = t ^ math.max(0.05, cursorFalloffExp)
+                        local moveNorm = clamp((frameCursorDeltaLen - cursorMoveThreshold) / 24, 0, 1)
+                        local boost = 1 + moveNorm * cursorMotionBoost
+                        local radialForce = cursorForce * falloff * boost
+                        local forceX = 0
+                        local forceY = 0
+
+                        if cursorMode == 1 then
+                            forceX = nx * radialForce
+                            forceY = ny * radialForce
+                        elseif cursorMode == 2 then
+                            if frameCursorDeltaLen > 0.001 then
+                                local svx = frameCursorDeltaX / frameCursorDeltaLen
+                                local svy = frameCursorDeltaY / frameCursorDeltaLen
+                                local swipeForce = radialForce * (0.85 + cursorMotionBoost * 0.5)
+                                forceX = svx * swipeForce
+                                forceY = svy * swipeForce
+                            end
+                        elseif cursorMode == 3 then
+                            local tangentX = -ny
+                            local tangentY = nx
+                            local swirlStrength = cursorSwirl
+
+                            if swirlStrength == 0 then
+                                swirlStrength = 0.6
+                            end
+
+                            if frameCursorDeltaLen > 0.001 then
+                                local cross = frameCursorDeltaX * ny - frameCursorDeltaY * nx
+                                if cross < 0 then
+                                    tangentX = -tangentX
+                                    tangentY = -tangentY
+                                end
+                            elseif swirlStrength < 0 then
                                 tangentX = -tangentX
                                 tangentY = -tangentY
                             end
-                        elseif swirlStrength < 0 then
-                            tangentX = -tangentX
-                            tangentY = -tangentY
+
+                            swirlStrength = math.abs(swirlStrength)
+                            local vortexForce = radialForce * (0.6 + swirlStrength)
+                            forceX = tangentX * vortexForce
+                            forceY = tangentY * vortexForce
+                        else
+                            forceX = nx * radialForce
+                            forceY = ny * radialForce
                         end
 
-                        swirlStrength = math.abs(swirlStrength)
-                        local vortexForce = radialForce * (0.6 + swirlStrength)
-                        forceX = tangentX * vortexForce
-                        forceY = tangentY * vortexForce
+                        impulseX = impulseX + forceX * simDt
+                        impulseY = impulseY + forceY * simDt
+                    end
+                end
+            end
+
+            particle.impulseX = impulseX
+            particle.impulseY = impulseY
+            particle.x = particle.x + impulseX * simDt
+            particle.y = particle.y + impulseY * simDt
+
+            local twinkle = math.sin(time * 2 * (particle.twinkleSpeed or 1) * math.max(0, particleTwinkleSpeedScale) + (particle.twinklePhase or i))
+            particle.brightness = clamp((particle.baseBrightness or 0.6) + twinkle * particleTwinkleAmount, 0.05, 1)
+
+            if particle.x < -wrapMargin then particle.x = w + wrapMargin end
+            if particle.x > w + wrapMargin then particle.x = -wrapMargin end
+            if particle.y < -wrapMargin then particle.y = h + wrapMargin end
+            if particle.y > h + wrapMargin then particle.y = -wrapMargin end
+        end
+
+        for i, star in ipairs(starActive) do
+            local layer = star.layer or 2
+            local twinkleMul = STAR_LAYER_TWINKLE_SPEED[layer] or 1.0
+            star.brightness = 0.5 + math.sin(time * star.twinkleSpeed * twinkleMul + star.twinklePhase) * 0.5
+            star.rayAngle = (star.rayAngle or 0) + (star.raySpinSpeed or 0) * simDt * 0.15
+
+            if star.glintEligible and layer >= 2 then
+                star.glintCooldown = (star.glintCooldown or 8) - simDt
+                if star.glintCooldown <= 0 then
+                    star.glintBoost = 1.0
+                    star.glintCooldown = math.random(10, 22)
+                end
+            end
+
+            if (star.glintBoost or 0) > 0 then
+                star.glintBoost = math.max(0, star.glintBoost - simDt * 2.8)
+            end
+        end
+
+        if settings.shootingStars then
+            if math.random() < settings.shootingStarFreq * simDt * 0.01 then
+                local star = getFromPool(shootingStarPool, createShootingStar)
+                resetShootingStar(star)
+            end
+
+            for i = #shootingStarPool, 1, -1 do
+                local star = shootingStarPool[i]
+                if star.active then
+                    if star.burstLife and star.burstLife > 0 then
+                        star.burstLife = star.burstLife - simDt
+                        if star.burstLife <= 0 then
+                            star.active = false
+                            star.burstStarted = false
+                            star.burstLife = nil
+                            clearList(star.tail)
+                        end
                     else
-                        -- Safe fallback: behave like Repel.
-                        forceX = nx * radialForce
-                        forceY = ny * radialForce
-                    end
+                        star.progress = star.progress + star.speed * simDt * CONSTANTS.SHOOTING_STAR_SPEED_MOD
+                        star.lifetime = star.lifetime + simDt
 
-                    impulseX = impulseX + forceX * dt
-                    impulseY = impulseY + forceY * dt
-                end
-            end
-        end
+                        if star.progress >= 1 or star.lifetime > CONSTANTS.SHOOTING_STAR_MAX_LIFETIME then
+                            if not star.burstStarted then
+                                star.burstStarted = true
+                                star.burstLife = CONSTANTS.SHOOTING_STAR_BURST_DURATION
+                            end
+                        else
+                            local x = star.startX + (star.endX - star.startX) * star.progress
+                            local y = star.startY + (star.endY - star.startY) * star.progress
 
-        particle.impulseX = impulseX
-        particle.impulseY = impulseY
-        particle.x = particle.x + impulseX * dt
-        particle.y = particle.y + impulseY * dt
-
-        local twinkle = math.sin(time * 2 * (particle.twinkleSpeed or 1) * math.max(0, particleTwinkleSpeedScale) + (particle.twinklePhase or i))
-        particle.brightness = clamp((particle.baseBrightness or 0.6) + twinkle * particleTwinkleAmount, 0.05, 1)
-
-        if particle.x < -wrapMargin then particle.x = w + wrapMargin end
-        if particle.x > w + wrapMargin then particle.x = -wrapMargin end
-        if particle.y < -wrapMargin then particle.y = h + wrapMargin end
-        if particle.y > h + wrapMargin then particle.y = -wrapMargin end
-    end
-
-    for i, star in ipairs(starActive) do
-        local layer = star.layer or 2
-        local twinkleMul = STAR_LAYER_TWINKLE_SPEED[layer] or 1.0
-        star.brightness = 0.5 + math.sin(time * star.twinkleSpeed * twinkleMul + star.twinklePhase) * 0.5
-    end
-
-    if Script.shootingStars and Script.shootingStars:Get() then
-        if math.random() < Script.shootingStarFreq:Get() * dt * 0.01 then
-            local star = getFromPool(shootingStarPool, createShootingStar)
-            resetShootingStar(star)
-        end
-
-        for i = #shootingStarPool, 1, -1 do
-            local star = shootingStarPool[i]
-            if star.active then
-                star.progress = star.progress + star.speed * dt * CONSTANTS.SHOOTING_STAR_SPEED_MOD
-                star.lifetime = star.lifetime + dt
-
-                if star.progress >= 1 or star.lifetime > CONSTANTS.SHOOTING_STAR_MAX_LIFETIME then
-                    star.active = false
-                else
-                    local x = star.startX + (star.endX - star.startX) * star.progress
-                    local y = star.startY + (star.endY - star.startY) * star.progress
-
-                    star.tail[#star.tail + 1] = {x = x, y = y}
-                    if #star.tail > CONSTANTS.SHOOTING_STAR_TAIL_LENGTH then
-                        table.remove(star.tail, 1)
+                            star.tail[#star.tail + 1] = {x = x, y = y}
+                            if #star.tail > CONSTANTS.SHOOTING_STAR_TAIL_LENGTH then
+                                table.remove(star.tail, 1)
+                            end
+                        end
                     end
                 end
             end
         end
-    end
 
-    for i, streak in ipairs(ambientStreakActive) do
-        local driftWave = math.sin(time * 0.45 + i * 0.31) * streak.drift
-        streak.progress = streak.progress + dt * streak.speed * (0.7 + qualityScale * 0.6)
-        streak.x = streak.x + dt * (15 + driftWave * 0.02)
-        streak.y = streak.y - dt * (6 + math.abs(driftWave) * 0.03)
+        for i, streak in ipairs(ambientStreakActive) do
+            local driftWave = math.sin(time * 0.45 + i * 0.31) * streak.drift
+            local speedMul = streak.streakType == 1 and 0.55 or 1.0
+            streak.progress = streak.progress + simDt * streak.speed * speedMul * (0.7 + qualityScale * 0.6)
+            streak.x = streak.x + simDt * (12 + driftWave * 0.02) * speedMul
+            streak.y = streak.y - simDt * (streak.streakType == 1 and 3 or 8) * speedMul
 
-        if streak.progress >= 1 or streak.x > w + streak.length or streak.y < -streak.length then
-            resetAmbientStreak(streak)
+            if streak.progress >= 1 or streak.x > w + streak.length or streak.y < -streak.length then
+                resetAmbientStreak(streak)
+            end
         end
     end
 end
@@ -2051,21 +3482,23 @@ local function DrawBackgroundEffects(fadeInAlpha)
         return simY * posScaleY
     end
 
+    local settings = State.frameSettings or GatherFrameSettings()
+    State.frameSettings = settings
+
     local renderMinDim = math.min(width, height)
     local screenScale = clamp(renderMinDim / math.max(baseScreenMinDim or renderMinDim, 1), 0.75, 1.8)
     local lowQuality = qualityScale < CONSTANTS.QUALITY_LOW_THRESHOLD
-    local drawStarRays = qualityScale >= CONSTANTS.STAR_RAY_QUALITY_THRESHOLD
-        and Script.starRays and Script.starRays:Get()
-    local drawVignette = not lowQuality and Script.vignette and Script.vignette:Get()
-    local drawHudEdges = not lowQuality and Script.hudEdges and Script.hudEdges:Get()
-    local drawAmbientStreaks = Script.ambientStreaks and Script.ambientStreaks:Get()
+    local drawStarRays = qualityScale >= CONSTANTS.STAR_RAY_QUALITY_THRESHOLD and settings.starRays
+    local drawVignette = not lowQuality and settings.vignette
+    local drawHudEdges = not lowQuality and settings.hudEdges
+    local drawAmbientStreaks = settings.ambientStreaks
 
-    if Script.backgroundBlur and Script.backgroundBlur:Get() and Script.blurIntensity then
-        local blurStrength = clamp(Script.blurIntensity:Get(), 0.1, 1.0)
+    if settings.backgroundBlur then
+        local blurStrength = clamp(settings.blurIntensity, 0.1, 1.0)
         Render.Blur(Vec2(0, 0), renderSize, blurStrength, 1.0, 0, Enum.DrawFlags.None)
     end
 
-    if Script.colorWash and Script.colorWash:Get() then
+    if settings.colorWash then
         local washAlpha = math.floor(CONSTANTS.WASH_ALPHA_BASE * fadeInAlpha)
         local washAlphaSoft = math.floor(washAlpha * 0.6)
 
@@ -2084,10 +3517,20 @@ local function DrawBackgroundEffects(fadeInAlpha)
             Color(0, 0, 0, 0),
             false
         )
+
+        DrawDeepSpaceGlow(width, height, primaryColor, secondaryColor, fadeInAlpha)
     end
 
-    if Script.openRipple and Script.openRipple:Get() then
-        DrawOpenRipple(width, height, primaryColor, fadeInAlpha)
+    if settings.gravityFilaments and not settings.backgroundOnly then
+        DrawGravityFilaments(width, height, primaryColor, secondaryColor, fadeInAlpha)
+    end
+
+    if settings.accretionRing then
+        DrawAccretionRing(width, height, primaryColor, secondaryColor, fadeInAlpha)
+    end
+
+    if settings.openRipple then
+        DrawWormholeOpen(width, height, primaryColor, secondaryColor, fadeInAlpha)
     end
 
     if drawVignette then
@@ -2101,7 +3544,7 @@ local function DrawBackgroundEffects(fadeInAlpha)
         gradientRectCompat(Vec2(width - vignetteSize, 0), Vec2(vignetteSize, height), Color(0, 0, 0, 0), Color(0, 0, 0, vignetteAlpha), true)
     end
 
-    if Script.horizonGrid and Script.horizonGrid:Get() then
+    if settings.horizonGrid then
         DrawHorizonGrid(width, height, primaryColor, secondaryColor, fadeInAlpha)
     end
 
@@ -2109,25 +3552,7 @@ local function DrawBackgroundEffects(fadeInAlpha)
         local streakVisibility = fadeInAlpha * (0.74 + qualityScale * 0.26)
         for i, streak in ipairs(ambientStreakActive) do
             local sway = math.sin(time * 0.8 + i * 0.67)
-            local simSx = streak.x + sway * 8
-            local simSy = streak.y + sway * 4
-            local simEx = simSx + math.cos(streak.angle) * streak.length
-            local simEy = simSy + math.sin(streak.angle) * streak.length
-            local sx = toRenderX(simSx)
-            local sy = toRenderY(simSy)
-            local ex = toRenderX(simEx)
-            local ey = toRenderY(simEy)
-            local alpha = math.floor(streak.alpha * streakVisibility)
-
-            if alpha > 2 then
-                Render.Line(Vec2(sx, sy), Vec2(ex, ey), colorWithAlpha(primaryColor, alpha), streak.width)
-                Render.Line(
-                    Vec2(sx + math.cos(streak.angle) * 6, sy + math.sin(streak.angle) * 6),
-                    Vec2(ex, ey),
-                    colorWithAlpha(secondaryColor, math.floor(alpha * 0.45)),
-                    math.max(1, streak.width - 0.25)
-                )
-            end
+            DrawAmbientStreak(streak, toRenderX, toRenderY, fadeInAlpha, primaryColor, secondaryColor, streakVisibility, sway)
         end
     end
 
@@ -2185,7 +3610,7 @@ local function DrawBackgroundEffects(fadeInAlpha)
         end
     end
 
-    if cursorHaloX and cursorHaloY and Script.particleCursorInteraction and Script.particleCursorInteraction:Get() then
+    if cursorHaloX and cursorHaloY and settings.particleCursorInteraction then
         local haloPulse = 0.88 + math.sin(time * 2.2) * 0.12
         local haloRadius = 66 + haloPulse * 14
         local haloAlpha = math.floor(CONSTANTS.HALO_ALPHA_BASE * fadeInAlpha)
@@ -2193,10 +3618,10 @@ local function DrawBackgroundEffects(fadeInAlpha)
         local trailPos = Vec2(cursorHaloX - cursorHaloOffsetX, cursorHaloY - cursorHaloOffsetY)
 
         if Render and Render.CircleGradient then
-            Render.CircleGradient(basePos, haloRadius * 1.9, colorWithAlpha(primaryColor, math.floor(haloAlpha * 0.10)), colorWithAlpha(primaryColor, 0))
-            Render.CircleGradient(trailPos, haloRadius * 1.25, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.16)), colorWithAlpha(secondaryColor, 0))
-            Render.CircleGradient(basePos, haloRadius * 0.92, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.34)), colorWithAlpha(primaryColor, 0))
-            Render.CircleGradient(basePos, haloRadius * 0.42, colorWithAlpha(makeColor(255, 255, 255, 255), math.floor(haloAlpha * 0.30)), colorWithAlpha(primaryColor, 0))
+            Render.CircleGradient(basePos, haloRadius * 2.05, colorWithAlpha(primaryColor, math.floor(haloAlpha * 0.14)), colorWithAlpha(primaryColor, 0))
+            Render.CircleGradient(trailPos, haloRadius * 1.35, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.20)), colorWithAlpha(secondaryColor, 0))
+            Render.CircleGradient(basePos, haloRadius * 1.0, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.38)), colorWithAlpha(primaryColor, 0))
+            Render.CircleGradient(basePos, haloRadius * 0.48, colorWithAlpha(makeColor(255, 255, 255, 255), math.floor(haloAlpha * 0.36)), colorWithAlpha(primaryColor, 0))
         else
             Render.FilledCircle(basePos, haloRadius * 1.55, colorWithAlpha(primaryColor, math.floor(haloAlpha * 0.18)), 20)
             Render.FilledCircle(trailPos, haloRadius * 1.1, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.20)), 18)
@@ -2204,21 +3629,24 @@ local function DrawBackgroundEffects(fadeInAlpha)
         end
 
         if Render and Render.ShadowCircle then
-            Render.ShadowCircle(basePos, haloRadius * 0.55, colorWithAlpha(primaryColor, math.floor(haloAlpha * 0.20)), haloRadius * 0.65)
+            Render.ShadowCircle(basePos, haloRadius * 0.62, colorWithAlpha(primaryColor, math.floor(haloAlpha * 0.26)), haloRadius * 0.75)
         end
     end
 
-    DrawCursorStardust(primaryColor, secondaryColor, fadeInAlpha)
+    if settings.cursorStardust then
+        DrawCursorStardust(primaryColor, secondaryColor, fadeInAlpha)
+    end
 
-    if Script.stars and Script.stars:Get() then
-        local multiLayer = Script.multiLayerStars and Script.multiLayerStars:Get()
+    if settings.stars then
+        local multiLayer = settings.multiLayerStars
         for i, star in ipairs(starActive) do
             local layer = star.layer or 2
             local layerParallax = STAR_LAYER_PARALLAX[layer] or 0.52
             local layerAlphaMul = STAR_LAYER_ALPHA[layer] or 1.0
             local layerSizeMul = STAR_LAYER_SIZE[layer] or 1.0
             local layerDriftMul = STAR_LAYER_DRIFT[layer] or 1.0
-            local alpha = math.floor(star.brightness * 255 * fadeInAlpha * layerAlphaMul)
+            local glintBoost = star.glintBoost or 0
+            local alpha = math.floor(star.brightness * 255 * fadeInAlpha * layerAlphaMul * (1 + glintBoost * 1.4))
             local starParallax = (0.12 + star.size * 0.03) * layerParallax * (multiLayer and 1 or 0.65)
             local drawX = toRenderX(star.x + sceneParallaxX * starParallax)
             local drawY = toRenderY(star.y + sceneParallaxY * starParallax * layerDriftMul)
@@ -2230,61 +3658,59 @@ local function DrawBackgroundEffects(fadeInAlpha)
             elseif multiLayer and layer == 3 then
                 coreColor = mixColors(primaryColor, makeColor(255, 255, 255, 255), 0.42, alpha)
             else
-                coreColor = makeColor(255, 255, 255, alpha)
+                local tint = 0.12 + math.sin(star.twinklePhase + i * 0.17) * 0.08
+                coreColor = mixColors(makeColor(255, 255, 255, alpha), primaryColor, tint, alpha)
             end
-            local haloColor = makeColor(coreColor.r, coreColor.g, coreColor.b, math.floor(alpha * 0.3))
 
-            Render.FilledCircle(Vec2(drawX, drawY), drawSize * 2, haloColor, 16)
+            DrawStarHalo(drawX, drawY, drawSize, coreColor, alpha, glintBoost)
             Render.FilledCircle(Vec2(drawX, drawY), drawSize, coreColor, 8)
+            Render.FilledCircle(
+                Vec2(drawX, drawY),
+                math.max(0.5, drawSize * 0.38),
+                makeColor(255, 255, 255, math.floor(alpha * (0.45 + (glintBoost or 0) * 0.25))),
+                6
+            )
 
-            if drawStarRays and star.brightness > CONSTANTS.STAR_RAY_BRIGHTNESS_THRESHOLD and layer >= 2 then
-                local rayLength = drawSize * 4
-                for angle = 0, math.pi * 2, math.pi / 2 do
-                    local x1 = drawX + math.cos(angle) * drawSize
-                    local y1 = drawY + math.sin(angle) * drawSize
-                    local x2 = drawX + math.cos(angle) * rayLength
-                    local y2 = drawY + math.sin(angle) * rayLength
-
-                    Render.Line(Vec2(x1, y1), Vec2(x2, y2), Color(255, 255, 255, math.floor(alpha * 0.5)), 1)
+            if glintBoost > 0.15 then
+                local glintAlpha = math.floor(alpha * glintBoost * 0.55)
+                if glintAlpha > 0 and Render and Render.CircleGradient then
+                    Render.CircleGradient(
+                        Vec2(drawX, drawY),
+                        drawSize * (5 + glintBoost * 4),
+                        colorWithAlpha(makeColor(255, 255, 255, 255), glintAlpha),
+                        colorWithAlpha(primaryColor, 0)
+                    )
                 end
+            end
+
+            if drawStarRays and (star.brightness > CONSTANTS.STAR_RAY_BRIGHTNESS_THRESHOLD or glintBoost > 0.2) and layer >= 2 then
+                DrawStarDiffractionRays(drawX, drawY, drawSize, alpha, star.rayAngle or 0, glintBoost)
             end
         end
     end
 
-    if Script.shootingStars and Script.shootingStars:Get() then
+    if settings.shootingStars then
         for _, star in ipairs(shootingStarPool) do
             if star.active then
-                local simX = star.startX + (star.endX - star.startX) * star.progress
-                local simY = star.startY + (star.endY - star.startY) * star.progress
-                local x = toRenderX(simX)
-                local y = toRenderY(simY)
-
-                for i = 1, #star.tail - 1 do
-                    local tailAlpha = math.floor((i / #star.tail) * 200 * fadeInAlpha)
-                    local size = star.size * (i / #star.tail)
-                    Render.FilledCircle(Vec2(toRenderX(star.tail[i].x), toRenderY(star.tail[i].y)), size, Color(255, 255, 200, tailAlpha), 8)
-                end
-
-                Render.FilledCircle(Vec2(x, y), star.size, Color(255, 255, 255, math.floor(255 * fadeInAlpha)), 8)
-                Render.FilledCircle(Vec2(x, y), star.size * 3, Color(255, 255, 200, math.floor(100 * fadeInAlpha)), 16)
+                DrawShootingStar(star, toRenderX, toRenderY, fadeInAlpha, primaryColor, secondaryColor)
             end
         end
     end
 
     local c1 = primaryColor
     local c2 = secondaryColor
-    local particleSize = Script.shieldRadius and Script.shieldRadius:Get() or 2
-    local particleBaseAlpha = Script.particleBaseAlpha and Script.particleBaseAlpha:Get() or 150
-    local particleGlowScale = Script.particleGlowScale and Script.particleGlowScale:Get() or 3
-    local particleGlowAlphaScale = (Script.particleGlowAlpha and Script.particleGlowAlpha:Get() or 30) * 0.01
-    local particleGlowEnabled = Script.particleGlow and Script.particleGlow:Get()
-    local particleSoftCore = Script.particleSoftCore and Script.particleSoftCore:Get()
-    local particleLinksEnabled = Script.particleConnections and Script.particleConnections:Get()
-    local connectionDist = Script.particleConnectionDist and Script.particleConnectionDist:Get() or CONSTANTS.PARTICLE_CONNECTION_DIST
-    local maxConnections = Script.particleMaxConnections and Script.particleMaxConnections:Get() or CONSTANTS.PARTICLE_MAX_CONNECTIONS
-    local linkBaseAlpha = Script.particleConnectionAlpha and Script.particleConnectionAlpha:Get() or 50
-    local linkWidth = Script.particleConnectionWidth and Script.particleConnectionWidth:Get() or 1
-    local coloredLinks = Script.particleColoredLinks and Script.particleColoredLinks:Get()
+    local particleSize = settings.particleSize
+    local particleBaseAlpha = settings.particleBaseAlpha
+    local particleGlowScale = settings.particleGlowScale
+    local particleGlowAlphaScale = settings.particleGlowAlpha * 0.01
+    local particleGlowEnabled = settings.particleGlow
+    local particleSoftCore = settings.particleSoftCore
+    local particleLinksEnabled = settings.particleConnections
+    local connectionDist = settings.particleConnectionDist
+    local maxConnections, skipLinkFrame = GetLinkLodSettings(settings, #bgParticleActive)
+    local linkBaseAlpha = settings.particleConnectionAlpha
+    local linkWidth = settings.particleConnectionWidth
+    local coloredLinks = settings.particleColoredLinks
     local nodePhase = math.floor(time * 1.2)
 
     for i, particle in ipairs(bgParticleActive) do
@@ -2307,10 +3733,23 @@ local function DrawBackgroundEffects(fadeInAlpha)
         particle.drawY = drawY
 
         if particleGlowEnabled then
-            local glowSize = radius * particleGlowScale
-            local glowAlpha = math.floor(alpha * particleGlowAlphaScale)
+            local glowPulse = 0.82 + (particle.brightness or 0.6) * 0.28
+            local glowSize = math.min(radius * particleGlowScale, 42)
+            local glowAlpha = math.floor(alpha * particleGlowAlphaScale * glowPulse * 1.1)
             if glowAlpha > 0 then
-                Render.FilledCircle(Vec2(drawX, drawY), glowSize, Color(pColor.r, pColor.g, pColor.b, glowAlpha), 16)
+                local useGradientGlow = qualityScale >= CONSTANTS.GLOW_QUALITY_THRESHOLD and #bgParticleActive <= 180
+                if useGradientGlow and Render and Render.CircleGradient then
+                    local warm = mixColors(pColor, makeColor(255, 255, 255, 255), 0.28)
+                    Render.CircleGradient(
+                        Vec2(drawX, drawY),
+                        glowSize,
+                        colorWithAlpha(pColor, math.floor(glowAlpha * 0.45)),
+                        colorWithAlpha(warm, math.floor(glowAlpha * 0.2))
+                    )
+                else
+                    Render.FilledCircle(Vec2(drawX, drawY), glowSize, Color(pColor.r, pColor.g, pColor.b, math.floor(glowAlpha * 0.7)), 14)
+                    Render.FilledCircle(Vec2(drawX, drawY), glowSize * 0.55, Color(255, 255, 255, math.floor(glowAlpha * 0.18)), 10)
+                end
             end
         end
 
@@ -2319,13 +3758,18 @@ local function DrawBackgroundEffects(fadeInAlpha)
         end
 
         Render.FilledCircle(Vec2(drawX, drawY), radius, Color(pColor.r, pColor.g, pColor.b, alpha), 8)
-        Render.FilledCircle(Vec2(drawX, drawY), math.max(0.6, radius * 0.45), Color(255, 255, 255, math.floor(alpha * 0.5)), 8)
+        Render.FilledCircle(Vec2(drawX, drawY), math.max(0.6, radius * 0.42), Color(255, 255, 255, math.floor(alpha * 0.58)), 8)
 
         ::continue_particle::
     end
 
-    if particleLinksEnabled and maxConnections > 0 and connectionDist > 0 then
+    if particleLinksEnabled and maxConnections > 0 and connectionDist > 0 and not skipLinkFrame then
         local renderConnectionDist = connectionDist * ((posScaleX + posScaleY) * 0.5)
+        local linkCursorPos = nil
+        if settings.particleCursorInteraction and cursorHaloX and cursorHaloY then
+            linkCursorPos = Vec2(cursorHaloX, cursorHaloY)
+        end
+        local enableLinkPulse = qualityScale >= CONSTANTS.LINK_LOD_QUALITY_THRESHOLD
         DrawParticleLinks(
             bgParticleActive,
             c1,
@@ -2337,9 +3781,13 @@ local function DrawBackgroundEffects(fadeInAlpha)
             linkWidth,
             coloredLinks,
             fadeInAlpha,
-            nodePhase
+            nodePhase,
+            linkCursorPos,
+            enableLinkPulse
         )
     end
+
+    DrawDebugOverlay(settings, fadeInAlpha, width, height)
 end
 
 --#endregion
@@ -2402,6 +3850,18 @@ function Script.OnGameEnd()
     State.starsWasEnabled = nil
     State.multiLayerWasEnabled = nil
     State.fadeInAlpha = 1
+    State.frameSettings = nil
+    State.menuIdleTime = 0
+    State.simulationPaused = false
+    State.linkGridSkipFrame = false
+    State.lastDt = 0
+    State.debugFont = nil
+    State.blockCustomPresetMarks = 0
+    State.cachedFullScreenSize = nil
+    State.lastRawScreenSize = nil
+    baseScreenMinDim = nil
+    baseScreenArea = nil
+    screenSize = Vec2(1, 1)
     resetRuntimeState()
 end
 

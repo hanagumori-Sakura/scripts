@@ -1,7 +1,7 @@
 --[[
     Tusk Auto Save
     Versus saves: Snowball on enemy, then RMB ally pickup while rolling.
-    Script by Euphoria
+    Script by 花曇り hanagumori
 --]]
 
 local Script = {}
@@ -22,6 +22,7 @@ local LANG_CACHE_INTERVAL = 1.0
 local DEFAULT_SNOWBALL_RANGE = 1250
 local BLINK_SAVE_MARGIN = 50
 local BLINK_AFTER_DELAY = 0.35
+local BLINK_AFTER_DELAY_PREEMPT = 0.15
 local SNOWBALL_AFTER_BLINK_TIME = 1.5
 local SAVE_TARGET_SILENCE = 2.0
 local VERSUS_CONFIG_PREFIX = "versus_"
@@ -36,12 +37,12 @@ local PANEL_HEADER_FONT_CANDIDATES = {
     "Tahoma",
     "Arial",
 }
-local PANEL_HEADER_HEIGHT = 36
-local PANEL_HEADER_PAD_X = 12
-local PANEL_HEADER_TEXT_SIZE = 15
-local PANEL_HEADER_ICON_SIZE = 15
-local PANEL_HEADER_ICON_GAP = 8
-local PANEL_HEADER_RADIUS = 6
+local PANEL_HEADER_HEIGHT = 28
+local PANEL_HEADER_PAD_X = 8
+local PANEL_HEADER_TEXT_SIZE = 14
+local PANEL_HEADER_ICON_SIZE = 14
+local PANEL_HEADER_ICON_GAP = 6
+local PANEL_HEADER_RADIUS = 5
 local PANEL_BLUR_BASE_STRENGTH = 2.5
 local PANEL_TITLE_TEXT = "Auto Save"
 
@@ -56,14 +57,17 @@ local SAVE_HAZARD_MODIFIERS = {
 }
 
 local O_CAST_TARGET = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_TARGET
-local O_MOVE_TARGET = Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_TARGET
 local O_ATTACK_TARGET = Enum.UnitOrder.DOTA_UNIT_ORDER_ATTACK_TARGET
 local ORDER_ISSUER = Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_PASSED_UNIT_ONLY
 
 local SNOWBALL_SAVE_EXPIRE = 4.0
 local SNOWBALL_CAST_TIMEOUT = 0.9
-local SNOWBALL_PICKUP_INTERVAL = 0.18
-local SNOWBALL_PICKUP_MAX_ATTEMPTS = 8
+local SNOWBALL_PICKUP_INTERVAL = 0.08
+local SNOWBALL_PICKUP_MAX_ATTEMPTS = 15
+local PREEMPTIVE_CAST_LEAD = 0.25
+local PREEMPTIVE_CAST_SCORE_BASE = -500
+local SNOWBALL_HERO_TARGET_BIAS = -500
+local SNOWBALL_CREEP_TARGET_BIAS = 250
 local DEFAULT_SNOWBALL_GATHER_RADIUS = 325
 local ALLY_IN_SNOWBALL_MODIFIERS = {
     "modifier_tusk_snowball_movement",
@@ -100,6 +104,11 @@ local VERSUS_THREATS = {
     { id = "winter_wyvern_winters_curse", mods = { "modifier_winter_wyvern_winters_curse" }, default = true },
     { id = "earthshaker_echo_slam", mods = { "modifier_earthshaker_fissure_stun" }, default = true },
     { id = "earthshaker_fissure", mods = { "modifier_earthshaker_fissure_stun" }, default = false },
+    { id = "nevermore_requiem", mods = {
+        "modifier_nevermore_requiem_fear",
+        "modifier_nevermore_requiem_slow",
+    }, default = true },
+    { id = "warlock_rain_of_chaos", mods = {}, default = true },
 
     -- Hard channeled / long disables
     { id = "bane_fiends_grip", mods = { "modifier_bane_fiends_grip", "modifier_bane_fiends_grip_cast_illusion" }, default = true },
@@ -215,8 +224,10 @@ local State = {
     lastAllyScanTime = -100,
     lastAllySyncTime = -100,
     cachedAllies = {},
-    cachedAllyNames = {},
+    matchAllyNames = {},
+    matchAllySet = {},
     cachedAllyEntities = {},
+    cachedAllyUnitNames = {},
     allyEnabled = {},
     lastDebugLogTime = -100,
     saveQuietUntil = -100,
@@ -245,6 +256,7 @@ local Colors = {
     HeaderBg = Color(18, 18, 22, 255),
     TextHeader = Color(245, 247, 250, 255),
     BorderEnabled = Color(191, 140, 255, 255),
+    CellBg = Color(12, 12, 16, 255),
 }
 
 local LangState = {
@@ -738,6 +750,17 @@ local function IsVersusReason(reason)
     return reason and reason:sub(1, 7) == "versus:"
 end
 
+local function IsPreemptiveCastReason(reason)
+    return type(reason) == "string" and reason:sub(-5) == ":cast"
+end
+
+local function GetBlinkAfterDelay(reason)
+    if IsPreemptiveCastReason(reason) then
+        return BLINK_AFTER_DELAY_PREEMPT
+    end
+    return BLINK_AFTER_DELAY
+end
+
 local function CastAbilityOnTarget(me, ability, target, tag)
     if not ability or not target then
         return false
@@ -835,7 +858,7 @@ local function IssueSnowballPickup(ctx, ally, attemptIndex)
         return false, "none"
     end
 
-    if attemptIndex % 2 == 0 and Player and Player.AttackTarget then
+    if Player and Player.AttackTarget then
         SafeCall(
             Player.AttackTarget,
             player,
@@ -853,7 +876,7 @@ local function IssueSnowballPickup(ctx, ally, attemptIndex)
     if Player and Player.PrepareUnitOrders then
         SafeCall(Player.PrepareUnitOrders,
             player,
-            attemptIndex % 2 == 0 and O_ATTACK_TARGET or O_MOVE_TARGET,
+            O_ATTACK_TARGET,
             ally,
             allyPos,
             nil,
@@ -866,7 +889,7 @@ local function IssueSnowballPickup(ctx, ally, attemptIndex)
             CAST_ID .. ".pickup",
             false
         )
-        return true, attemptIndex % 2 == 0 and "attack_order" or "move"
+        return true, "attack_order"
     end
 
     return false, "none"
@@ -1222,6 +1245,24 @@ local function ClearActiveSnowballSave()
     State.activeSnowballSave = nil
 end
 
+local SNOWBALL_EXCLUDED_TARGETS = {
+    npc_dota_warlock_golem = true,
+}
+
+local function IsExcludedSnowballTarget(unit)
+    local unitName = SafeCall(NPC.GetUnitName, unit) or ""
+    if unitName == "" then
+        return false
+    end
+    if SNOWBALL_EXCLUDED_TARGETS[unitName] then
+        return true
+    end
+    if unitName:find("warlock_golem", 1, true) then
+        return true
+    end
+    return false
+end
+
 local function IsValidSnowballEnemy(me, unit)
     if not unit or unit == me then
         return false
@@ -1233,6 +1274,9 @@ local function IsValidSnowballEnemy(me, unit)
         return false
     end
     if SafeCall(NPC.IsIllusion, unit) and SafeCall(NPC.IsHero, unit) then
+        return false
+    end
+    if IsExcludedSnowballTarget(unit) then
         return false
     end
     return true
@@ -1251,6 +1295,28 @@ local function IsValidSnowballCastTarget(me, unit, range)
         return SafeCall(NPC.IsEntityInRange, me, unit, range) ~= false
     end
     return IsValidSnowballTarget(me, unit, range)
+end
+
+local function IsSnowballCastBlocked(me, unit, range)
+    if not IsValidSnowballCastTarget(me, unit, range) then
+        return true
+    end
+    if SafeCall(Entity.IsDormant, unit) then
+        return true
+    end
+    if SafeCall(NPC.HasState, unit, Enum.ModifierState.MODIFIER_STATE_INVULNERABLE) then
+        return true
+    end
+    if SafeCall(NPC.HasState, unit, Enum.ModifierState.MODIFIER_STATE_MAGIC_IMMUNE) then
+        return true
+    end
+    if SafeCall(NPC.HasState, unit, Enum.ModifierState.MODIFIER_STATE_OUT_OF_GAME) then
+        return true
+    end
+    if NPC.IsVisible and SafeCall(NPC.IsVisible, unit) == false then
+        return true
+    end
+    return false
 end
 
 local function FindSnowballTreeNearAlly(ctx, ally)
@@ -1279,7 +1345,7 @@ local function FindSnowballTreeNearAlly(ctx, ally)
     return best
 end
 
-local function FindSnowballEnemyTarget(ctx, ally)
+local function FindSnowballEnemyTarget(ctx, ally, preferredEnemy)
     local allyPos = SafeCall(Entity.GetAbsOrigin, ally)
     local teamNum = SafeCall(Entity.GetTeamNum, ctx.me)
     local range = ctx.snowballRange
@@ -1287,11 +1353,15 @@ local function FindSnowballEnemyTarget(ctx, ally)
         return nil
     end
 
+    if preferredEnemy and not IsSnowballCastBlocked(ctx.me, preferredEnemy, range) then
+        return preferredEnemy
+    end
+
     local best = nil
     local bestScore = math.huge
 
     local function ConsiderUnit(unit, bias)
-        if not IsValidSnowballTarget(ctx.me, unit, range) then
+        if IsSnowballCastBlocked(ctx.me, unit, range) then
             return
         end
 
@@ -1308,18 +1378,18 @@ local function FindSnowballEnemyTarget(ctx, ally)
         end
     end
 
+    local heroes = SafeCall(Heroes.InRadius, ctx.origin, range, teamNum, Enum.TeamType.TEAM_ENEMY, true, true) or {}
+    for _, enemy in ipairs(heroes) do
+        ConsiderUnit(enemy, SNOWBALL_HERO_TARGET_BIAS)
+    end
+
     if NPCs and NPCs.InRadius then
         local creeps = SafeCall(NPCs.InRadius, ctx.origin, range, teamNum, Enum.TeamType.TEAM_ENEMY, true, true) or {}
         for _, creep in ipairs(creeps) do
-            if SafeCall(NPC.IsHero, creep) == false then
-                ConsiderUnit(creep, 0)
+            if SafeCall(NPC.IsHero, creep) == false and not IsExcludedSnowballTarget(creep) then
+                ConsiderUnit(creep, SNOWBALL_CREEP_TARGET_BIAS)
             end
         end
-    end
-
-    local heroes = SafeCall(Heroes.InRadius, ctx.origin, range, teamNum, Enum.TeamType.TEAM_ENEMY, true, true) or {}
-    for _, enemy in ipairs(heroes) do
-        ConsiderUnit(enemy, 0)
     end
 
     if best then
@@ -1364,11 +1434,11 @@ local function IsAllyPickedUpInSnowball(ally, me)
     return false
 end
 
-local function CanStartSnowballSave(ctx, ally)
+local function CanStartSnowballSave(ctx, ally, preferredEnemy)
     if not CanCastSnowballSave(ctx) then
         return false
     end
-    if not FindSnowballEnemyTarget(ctx, ally) then
+    if not FindSnowballEnemyTarget(ctx, ally, preferredEnemy) then
         return false
     end
 
@@ -1380,8 +1450,8 @@ local function CanStartSnowballSave(ctx, ally)
     return true
 end
 
-local function StartSnowballSave(ctx, ally, reason)
-    local enemy = FindSnowballEnemyTarget(ctx, ally)
+local function StartSnowballSave(ctx, ally, reason, preferredEnemy)
+    local enemy = FindSnowballEnemyTarget(ctx, ally, preferredEnemy)
     if not enemy then
         LogDebug("save skip: no snowball enemy target in range")
         return false
@@ -1393,9 +1463,18 @@ local function StartSnowballSave(ctx, ally, reason)
         return false
     end
 
+    if preferredEnemy and preferredEnemy ~= enemy then
+        LogDebug(string.format(
+            "save snowball: fallback target %s (preferred %s blocked)",
+            GetUnitDisplayName(enemy),
+            GetUnitDisplayName(preferredEnemy)
+        ))
+    end
+
     State.activeSnowballSave = {
         ally = ally,
         enemy = enemy,
+        preferredEnemy = preferredEnemy,
         reason = reason,
         phase = "cast",
         startedAt = ctx.now,
@@ -1484,7 +1563,13 @@ local function ProcessActiveSnowballSave(ctx)
         if WasSnowballCastAccepted(ctx, active) then
             active.phase = "pickup"
             active.lastPickupTry = ctx.now - SNOWBALL_PICKUP_INTERVAL
+            active.pickupAttempts = 0
             LogDebug("save phase: snowball accepted, pickup " .. GetHeroDisplayName(ally))
+            if IsAllyInSnowballGatherRange(ctx, ally) then
+                active.pickupAttempts = 1
+                active.lastPickupTry = ctx.now
+                IssueSnowballPickup(ctx, ally, 1)
+            end
             return true
         end
 
@@ -1563,11 +1648,11 @@ local function ProcessPendingSnowball(ctx)
         return false
     end
 
-    if not CanStartSnowballSave(ctx, ally) then
+    if not CanStartSnowballSave(ctx, ally, pending.preferredEnemy) then
         return true
     end
 
-    if StartSnowballSave(ctx, ally, pending.reason) then
+    if StartSnowballSave(ctx, ally, pending.reason, pending.preferredEnemy) then
         ClearPendingSnowball()
     end
 
@@ -1880,18 +1965,38 @@ local function IsThreatFromCaster(threatId, caster)
     return IsVersusThreatForHero(threatId, heroName)
 end
 
+local function IsActiveEnemyThreatModifier(ally, mod)
+    if not ally or not mod then
+        return false
+    end
+
+    if SafeCall(Modifier.IsDebuff, mod) ~= true then
+        return false
+    end
+
+    local caster = SafeCall(Modifier.GetCaster, mod)
+    if not caster or caster == ally then
+        return false
+    end
+
+    return SafeCall(Entity.IsSameTeam, ally, caster) == false
+end
+
 local function AllyHasThreatAbilityModifier(ally, threat)
     local modifiers = SafeCall(NPC.GetModifiers, ally) or {}
     for _, mod in ipairs(modifiers) do
         local ability = SafeCall(Modifier.GetAbility, mod)
         if ability and SafeCall(Ability.GetName, ability) == threat.id then
-            return true
+            if IsActiveEnemyThreatModifier(ally, mod) then
+                return true
+            end
         end
 
         local modName = SafeCall(Modifier.GetName, mod) or ""
         if GENERIC_CONTROL_MODIFIERS[modName] then
             local caster = SafeCall(Modifier.GetCaster, mod)
-            if IsThreatFromCaster(threat.id, caster) then
+            if IsThreatFromCaster(threat.id, caster)
+                and IsActiveEnemyThreatModifier(ally, mod) then
                 return true
             end
         end
@@ -1906,12 +2011,83 @@ local function AllyMatchesVersusThreat(ally, threat)
     end
 
     for _, modifierName in ipairs(threat.mods) do
-        if SafeCall(NPC.HasModifier, ally, modifierName) then
+        local mod = SafeCall(NPC.GetModifier, ally, modifierName)
+        if mod and IsActiveEnemyThreatModifier(ally, mod) then
             return true
         end
     end
 
     return AllyHasThreatAbilityModifier(ally, threat)
+end
+
+local function GetAllyThreatSourceEnemy(ally, threatId)
+    if not ally or not threatId then
+        return nil
+    end
+
+    local threat = nil
+    for _, entry in ipairs(VERSUS_THREATS) do
+        if entry.id == threatId then
+            threat = entry
+            break
+        end
+    end
+    if not threat then
+        return nil
+    end
+
+    if threat.id == "beastmaster_primal_roar" then
+        for _, modifierName in ipairs(threat.mods) do
+            local mod = SafeCall(NPC.GetModifier, ally, modifierName)
+            if mod and IsActiveEnemyThreatModifier(ally, mod) then
+                return SafeCall(Modifier.GetCaster, mod)
+            end
+        end
+
+        local stunMod = SafeCall(NPC.GetModifier, ally, "modifier_stunned")
+        if stunMod and IsActiveEnemyThreatModifier(ally, stunMod) then
+            local ability = SafeCall(Modifier.GetAbility, stunMod)
+            if ability and SafeCall(Ability.GetName, ability) == "beastmaster_primal_roar" then
+                return SafeCall(Modifier.GetCaster, stunMod)
+            end
+            local caster = SafeCall(Modifier.GetCaster, stunMod)
+            if caster and SafeCall(NPC.GetUnitName, caster) == "npc_dota_hero_beastmaster" then
+                return caster
+            end
+        end
+        return nil
+    end
+
+    for _, modifierName in ipairs(threat.mods) do
+        local mod = SafeCall(NPC.GetModifier, ally, modifierName)
+        if mod and IsActiveEnemyThreatModifier(ally, mod) then
+            return SafeCall(Modifier.GetCaster, mod)
+        end
+    end
+
+    local modifiers = SafeCall(NPC.GetModifiers, ally) or {}
+    for _, mod in ipairs(modifiers) do
+        if not IsActiveEnemyThreatModifier(ally, mod) then
+            goto continue_mod
+        end
+
+        local ability = SafeCall(Modifier.GetAbility, mod)
+        if ability and SafeCall(Ability.GetName, ability) == threat.id then
+            return SafeCall(Modifier.GetCaster, mod)
+        end
+
+        local modName = SafeCall(Modifier.GetName, mod) or ""
+        if GENERIC_CONTROL_MODIFIERS[modName] then
+            local caster = SafeCall(Modifier.GetCaster, mod)
+            if IsThreatFromCaster(threat.id, caster) then
+                return caster
+            end
+        end
+
+        ::continue_mod::
+    end
+
+    return nil
 end
 
 local function GetAllyVersusThreat(ally)
@@ -1923,6 +2099,218 @@ local function GetAllyVersusThreat(ally)
         end
     end
 
+    return nil
+end
+
+local PREEMPTIVE_CAST_CONFIG = {
+    nevermore_requiem = {
+        ability = "nevermore_requiem",
+        defaultCastPoint = 1.67,
+        impactDelay = 0,
+        radiusSpecial = "requiem_radius",
+        defaultRadius = 1000,
+        leadFraction = 0.5,
+        minElapsed = 0.15,
+        useCasterOrigin = true,
+    },
+    warlock_rain_of_chaos = {
+        ability = "warlock_rain_of_chaos",
+        defaultCastPoint = 0.5,
+        impactDelaySpecial = "stun_delay",
+        defaultImpactDelay = 0.5,
+        radiusSpecial = "aoe",
+        defaultRadius = 600,
+        castRangeFallback = 900,
+        leadTime = 0.2,
+        thinkerMod = "modifier_warlock_rain_of_chaos_thinker",
+    },
+}
+
+local function GetPreemptiveThreatIndex(threatId)
+    for index, threat in ipairs(VERSUS_THREATS) do
+        if threat.id == threatId then
+            return index - 1
+        end
+    end
+    return 0
+end
+
+local function GetPreemptiveCastTiming(ability, config)
+    local castPoint = SafeCall(Ability.GetCastPoint, ability, true)
+    if type(castPoint) ~= "number" or castPoint <= 0 then
+        castPoint = config.defaultCastPoint or 0
+    end
+
+    local impactDelay = config.impactDelay or config.defaultImpactDelay or 0
+    if config.impactDelaySpecial then
+        local delay = SafeCall(Ability.GetLevelSpecialValueFor, ability, config.impactDelaySpecial)
+        if type(delay) == "number" and delay >= 0 then
+            impactDelay = delay
+        end
+    end
+
+    local effectRadius = config.defaultRadius or 0
+    if config.radiusSpecial then
+        local radius = SafeCall(Ability.GetLevelSpecialValueFor, ability, config.radiusSpecial)
+        if type(radius) == "number" and radius > 0 then
+            effectRadius = radius
+        end
+    end
+
+    return castPoint, impactDelay, effectRadius
+end
+
+local function GetPreemptiveCastLeadTime(config, castPoint)
+    if config.leadFraction and type(castPoint) == "number" and castPoint > 0 then
+        return castPoint * config.leadFraction
+    end
+    return config.leadTime or PREEMPTIVE_CAST_LEAD
+end
+
+local function FindAbilityThinkerOrigin(ctx, center, searchRadius, thinkerMod)
+    if not center or not thinkerMod or not NPCs or not NPCs.InRadius then
+        return nil
+    end
+
+    local teamNum = SafeCall(Entity.GetTeamNum, ctx.me)
+    local units = SafeCall(
+        NPCs.InRadius,
+        center,
+        searchRadius,
+        teamNum,
+        Enum.TeamType.TEAM_BOTH,
+        true,
+        true
+    ) or {}
+
+    for _, unit in ipairs(units) do
+        if SafeCall(NPC.HasModifier, unit, thinkerMod) then
+            return SafeCall(Entity.GetAbsOrigin, unit)
+        end
+    end
+
+    return nil
+end
+
+local function IsAllyInsideThreatRadius(allyPos, center, radius)
+    if not allyPos or not center or type(radius) ~= "number" or radius <= 0 then
+        return false
+    end
+    return Dist2D(allyPos, center) <= radius
+end
+
+local function GetEnemyPreemptiveCastZone(ctx, enemy, threatId, config, now)
+    if not IsVersusThreatEnabled(threatId) or not IsEnemyHero(ctx.me, enemy) then
+        return nil
+    end
+
+    local ability = SafeCall(NPC.GetAbility, enemy, config.ability)
+    if not ability then
+        return nil
+    end
+
+    local inCastPhase = SafeCall(Ability.IsInAbilityPhase, ability) == true
+    local castStart = SafeCall(Ability.GetCastStartTime, ability)
+    if type(castStart) ~= "number" or castStart <= 0 then
+        if not inCastPhase then
+            return nil
+        end
+        castStart = now
+    end
+
+    local castPoint, impactDelay, effectRadius = GetPreemptiveCastTiming(ability, config)
+    local elapsed = now - castStart
+    local leadTime = GetPreemptiveCastLeadTime(config, castPoint)
+    local triggerAt = math.max(config.minElapsed or 0, castPoint - leadTime)
+    local impactAt = castPoint + impactDelay
+    local enemyPos = SafeCall(Entity.GetAbsOrigin, enemy)
+    if not enemyPos then
+        return nil
+    end
+
+    if config.useCasterOrigin then
+        if not inCastPhase or elapsed < triggerAt or elapsed > castPoint + 0.1 then
+            return nil
+        end
+        return {
+            center = enemyPos,
+            radius = effectRadius,
+        }
+    end
+
+    if elapsed < triggerAt or elapsed > impactAt + 0.2 then
+        return nil
+    end
+
+    local castRange = SafeCall(Ability.GetCastRange, ability) or config.castRangeFallback or 900
+    local searchR = castRange + effectRadius + 200
+    local thinkerPos = config.thinkerMod
+        and FindAbilityThinkerOrigin(ctx, enemyPos, searchR, config.thinkerMod)
+    if thinkerPos then
+        return {
+            center = thinkerPos,
+            radius = effectRadius,
+        }
+    end
+
+    if inCastPhase and elapsed >= triggerAt then
+        return {
+            center = enemyPos,
+            radius = castRange + effectRadius,
+        }
+    end
+
+    if elapsed >= castPoint and elapsed <= impactAt + 0.1 then
+        return {
+            center = enemyPos,
+            radius = castRange + effectRadius,
+        }
+    end
+
+    return nil
+end
+
+local function GetPreemptiveCastThreat(ctx, ally)
+    local allyPos = SafeCall(Entity.GetAbsOrigin, ally)
+    if not allyPos then
+        return nil
+    end
+
+    local teamNum = SafeCall(Entity.GetTeamNum, ctx.me)
+    local scanRange = ctx.scanRange or ctx.snowballRange or DEFAULT_SNOWBALL_RANGE
+    local enemies = SafeCall(
+        Heroes.InRadius,
+        ctx.origin,
+        scanRange,
+        teamNum,
+        Enum.TeamType.TEAM_ENEMY,
+        true,
+        true
+    ) or {}
+
+    local bestThreatId = nil
+    local bestEnemy = nil
+    local bestScore = math.huge
+
+    for _, enemy in ipairs(enemies) do
+        for threatId, config in pairs(PREEMPTIVE_CAST_CONFIG) do
+            if IsVersusThreatEnabled(threatId) then
+                local zone = GetEnemyPreemptiveCastZone(ctx, enemy, threatId, config, ctx.now)
+                if zone and IsAllyInsideThreatRadius(allyPos, zone.center, zone.radius) then
+                    local score = PREEMPTIVE_CAST_SCORE_BASE - GetPreemptiveThreatIndex(threatId)
+                    if score < bestScore then
+                        bestScore = score
+                        bestThreatId = threatId
+                        bestEnemy = enemy
+                    end
+                end
+            end
+        end
+    end
+
+    if bestThreatId then
+        return bestThreatId, bestScore, bestEnemy
+    end
     return nil
 end
 
@@ -1964,7 +2352,7 @@ local function SetAllySaveEnabled(cleanName, enabled)
     if cleanName == "" then
         return
     end
-    State.allyEnabled[cleanName] = enabled
+    State.allyEnabled[cleanName] = enabled == true
     SafeCall(Config.WriteInt, CONFIG_SECTION, AllyConfigKey(cleanName), enabled and 1 or 0)
 end
 
@@ -2447,19 +2835,28 @@ local function GetPanelLayout(scale, numAllies, screenSize)
 end
 
 local function SyncAllyTargets(myHero, now)
+    if not myHero then
+        return
+    end
     if now - State.lastAllySyncTime < ALLY_SYNC_INTERVAL then
         return
     end
     State.lastAllySyncTime = now
 
-    local names = {}
     local entities = {}
 
     for _, hero in ipairs(SafeCall(Heroes.GetAll) or {}) do
         if IsValidAlly(myHero, hero) then
-            local cleanName = CleanHeroName(SafeCall(NPC.GetUnitName, hero))
+            local unitName = SafeCall(NPC.GetUnitName, hero)
+            local cleanName = CleanHeroName(unitName)
             if cleanName ~= "" then
-                names[#names + 1] = cleanName
+                if not State.matchAllySet[cleanName] then
+                    State.matchAllySet[cleanName] = true
+                    State.matchAllyNames[#State.matchAllyNames + 1] = cleanName
+                end
+                if unitName and unitName ~= "" then
+                    State.cachedAllyUnitNames[cleanName] = unitName
+                end
                 entities[cleanName] = hero
                 if State.allyEnabled[cleanName] == nil then
                     IsAllySaveEnabled(cleanName)
@@ -2468,8 +2865,7 @@ local function SyncAllyTargets(myHero, now)
         end
     end
 
-    table.sort(names)
-    State.cachedAllyNames = names
+    table.sort(State.matchAllyNames)
     State.cachedAllyEntities = entities
 end
 
@@ -2487,7 +2883,7 @@ function Script.OnDraw()
         return
     end
 
-    local numAllies = #State.cachedAllyNames
+    local numAllies = #State.matchAllyNames
     if numAllies == 0 then
         return
     end
@@ -2526,6 +2922,9 @@ function Script.OnDraw()
     end
 
     local clickTriggered = isClicked
+    if clickTriggered and Input.IsInputCaptured and SafeCall(Input.IsInputCaptured) then
+        clickTriggered = false
+    end
     State.wasMousePressed = isDown
 
     local titleText = layout.titleText or PANEL_TITLE_TEXT
@@ -2567,24 +2966,31 @@ function Script.OnDraw()
         Vec2(textX, textY),
         Colors.TextHeader)
 
-    for i, cleanName in ipairs(State.cachedAllyNames) do
+    for i, cleanName in ipairs(State.matchAllyNames) do
         local cellX = layout.cellsStartX + (i - 1) * (layout.cellW + layout.cellSpacing)
         local allyHero = State.cachedAllyEntities[cleanName]
         local enabled = IsAllySaveEnabled(cleanName)
 
-        local accentA = Colors.BorderEnabled.a
-        if accentA == nil then
-            accentA = 255
-        end
-        local imgAlpha = enabled and accentA or math.floor(accentA * 0.43)
+        local imgAlpha = enabled and 255 or 110
         local grayscale = enabled and 0.0 or 1.0
+        local borderColor = enabled
+            and Color(Colors.BorderEnabled.r, Colors.BorderEnabled.g, Colors.BorderEnabled.b, 255)
+            or Color(Colors.BorderEnabled.r, Colors.BorderEnabled.g, Colors.BorderEnabled.b, 110)
 
         local isCellHovered = isCursorValid
             and mx >= cellX and mx <= cellX + layout.cellW
             and my >= layout.rowY and my <= layout.rowY + layout.cellH
 
-        local heroNameRaw = allyHero and SafeCall(NPC.GetUnitName, allyHero) or ""
+        local heroNameRaw = State.cachedAllyUnitNames[cleanName]
+            or (allyHero and SafeCall(NPC.GetUnitName, allyHero))
+            or ""
         local imgHandle = GetHeroIcon(heroNameRaw)
+
+        Render.FilledRect(
+            Vec2(cellX, layout.rowY),
+            Vec2(cellX + layout.cellW, layout.rowY + layout.cellH),
+            Colors.CellBg,
+            5 * scale)
 
         if imgHandle then
             Render.Image(
@@ -2603,7 +3009,7 @@ function Script.OnDraw()
             Render.Rect(
                 Vec2(cellX, layout.rowY),
                 Vec2(cellX + layout.cellW, layout.rowY + layout.cellH),
-                Colors.BorderEnabled,
+                borderColor,
                 5 * scale,
                 Enum.DrawFlags.None,
                 1.0)
@@ -2628,7 +3034,7 @@ function Script.OnKeyEvent(_data, key, _event)
         return
     end
 
-    if #State.cachedAllyNames == 0 then
+    if #State.matchAllyNames == 0 then
         return
     end
 
@@ -2638,7 +3044,7 @@ function Script.OnKeyEvent(_data, key, _event)
         return
     end
 
-    local layout = GetPanelLayout(scale, #State.cachedAllyNames, screenSize)
+    local layout = GetPanelLayout(scale, #State.matchAllyNames, screenSize)
     local mx, my = GetMousePos()
     local isCursorOverPanel = mx and my
         and mx >= layout.x and mx <= layout.x + layout.width
@@ -2659,10 +3065,16 @@ end
 
 --#region Save Handlers
 
-local function GetAllySaveReason(ally)
+local function GetAllySaveReason(ctx, ally)
+    local preemptId, preemptScore, preemptEnemy = GetPreemptiveCastThreat(ctx, ally)
+    if preemptId then
+        return "versus:" .. preemptId .. ":cast", preemptScore, preemptEnemy
+    end
+
     local threatId, threatScore = GetAllyVersusThreat(ally)
     if threatId then
-        return "versus:" .. threatId, threatScore or 0
+        local sourceEnemy = GetAllyThreatSourceEnemy(ally, threatId)
+        return "versus:" .. threatId, threatScore or 0, sourceEnemy
     end
 
     return nil
@@ -2673,13 +3085,13 @@ local SaveHandlers = {
         name = "item_blink",
         tag = "blink_snowball",
         priority = 1,
-        CanSave = function(ctx, ally, reason)
+        CanSave = function(ctx, ally, reason, preferredEnemy)
             if State.snowballAfterBlink or State.activeSnowballSave then
                 return false
             end
             return CanBlinkForSnowballSave(ctx, ally, reason)
         end,
-        TrySave = function(ctx, ally, reason)
+        TrySave = function(ctx, ally, reason, preferredEnemy)
             local allyPos = SafeCall(Entity.GetAbsOrigin, ally)
             local gatherRange = GetSnowballGatherRadius(ctx.abilities.snowball)
             local blinkPos = allyPos
@@ -2691,7 +3103,8 @@ local SaveHandlers = {
             State.snowballAfterBlink = {
                 ally = ally,
                 reason = reason,
-                readyAfter = ctx.now + BLINK_AFTER_DELAY,
+                preferredEnemy = preferredEnemy,
+                readyAfter = ctx.now + GetBlinkAfterDelay(reason),
                 expireTime = ctx.now + SNOWBALL_AFTER_BLINK_TIME,
             }
 
@@ -2712,7 +3125,7 @@ local SaveHandlers = {
         name = SNOWBALL_NAME,
         tag = "snowball",
         priority = 2,
-        CanSave = function(ctx, ally, reason)
+        CanSave = function(ctx, ally, reason, preferredEnemy)
             if State.snowballAfterBlink or State.activeSnowballSave then
                 return false
             end
@@ -2725,10 +3138,10 @@ local SaveHandlers = {
             if not CanPickupWithoutBlink(ctx, ally, reason) then
                 return false
             end
-            return CanStartSnowballSave(ctx, ally)
+            return CanStartSnowballSave(ctx, ally, preferredEnemy)
         end,
-        TrySave = function(ctx, ally, reason)
-            return StartSnowballSave(ctx, ally, reason)
+        TrySave = function(ctx, ally, reason, preferredEnemy)
+            return StartSnowballSave(ctx, ally, reason, preferredEnemy)
         end,
     },
 }
@@ -2815,25 +3228,27 @@ local function PickSaveTarget(ctx, allies)
     local bestAlly = nil
     local bestScore = math.huge
     local bestReason = nil
+    local bestPreferredEnemy = nil
     local bestHp = 1
 
     for _, ally in ipairs(allies) do
         local cleanName = CleanHeroName(SafeCall(NPC.GetUnitName, ally))
         if cleanName ~= "" and IsAllySaveEnabled(cleanName) then
-            local reason, score = GetAllySaveReason(ally)
+            local reason, score, preferredEnemy = GetAllySaveReason(ctx, ally)
             if reason and type(score) == "number" and score < bestScore then
                 bestScore = score
                 bestAlly = ally
                 bestReason = reason
+                bestPreferredEnemy = preferredEnemy
                 bestHp = GetHealthPct(ally)
             end
         end
     end
 
-    return bestAlly, bestHp, bestReason
+    return bestAlly, bestHp, bestReason, bestPreferredEnemy
 end
 
-local function LogSaveTarget(ctx, ally, hpPct, reason)
+local function LogSaveTarget(ctx, ally, hpPct, reason, preferredEnemy)
     if ctx.now < State.saveQuietUntil then
         return
     end
@@ -2843,18 +3258,19 @@ local function LogSaveTarget(ctx, ally, hpPct, reason)
     State.lastDebugLogTime = ctx.now
 
     LogDebug(string.format(
-        "save target: %s reason=%s hp=%.0f%% snowballRange=%.0f",
+        "save target: %s reason=%s hp=%.0f%% snowballRange=%.0f%s",
         GetHeroDisplayName(ally),
         reason or "unknown",
         hpPct * 100,
-        ctx.snowballRange or DEFAULT_SNOWBALL_RANGE
+        ctx.snowballRange or DEFAULT_SNOWBALL_RANGE,
+        preferredEnemy and (" preferredEnemy=" .. GetUnitDisplayName(preferredEnemy)) or ""
     ))
 end
 
-local function TryExecuteSave(ctx, ally, reason)
+local function TryExecuteSave(ctx, ally, reason, preferredEnemy)
     for _, handler in ipairs(SaveHandlers) do
-        if handler.CanSave(ctx, ally, reason) then
-            local ok = handler.TrySave(ctx, ally, reason)
+        if handler.CanSave(ctx, ally, reason, preferredEnemy) then
+            local ok = handler.TrySave(ctx, ally, reason, preferredEnemy)
             if ok then
                 return true
             end
@@ -2877,14 +3293,14 @@ local function TryAutoSave(ctx)
     end
 
     local allies = ScanAllies(ctx)
-    local ally, hpPct, reason = PickSaveTarget(ctx, allies)
+    local ally, hpPct, reason, preferredEnemy = PickSaveTarget(ctx, allies)
     if not ally or not reason then
         return
     end
 
-    LogSaveTarget(ctx, ally, hpPct, reason)
+    LogSaveTarget(ctx, ally, hpPct, reason, preferredEnemy)
 
-    if TryExecuteSave(ctx, ally, reason) then
+    if TryExecuteSave(ctx, ally, reason, preferredEnemy) then
         return
     end
 end
@@ -2898,6 +3314,7 @@ function Script.OnScriptsLoaded()
     LoadVersusPrefs()
     SyncColors()
     fontPanel = ResolvePanelHeaderFont(PANEL_TITLE_TEXT) or 0
+    State.lastAllySyncTime = -100
     State.lastVersusRosterKey = ""
     State.lastVersusSyncTime = -100
     State.panelHeaderFaFont = nil
@@ -2906,7 +3323,9 @@ function Script.OnScriptsLoaded()
     if Engine.IsInGame() then
         local me = Heroes.GetLocal()
         if IsLocalTusk(me) then
+            local now = GlobalVars.GetCurTime() or 0
             RefreshVersusMultiSelect(me, true)
+            SyncAllyTargets(me, now)
         end
     end
 
@@ -2919,8 +3338,15 @@ function Script.OnGameEnd()
     ClearPendingSnowball()
     ClearActiveSnowballSave()
     State.saveQuietUntil = -100
+    State.lastAllySyncTime = -100
     State.lastVersusRosterKey = ""
     State.lastVersusSyncTime = -100
+    State.wasMousePressed = false
+    PanelDrag.IsDragging = false
+    State.matchAllyNames = {}
+    State.matchAllySet = {}
+    State.cachedAllyEntities = {}
+    State.cachedAllyUnitNames = {}
 end
 
 function Script.OnThemeUpdate()

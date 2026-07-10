@@ -2,7 +2,7 @@
     Tusk Kick To Team
     Kicks enemies toward selected allied heroes with Walrus Kick vector orders.
     Auto-plans kick direction; Bind can Blink first, then Snowball the kicked enemy.
-    Script by Euphoria
+    Script by 花曇り hanagumori
 --]]
 
 local Script = {}
@@ -70,6 +70,30 @@ local BLINK_ITEMS = {
     "item_arcane_blink",
 }
 
+local LANG_CACHE_INTERVAL = 1.0
+
+local PANEL_HEADER_FONT_CANDIDATES = {
+    "Segoe UI",
+    "Tahoma",
+    "Arial",
+}
+local PANEL_HEADER_HEIGHT = 28
+local PANEL_HEADER_PAD_X = 8
+local PANEL_HEADER_TEXT_SIZE = 14
+local PANEL_HEADER_ICON_SIZE = 14
+local PANEL_HEADER_ICON_GAP = 6
+local PANEL_HEADER_RADIUS = 5
+local PANEL_TITLE_SAMPLE = "Kick To Team"
+local PANEL_BLUR_BASE_STRENGTH = 2.5
+
+local Icons = {
+    panel = "\u{f108}",
+    panelHeader = "\u{e1ac}",
+    gear = "\u{f013}",
+    bind = "\u{e1c1}",
+    bug = "\u{f188}",
+}
+
 --#endregion
 
 --#region State
@@ -77,7 +101,11 @@ local BLINK_ITEMS = {
 local State = {
     lastCastTime = 0,
     lastAllySyncTime = -100,
-    lastAllyRosterKey = "",
+    wasMousePressed = false,
+    panelHeaderFaFont = nil,
+    panelHeaderFaAvailable = nil,
+    imgCache = nil,
+    spellIcon = nil,
     bestPlan = nil,
     pendingOrderUntil = 0,
     postOrderLockUntil = 0,
@@ -101,9 +129,36 @@ local State = {
 local UI = {}
 local LoggerInstance = Logger and Logger("TuskKickToTeam") or nil
 
+local PanelConfig = {
+    X = 200,
+    Y = 200,
+}
+
+local PanelDrag = {
+    IsDragging = false,
+    OffsetX = 0,
+    OffsetY = 0,
+}
+
+local Colors = {
+    HeaderBg = Color(18, 18, 22, 255),
+    TextHeader = Color(245, 247, 250, 255),
+    BorderEnabled = Color(191, 140, 255, 255),
+    CellBg = Color(12, 12, 16, 255),
+}
+
+local LangState = {
+    language = "en",
+    nextCheck = 0,
+}
+
+local fontPanel = 0
+
 --#endregion
 
 --#region Helpers
+
+(function()
 
 local function SafeCall(fn, ...)
     if type(fn) ~= "function" then
@@ -195,58 +250,525 @@ local function SetAllyKickEnabled(cleanName, enabled)
     SafeCall(Config and Config.WriteInt, CONFIG_SECTION, AllyConfigKey(cleanName), enabled and 1 or 0)
 end
 
-local function BuildAllyMultiSelectItems()
-    local items = {}
-
-    for _, cleanName in ipairs(State.cachedAllyNames) do
-        items[#items + 1] = {
-            cleanName,
-            HeroIconPath(State.cachedAllyUnitNames[cleanName]),
-            IsAllyKickEnabled(cleanName),
-        }
+local function GetUILanguage()
+    local now = os.clock()
+    if now < LangState.nextCheck then
+        return LangState.language
     end
+    LangState.nextCheck = now + LANG_CACHE_INTERVAL
 
-    return items
-end
-
-local function ApplyAllyPrefsToWidget(widget)
-    if not widget or not widget.Set or not widget.List then
-        return
-    end
-
-    local listed = SafeCall(widget.List, widget)
-    if not listed then
-        return
-    end
-
-    for _, cleanName in ipairs(listed) do
-        local enabled = State.allyEnabled[cleanName]
-        if enabled ~= nil then
-            SafeCall(widget.Set, widget, cleanName, enabled == true)
+    local langWidget = Menu and Menu.Find and Menu.Find("SettingsHidden", "", "", "", "Main", "Language")
+    if langWidget and langWidget.Get then
+        local idx = SafeCall(langWidget.Get, langWidget)
+        if type(idx) == "number" and idx == 1 then
+            LangState.language = "ru"
+            return LangState.language
         end
     end
+
+    LangState.language = "en"
+    return LangState.language
 end
 
-local function SyncAllyPrefsFromWidget()
-    local widget = UI.Allies
+local function L(en, ru)
+    if GetUILanguage() == "ru" and ru then
+        return ru
+    end
+    return en
+end
+
+local function WithTooltip(widget, text)
+    if widget and widget.ToolTip then
+        SafeCall(widget.ToolTip, widget, text)
+    end
+end
+
+local function MenuIcon(widget, icon)
+    if widget and widget.Icon then
+        SafeCall(widget.Icon, widget, icon)
+    end
+end
+
+local function IsValidFontHandle(handle)
+    if type(handle) == "number" then
+        return handle ~= 0
+    end
+    return type(handle) == "userdata"
+end
+
+local function IsValidTextSize(size)
+    return (type(size) == "table" or type(size) == "userdata")
+        and type(size.x) == "number"
+        and type(size.y) == "number"
+end
+
+local function GetPanelTitleText()
+    return L("Kick To Team", "Пинок в команду")
+end
+
+local function CanMeasureWithFont(handle, sampleText, fontSize)
+    if not IsValidFontHandle(handle) or not Render or not Render.TextSize then
+        return false
+    end
+    return IsValidTextSize(SafeCall(
+        Render.TextSize,
+        handle,
+        fontSize or PANEL_HEADER_TEXT_SIZE,
+        sampleText or PANEL_TITLE_SAMPLE))
+end
+
+local function GetLibRender()
+    ---@diagnostic disable-next-line: undefined-global
+    return LIB_RENDER
+end
+
+local function ResolvePanelHeaderFaFont()
+    if State.panelHeaderFaFont ~= nil then
+        if State.panelHeaderFaFont == 0 then
+            return nil
+        end
+        return State.panelHeaderFaFont
+    end
+
+    State.panelHeaderFaFont = 0
+    local libRender = GetLibRender()
+    if type(libRender) ~= "table" then
+        return nil
+    end
+
+    local faFont = libRender.default_font_awesome
+    if IsValidFontHandle(faFont) then
+        State.panelHeaderFaFont = faFont
+        return faFont
+    end
+
+    return nil
+end
+
+local function HasLibRenderText()
+    local libRender = GetLibRender()
+    return type(libRender) == "table" and type(libRender.text) == "function"
+end
+
+local function CanUsePanelHeaderFaIcon()
+    local font = ResolvePanelHeaderFaFont()
+    if not IsValidFontHandle(font) or not Render or not Render.TextSize then
+        return false
+    end
+
+    if not IsValidTextSize(SafeCall(Render.TextSize, font, PANEL_HEADER_ICON_SIZE, Icons.panelHeader)) then
+        return false
+    end
+
+    return HasLibRenderText()
+end
+
+local function IsPanelHeaderFaIconAvailable()
+    if State.panelHeaderFaAvailable ~= nil then
+        return State.panelHeaderFaAvailable
+    end
+
+    State.panelHeaderFaAvailable = CanUsePanelHeaderFaIcon()
+    return State.panelHeaderFaAvailable
+end
+
+local function GetPanelHeaderIconFontSize(scale)
+    return math.floor(PANEL_HEADER_ICON_SIZE * scale + 0.5)
+end
+
+local function MeasurePanelHeaderFaIconSize(scale)
+    local fontSize = GetPanelHeaderIconFontSize(scale)
+    local font = ResolvePanelHeaderFaFont()
+    local glyph = Icons.panelHeader
+
+    local libRender = GetLibRender()
+    if type(libRender) == "table" and type(libRender.text_size) == "function" then
+        local size = SafeCall(libRender.text_size, font, fontSize, glyph)
+        if IsValidTextSize(size) then
+            return size
+        end
+    end
+
+    if CanMeasureWithFont(font, glyph) then
+        local size = SafeCall(Render.TextSize, font, fontSize, glyph)
+        if IsValidTextSize(size) then
+            return size
+        end
+    end
+
+    return Vec2(fontSize, fontSize)
+end
+
+local function TryDrawPanelHeaderFaIcon(font, size, glyph, pos, color)
+    if not IsValidFontHandle(font) then
+        return false, nil
+    end
+
+    local x, y
+    if type(pos) == "table" or type(pos) == "userdata" then
+        x, y = pos.x, pos.y
+    end
+    if type(x) ~= "number" or type(y) ~= "number" then
+        return false, nil
+    end
+
+    local drawColor = Color(color.r, color.g, color.b, color.a or 255)
+
+    local libRender = GetLibRender()
+    if type(libRender) == "table" and type(libRender.text) == "function" then
+        if pcall(libRender.text, font, size, glyph, drawColor, x, y) then
+            return true, "lib_render_xy"
+        end
+    end
+
+    if Render and Render.Text and pcall(Render.Text, font, size, glyph, Vec2(x, y), drawColor) then
+        return true, "render_text"
+    end
+
+    return false, nil
+end
+
+local function DrawPanelHeaderIcon(textX, titleContentY, titleContentH, titleIconSize, titleIconGap, scale, iconColor)
+    local font = ResolvePanelHeaderFaFont()
+    local fontSize = GetPanelHeaderIconFontSize(scale)
+    local iconSize = titleIconSize or MeasurePanelHeaderFaIconSize(scale)
+    local iconH = iconSize.y or fontSize
+    local iconY = titleContentY + math.floor((titleContentH - iconH) * 0.5 + 0.5)
+    local drew = TryDrawPanelHeaderFaIcon(
+        font,
+        fontSize,
+        Icons.panelHeader,
+        Vec2(textX, iconY),
+        iconColor)
+    if drew then
+        return textX + (iconSize.x or fontSize) + titleIconGap
+    end
+
+    return textX
+end
+
+local function TryLibRenderDefaultFont(sampleText)
+    local libRender = GetLibRender()
+    if type(libRender) ~= "table" then
+        return nil
+    end
+
+    local defaultFont = libRender.default_font
+    if IsValidFontHandle(defaultFont)
+        and CanMeasureWithFont(defaultFont, sampleText, PANEL_HEADER_TEXT_SIZE) then
+        return defaultFont
+    end
+
+    return nil
+end
+
+local function TryDefaultFont(fontName)
+    local libRender = GetLibRender()
+    if type(fontName) ~= "string" or fontName == "" or type(libRender) ~= "table" then
+        return nil
+    end
+
+    local defaultFont = libRender.default_font
+    if type(defaultFont) == "function" then
+        local handle = SafeCall(defaultFont, fontName)
+        if IsValidFontHandle(handle) then
+            return handle
+        end
+
+        handle = SafeCall(defaultFont, libRender, fontName)
+        if IsValidFontHandle(handle) then
+            return handle
+        end
+    elseif type(defaultFont) == "table" then
+        local entry = defaultFont[fontName]
+        if IsValidFontHandle(entry) then
+            return entry
+        end
+
+        if type(entry) == "function" then
+            local handle = SafeCall(entry)
+            if IsValidFontHandle(handle) then
+                return handle
+            end
+
+            handle = SafeCall(entry, fontName)
+            if IsValidFontHandle(handle) then
+                return handle
+            end
+
+            handle = SafeCall(entry, libRender, fontName)
+            if IsValidFontHandle(handle) then
+                return handle
+            end
+        end
+    end
+
+    return nil
+end
+
+local PANEL_HEADER_FONT_WEIGHTS = {
+    Enum and Enum.FontWeight and Enum.FontWeight.SEMIBOLD or 600,
+    Enum and Enum.FontWeight and Enum.FontWeight.MEDIUM or 500,
+    400,
+}
+
+local function TryLoadRenderFont(fontName, sampleText, weights)
+    if type(fontName) ~= "string" or fontName == "" or not Render or not Render.LoadFont then
+        return nil
+    end
+
+    local fontFlag = Enum and Enum.FontCreate and Enum.FontCreate.FONTFLAG_ANTIALIAS or 0
+    local weightList = weights or PANEL_HEADER_FONT_WEIGHTS
+    for w = 1, #weightList do
+        local handle = SafeCall(Render.LoadFont, fontName, fontFlag, weightList[w])
+        if CanMeasureWithFont(handle, sampleText, PANEL_HEADER_TEXT_SIZE) then
+            return handle
+        end
+    end
+
+    return nil
+end
+
+local function ResolvePanelHeaderFont(sampleText)
+    local preloaded = TryLibRenderDefaultFont(sampleText)
+    if preloaded then
+        return preloaded
+    end
+
+    for i = 1, #PANEL_HEADER_FONT_CANDIDATES do
+        local fontName = PANEL_HEADER_FONT_CANDIDATES[i]
+        local handle = TryDefaultFont(fontName)
+        if CanMeasureWithFont(handle, sampleText, PANEL_HEADER_TEXT_SIZE) then
+            return handle
+        end
+
+        handle = TryLoadRenderFont(fontName, sampleText)
+        if handle then
+            return handle
+        end
+    end
+    return 0
+end
+
+fontPanel = ResolvePanelHeaderFont(PANEL_TITLE_SAMPLE) or 0
+
+local function GetMenuBlurStrength()
+    local widget = Menu and Menu.Find and Menu.Find("SettingsHidden", "", "", "", "Visual", "Menu Blur Factor")
     if not widget or not widget.Get then
+        return PANEL_BLUR_BASE_STRENGTH
+    end
+
+    local factor = SafeCall(widget.Get, widget)
+    if type(factor) ~= "number" or factor <= 0 then
+        return nil
+    end
+
+    if factor > 1 then
+        factor = factor / 100
+    end
+
+    return math.max(0.1, factor * PANEL_BLUR_BASE_STRENGTH)
+end
+
+local function IsPanelHeaderTransparent()
+    local alpha = Colors.HeaderBg.a
+    if alpha == nil then
+        alpha = 255
+    end
+    return alpha < 255
+end
+
+local function DrawPanelBlur(layout, scale)
+    if not IsPanelHeaderTransparent() or not Render or not Render.Blur then
         return
     end
 
-    local listed = widget.List and SafeCall(widget.List, widget)
-    if not listed then
+    local strength = GetMenuBlurStrength()
+    if not strength then
         return
     end
 
-    for _, cleanName in ipairs(listed) do
-        local value = SafeCall(widget.Get, widget, cleanName)
-        if value ~= nil then
-            SetAllyKickEnabled(cleanName, value == true)
+    SafeCall(
+        Render.Blur,
+        Vec2(layout.x, layout.y),
+        Vec2(layout.x + layout.width, layout.y + layout.titleH),
+        strength,
+        1.0,
+        PANEL_HEADER_RADIUS * scale,
+        Enum.DrawFlags.None)
+end
+
+local function ReadThemeMember(value, key)
+    local ok, result = pcall(function()
+        return value[key]
+    end)
+    if ok then
+        return result
+    end
+    return nil
+end
+
+local function ClampThemeByte(value, fallback)
+    if type(value) ~= "number" then
+        return fallback or 0
+    end
+    if value >= 0 and value <= 1 then
+        value = value * 255
+    end
+    if value < 0 then
+        return 0
+    end
+    if value > 255 then
+        return 255
+    end
+    return math.floor(value + 0.5)
+end
+
+local function NormalizeThemeColor(c)
+    if not c then
+        return nil
+    end
+
+    local valueType = type(c)
+    if valueType ~= "table" and valueType ~= "userdata" then
+        return nil
+    end
+
+    local function channel(keys, fallback)
+        for _, key in ipairs(keys) do
+            local raw = ReadThemeMember(c, key)
+            if type(raw) == "number" then
+                return raw
+            end
+            if type(raw) == "function" then
+                local ok, result = pcall(raw, c)
+                if ok and type(result) == "number" then
+                    return result
+                end
+            end
         end
+        return fallback
+    end
+
+    local r = channel({"r", "R", "red", "Red", "GetR", "GetRed", 1}, nil)
+    local g = channel({"g", "G", "green", "Green", "GetG", "GetGreen", 2}, nil)
+    local b = channel({"b", "B", "blue", "Blue", "GetB", "GetBlue", 3}, nil)
+    local a = channel({"a", "A", "alpha", "Alpha", "GetA", "GetAlpha", 4}, 255)
+
+    if type(r) ~= "number" or type(g) ~= "number" or type(b) ~= "number" then
+        return nil
+    end
+
+    return Color(
+        ClampThemeByte(r, 0),
+        ClampThemeByte(g, 0),
+        ClampThemeByte(b, 0),
+        ClampThemeByte(a, 255))
+end
+
+local function TryGetThemeColor(name)
+    if not Menu or not Menu.Style or not name then
+        return nil
+    end
+
+    local col = SafeCall(Menu.Style, name)
+    local normalized = NormalizeThemeColor(col)
+    if normalized then
+        return normalized
+    end
+
+    local tbl = SafeCall(Menu.Style)
+    if type(tbl) == "table" then
+        return NormalizeThemeColor(tbl[name])
+    end
+
+    return nil
+end
+
+local function TryGetThemeColorAny(names)
+    for _, name in ipairs(names) do
+        local color = TryGetThemeColor(name)
+        if color then
+            return color
+        end
+    end
+    return nil
+end
+
+local function PickAccentBorderColor()
+    local enabledSwitchBg = TryGetThemeColor("enabled_switch_background")
+    local comboItemActive = TryGetThemeColor("combo_item_active")
+    local primary = TryGetThemeColor("primary")
+    local indicationActive = TryGetThemeColor("indication_active")
+
+    local borderSource = enabledSwitchBg or comboItemActive or primary or indicationActive
+    if not borderSource then
+        return nil
+    end
+
+    local candidates = {borderSource}
+    if comboItemActive and comboItemActive ~= borderSource then
+        candidates[#candidates + 1] = comboItemActive
+    end
+    if primary and primary ~= borderSource then
+        candidates[#candidates + 1] = primary
+    end
+    if indicationActive and indicationActive ~= borderSource then
+        candidates[#candidates + 1] = indicationActive
+    end
+
+    local best = borderSource
+    local bestScore = (best.r or 0) + (best.g or 0) + (best.b or 0)
+    local bestAlpha = best.a
+    if bestAlpha == nil then
+        bestAlpha = 255
+    end
+
+    for i = 2, #candidates do
+        local candidate = candidates[i]
+        local alpha = candidate.a
+        if alpha == nil then
+            alpha = 255
+        end
+        if alpha > 0 then
+            local score = (candidate.r or 0) + (candidate.g or 0) + (candidate.b or 0)
+            if score > bestScore then
+                best = candidate
+                bestScore = score
+                bestAlpha = alpha
+            end
+        end
+    end
+
+    return Color(best.r, best.g, best.b, bestAlpha)
+end
+
+local function SyncColors()
+    if not Menu or not Menu.Style then
+        return
+    end
+
+    local headerBg = TryGetThemeColorAny({
+        "additional_background",
+        "popup_background",
+        "background",
+    })
+    if headerBg then
+        Colors.HeaderBg = headerBg
+    end
+
+    local textHeader = TryGetThemeColor("primary_widgets_text")
+    if textHeader then
+        Colors.TextHeader = textHeader
+    end
+
+    local borderSource = PickAccentBorderColor()
+    if borderSource then
+        Colors.BorderEnabled = borderSource
     end
 end
 
---#endregion
+SyncColors()
 
 local function ResolveEnumValue(container, candidates)
     if not container then
@@ -305,32 +827,48 @@ local function InitializeUI()
         group = Menu.Create("General", "Tusk", "Walrus Kick", "Settings", "Kick To Team")
     end
 
+    local screenSize = SafeCall(Render.ScreenSize) or Vec2(3840, 2160)
+    local maxX = math.max(800, math.floor(screenSize.x))
+    local maxY = math.max(600, math.floor(screenSize.y))
+
     local ui = {}
 
     ui.Enabled = group:Switch("Kick To Team", false)
     ui.Enabled:Image(SPELL_ICON)
 
-    ui.Allies = group:MultiSelect("Kick Target Allies", BuildAllyMultiSelectItems(), false)
-    ui.Allies:Image(SPELL_ICON)
-    if ui.Allies.SetCallback then
-        ui.Allies:SetCallback(SyncAllyPrefsFromWidget, false)
-    end
-
-    local gear = ui.Enabled:Gear("Settings")
+    local gear = ui.Enabled:Gear(L("Settings", "Настройки"), Icons.gear)
     ui.Mode = gear:Combo("Mode", MODE_ITEMS, MODE_AUTO)
     ui.Mode:Image(SPELL_ICON)
-    ui.CastKey = gear:Bind("Kick Bind", Enum.ButtonCode.KEY_NONE)
-    ui.CastKey:Image(SPELL_ICON)
-    ui.Debug = gear:Switch("Debug Log", false)
-    ui.Debug:Image(SPELL_ICON)
+    ui.CastKey = gear:Bind("Kick Bind", Enum.ButtonCode.KEY_NONE, Icons.bind)
+    ui.DrawPanel = gear:Switch(L("Draw Ally Panel", "Показывать панель союзников"), true, Icons.panel)
+    WithTooltip(ui.DrawPanel, L(
+        "HUD panel to choose allies and drag the header to reposition.",
+        "HUD-панель выбора союзников. Перетаскивайте заголовок для перемещения."))
+    ui.Debug = gear:Switch(L("Debug Log", "Debug логи"), false)
+    MenuIcon(ui.Debug, Icons.bug)
+    ui.PanelX = gear:Slider("HUD X", 0, maxX, math.min(200, maxX))
+    ui.PanelY = gear:Slider("HUD Y", 0, maxY, math.min(200, maxY))
+    SafeCall(ui.PanelX.Visible, ui.PanelX, false)
+    SafeCall(ui.PanelY.Visible, ui.PanelY, false)
+
+    local gearWidgets = {
+        ui.Mode,
+        ui.CastKey,
+        ui.DrawPanel,
+        ui.Debug,
+    }
 
     local function UpdateControls()
         local enabled = ui.Enabled:Get()
         local isBindMode = (ui.Mode:Get() or MODE_AUTO) == MODE_BIND
-        ui.Allies:Disabled(not enabled)
-        ui.Mode:Disabled(not enabled)
-        ui.CastKey:Disabled(not enabled or not isBindMode)
-        ui.Debug:Disabled(not enabled)
+        for _, widget in ipairs(gearWidgets) do
+            if widget and widget.Disabled then
+                widget:Disabled(not enabled)
+            end
+        end
+        if ui.CastKey and ui.CastKey.Disabled then
+            ui.CastKey:Disabled(not enabled or not isBindMode)
+        end
     end
 
     ui.Enabled:SetCallback(UpdateControls, true)
@@ -340,6 +878,213 @@ local function InitializeUI()
 end
 
 UI = InitializeUI()
+
+local function SavePanelPosition()
+    local x = math.floor(PanelConfig.X + 0.5)
+    local y = math.floor(PanelConfig.Y + 0.5)
+    SafeCall(Config.WriteInt, CONFIG_SECTION, "panel_x", x)
+    SafeCall(Config.WriteInt, CONFIG_SECTION, "panel_y", y)
+
+    if UI.PanelX and UI.PanelY then
+        SafeCall(UI.PanelX.Set, UI.PanelX, x)
+        SafeCall(UI.PanelY.Set, UI.PanelY, y)
+    end
+end
+
+local function LoadPanelPosition()
+    local needsSave = false
+    local x = SafeCall(Config.ReadInt, CONFIG_SECTION, "panel_x", -1)
+    local y = SafeCall(Config.ReadInt, CONFIG_SECTION, "panel_y", -1)
+
+    if type(x) ~= "number" or x < 0 then
+        x = (UI.PanelX and UI.PanelX.Get and UI.PanelX:Get()) or PanelConfig.X
+        needsSave = true
+    end
+    if type(y) ~= "number" or y < 0 then
+        y = (UI.PanelY and UI.PanelY.Get and UI.PanelY:Get()) or PanelConfig.Y
+        needsSave = true
+    end
+
+    PanelConfig.X = x
+    PanelConfig.Y = y
+
+    if UI.PanelX and UI.PanelY then
+        SafeCall(UI.PanelX.Set, UI.PanelX, math.floor(x + 0.5))
+        SafeCall(UI.PanelY.Set, UI.PanelY, math.floor(y + 0.5))
+    end
+
+    if needsSave then
+        SavePanelPosition()
+    end
+end
+
+LoadPanelPosition()
+
+local function GetMousePos()
+    if Input and Input.GetCursorPos then
+        local ok, x, y = pcall(Input.GetCursorPos)
+        if ok then
+            if type(x) == "number" and type(y) == "number" then
+                return x, y
+            end
+            if (type(x) == "table" or type(x) == "userdata") and x.x and x.y then
+                return x.x, x.y
+            end
+        end
+
+        ok, x, y = pcall(function()
+            return Input:GetCursorPos()
+        end)
+        if ok and type(x) == "number" and type(y) == "number" then
+            return x, y
+        end
+    end
+
+    if Render and Render.GetCursorPos then
+        local ok, posOrX, y = pcall(Render.GetCursorPos)
+        if ok then
+            if type(posOrX) == "number" and type(y) == "number" then
+                return posOrX, y
+            end
+            if (type(posOrX) == "table" or type(posOrX) == "userdata") and posOrX.x and posOrX.y then
+                return posOrX.x, posOrX.y
+            end
+        end
+    end
+
+    return nil, nil
+end
+
+local function IsLmbDown()
+    return SafeCall(Input.IsKeyDown, Enum.ButtonCode.KEY_MOUSE1) == true
+end
+
+local function GetHeroIcon(heroName)
+    if not heroName or heroName == "" then
+        return nil
+    end
+    if State.imgCache == nil then
+        State.imgCache = {}
+    end
+    if State.imgCache[heroName] then
+        return State.imgCache[heroName]
+    end
+    local handle = SafeCall(Render.LoadImage, HeroIconPath(heroName))
+    if handle then
+        State.imgCache[heroName] = handle
+    end
+    return handle
+end
+
+local function EnsureSpellIcon()
+    if State.spellIcon == nil and Render and Render.LoadImage then
+        State.spellIcon = SafeCall(Render.LoadImage, SPELL_ICON)
+    end
+end
+
+local function GetPanelFont()
+    local titleText = GetPanelTitleText()
+    if not CanMeasureWithFont(fontPanel, titleText) then
+        fontPanel = ResolvePanelHeaderFont(titleText) or 0
+    end
+    if CanMeasureWithFont(fontPanel, titleText) then
+        return fontPanel
+    end
+    return 0
+end
+
+local function MeasurePanelTextSize(fontSize, text)
+    local font = GetPanelFont()
+    local fallback = Vec2(text:len() * fontSize * 0.55, fontSize)
+    if font == 0 or not Render or not Render.TextSize then
+        return fallback
+    end
+    local size = SafeCall(Render.TextSize, font, fontSize, text)
+    if IsValidTextSize(size) then
+        return size
+    end
+    return fallback
+end
+
+local function DrawPanelText(size, text, pos, color)
+    local font = GetPanelFont()
+    if not IsValidFontHandle(font) then
+        fontPanel = ResolvePanelHeaderFont(text) or 0
+        font = fontPanel
+    end
+    if not IsValidFontHandle(font) or not Render or not Render.Text then
+        return false
+    end
+
+    local shadow = Color(0, 0, 0, 140)
+    pcall(Render.Text, font, size, text, Vec2(pos.x + 1, pos.y + 1), shadow)
+    if pcall(Render.Text, font, size, text, pos, color) then
+        return true
+    end
+
+    fontPanel = ResolvePanelHeaderFont(text) or 0
+    if IsValidFontHandle(fontPanel)
+        and pcall(Render.Text, fontPanel, size, text, pos, color) then
+        return true
+    end
+    return false
+end
+
+local function MeasurePanelSpellIconSize(scale, titleSizeY)
+    local textH = titleSizeY or math.floor(PANEL_HEADER_TEXT_SIZE * scale + 0.5)
+    local minIcon = math.floor(PANEL_HEADER_ICON_SIZE * scale + 0.5)
+    local maxIcon = math.floor((PANEL_HEADER_HEIGHT - 6) * scale + 0.5)
+    local size = math.min(maxIcon, math.max(minIcon, textH))
+    return Vec2(size, size)
+end
+
+local function GetPanelLayout(scale, numAllies, screenSize)
+    local cellW = 44 * scale
+    local cellH = 26 * scale
+    local cellSpacing = 6 * scale
+    local titleH = PANEL_HEADER_HEIGHT * scale
+    local padX = PANEL_HEADER_PAD_X * scale
+    local padY = 6 * scale
+    local titleText = GetPanelTitleText()
+    local titleFontSize = PANEL_HEADER_TEXT_SIZE * scale
+    EnsureSpellIcon()
+    local hasTitleIcon = State.spellIcon ~= nil
+    local titleSize = MeasurePanelTextSize(titleFontSize, titleText) or Vec2(titleText:len() * titleFontSize * 0.55, titleFontSize)
+    local titleSizeX = titleSize.x or 0
+    local titleSizeY = titleSize.y or titleFontSize
+    local titleIconSize = hasTitleIcon and MeasurePanelSpellIconSize(scale, titleSizeY) or Vec2(0, titleSizeY)
+    local titleIconW = titleIconSize.x or 0
+    local titleIconGap = hasTitleIcon and (PANEL_HEADER_ICON_GAP * scale) or 0
+    local titleContentW = titleIconW + titleIconGap + titleSizeX
+    local cellsTotalW = numAllies * cellW + math.max(0, numAllies - 1) * cellSpacing
+    local headerW = padX + titleContentW + padX
+    local heroesW = padX + cellsTotalW + padX
+    local width = math.max(headerW, heroesW, 110 * scale)
+    local height = titleH + padY + cellH + padY
+
+    local x = math.max(0, math.min(screenSize.x - width, PanelConfig.X))
+    local y = math.max(0, math.min(screenSize.y - height, PanelConfig.Y))
+
+    return {
+        cellW = cellW,
+        cellH = cellH,
+        cellSpacing = cellSpacing,
+        titleH = titleH,
+        padX = padX,
+        titleText = titleText,
+        titleIconSize = titleIconSize,
+        titleIconGap = titleIconGap,
+        titleSize = titleSize,
+        titleFontSize = titleFontSize,
+        hasTitleIcon = hasTitleIcon,
+        width = width,
+        height = height,
+        x = x,
+        y = y,
+        rowY = y + titleH + padY,
+        cellsStartX = x + padX,
+    }
+end
 
 local function TryIndex(obj, key)
     if not obj or not key then
@@ -457,30 +1202,13 @@ local function IsValidHeroUnit(unit)
     return true
 end
 
-local function GetEntityIndexSafe(unit)
-    return SafeCall(Entity and Entity.GetIndex, unit)
-end
-
-local function DescribeUnit(unit)
-    if not unit then
-        return "nil"
-    end
-
-    local unitName = SafeCall(NPC and NPC.GetUnitName, unit) or "unit"
-    return string.format("%s#index=%s", unitName, tostring(GetEntityIndexSafe(unit)))
-end
-
-local function BuildAllyRosterKey(names)
-    return table.concat(names, ",")
-end
-
-local function RefreshAllySelection(hero, now, saveToConfig)
-    if not hero then
-        return false
+local function SyncAllyTargets(myHero, now)
+    if not myHero then
+        return
     end
 
     if now - State.lastAllySyncTime < ALLY_SYNC_INTERVAL then
-        return false
+        return
     end
     State.lastAllySyncTime = now
 
@@ -491,7 +1219,7 @@ local function RefreshAllySelection(hero, now, saveToConfig)
 
     for i = 1, #allHeroes do
         local other = allHeroes[i]
-        if other ~= hero and IsValidHeroUnit(other) and Entity.IsSameTeam(other, hero) then
+        if other ~= myHero and IsValidHeroUnit(other) and Entity.IsSameTeam(other, myHero) then
             local unitName = NPC.GetUnitName(other)
             local cleanName = CleanHeroName(unitName)
             if cleanName ~= "" then
@@ -506,39 +1234,28 @@ local function RefreshAllySelection(hero, now, saveToConfig)
     end
 
     table.sort(names)
-
-    local rosterKey = BuildAllyRosterKey(names)
     State.cachedAllyNames = names
     State.cachedAllyEntities = entities
     State.cachedAllyUnitNames = unitNames
+end
 
-    if rosterKey == State.lastAllyRosterKey then
-        return false
+local function GetEntityIndexSafe(unit)
+    return SafeCall(Entity and Entity.GetIndex, unit)
+end
+
+local function DescribeUnit(unit)
+    if not unit then
+        return "nil"
     end
 
-    State.lastAllyRosterKey = rosterKey
-    SyncAllyPrefsFromWidget()
-
-    if UI.Allies and UI.Allies.Update then
-        SafeCall(UI.Allies.Update, UI.Allies, BuildAllyMultiSelectItems(), false, saveToConfig == true)
-        ApplyAllyPrefsToWidget(UI.Allies)
-    end
-
-    return true
+    local unitName = SafeCall(NPC and NPC.GetUnitName, unit) or "unit"
+    return string.format("%s#index=%s", unitName, tostring(GetEntityIndexSafe(unit)))
 end
 
 local function IsAllySelectedForKick(ally)
     local cleanName = CleanHeroName(NPC.GetUnitName(ally))
     if cleanName == "" then
         return false
-    end
-
-    if UI.Allies and UI.Allies.Get then
-        local value = SafeCall(UI.Allies.Get, UI.Allies, cleanName)
-        if value ~= nil then
-            SetAllyKickEnabled(cleanName, value == true)
-            return value == true
-        end
     end
 
     return IsAllyKickEnabled(cleanName)
@@ -2565,16 +3282,213 @@ end
 
 --#endregion
 
+--#region Panel
+
+function Script.OnDraw()
+    if not Engine.IsInGame() or not UI.Enabled:Get() or not UI.DrawPanel:Get() then
+        return
+    end
+    SyncColors()
+    if Menu and Menu.VisualsIsEnabled and not SafeCall(Menu.VisualsIsEnabled) then
+        return
+    end
+
+    local myHero = Heroes.GetLocal()
+    if not IsTusk(myHero) then
+        return
+    end
+
+    local numAllies = #State.cachedAllyNames
+    if numAllies == 0 then
+        return
+    end
+
+    local scale = (SafeCall(Menu.Scale) or 100) / 100
+    local screenSize = SafeCall(Render.ScreenSize)
+    if not screenSize or screenSize.x <= 1 or screenSize.y <= 1 then
+        return
+    end
+
+    local layout = GetPanelLayout(scale, numAllies, screenSize)
+    local mx, my = GetMousePos()
+    local isDown = IsLmbDown()
+    local isClicked = isDown and not State.wasMousePressed
+    local isCursorValid = mx and my
+
+    local isOverHeader = isCursorValid
+        and mx >= layout.x and mx <= layout.x + layout.width
+        and my >= layout.y and my <= layout.y + layout.titleH
+
+    if isClicked and isOverHeader then
+        PanelDrag.IsDragging = true
+        PanelDrag.OffsetX = mx - layout.x
+        PanelDrag.OffsetY = my - layout.y
+    elseif not isDown then
+        if PanelDrag.IsDragging then
+            SavePanelPosition()
+        end
+        PanelDrag.IsDragging = false
+    end
+
+    if PanelDrag.IsDragging and mx and my then
+        PanelConfig.X = math.max(0, math.min(screenSize.x - layout.width, mx - PanelDrag.OffsetX))
+        PanelConfig.Y = math.max(0, math.min(screenSize.y - layout.height, my - PanelDrag.OffsetY))
+        layout = GetPanelLayout(scale, numAllies, screenSize)
+    end
+
+    local clickTriggered = isClicked
+    State.wasMousePressed = isDown
+
+    local titleText = layout.titleText or GetPanelTitleText()
+    local titleFontSize = layout.titleFontSize or (PANEL_HEADER_TEXT_SIZE * scale)
+    local titleSize = layout.titleSize
+        or MeasurePanelTextSize(titleFontSize, titleText)
+        or Vec2(titleText:len() * titleFontSize * 0.55, titleFontSize)
+    local titleSizeY = titleSize.y or titleFontSize
+    local titleIconSize = layout.titleIconSize or Vec2(0, titleSizeY)
+    local titleIconGap = layout.titleIconGap or 0
+    local titleIconH = titleIconSize.y or math.floor(PANEL_HEADER_ICON_SIZE * scale + 0.5)
+    local titleContentH = math.max(titleSizeY, layout.hasTitleIcon and titleIconH or 0)
+    local titleContentY = layout.y + math.floor((layout.titleH - titleContentH) * 0.5 + 0.5)
+    local textX = layout.x + layout.padX
+    local textY = titleContentY + math.floor((titleContentH - titleSizeY) * 0.5 + 0.5)
+
+    DrawPanelBlur(layout, scale)
+
+    Render.FilledRect(
+        Vec2(layout.x, layout.y),
+        Vec2(layout.x + layout.width, layout.y + layout.titleH),
+        Colors.HeaderBg,
+        PANEL_HEADER_RADIUS * scale)
+
+    if layout.hasTitleIcon and State.spellIcon then
+        local iconSize = titleIconH
+        local iconY = titleContentY + math.floor((titleContentH - iconSize) * 0.5 + 0.5)
+        Render.Image(
+            State.spellIcon,
+            Vec2(textX, iconY),
+            Vec2(iconSize, iconSize),
+            Color(255, 255, 255, 255),
+            4 * scale,
+            Enum.DrawFlags.None)
+        textX = textX + iconSize + titleIconGap
+    end
+
+    DrawPanelText(
+        titleFontSize,
+        titleText,
+        Vec2(textX, textY),
+        Colors.TextHeader)
+
+    for i, cleanName in ipairs(State.cachedAllyNames) do
+        local cellX = layout.cellsStartX + (i - 1) * (layout.cellW + layout.cellSpacing)
+        local allyHero = State.cachedAllyEntities[cleanName]
+        local enabled = IsAllyKickEnabled(cleanName)
+
+        local imgAlpha = enabled and 255 or 110
+        local grayscale = enabled and 0.0 or 1.0
+        local borderColor = enabled
+            and Color(Colors.BorderEnabled.r, Colors.BorderEnabled.g, Colors.BorderEnabled.b, 255)
+            or Color(Colors.BorderEnabled.r, Colors.BorderEnabled.g, Colors.BorderEnabled.b, 110)
+
+        local isCellHovered = isCursorValid
+            and mx >= cellX and mx <= cellX + layout.cellW
+            and my >= layout.rowY and my <= layout.rowY + layout.cellH
+
+        local heroNameRaw = allyHero and SafeCall(NPC.GetUnitName, allyHero) or ""
+        local imgHandle = GetHeroIcon(heroNameRaw)
+
+        Render.FilledRect(
+            Vec2(cellX, layout.rowY),
+            Vec2(cellX + layout.cellW, layout.rowY + layout.cellH),
+            Colors.CellBg,
+            5 * scale)
+
+        if imgHandle then
+            Render.Image(
+                imgHandle,
+                Vec2(cellX, layout.rowY),
+                Vec2(layout.cellW, layout.cellH),
+                Color(255, 255, 255, imgAlpha),
+                5 * scale,
+                Enum.DrawFlags.None,
+                Vec2(0, 0),
+                Vec2(1, 1),
+                grayscale)
+        end
+
+        if enabled then
+            Render.Rect(
+                Vec2(cellX, layout.rowY),
+                Vec2(cellX + layout.cellW, layout.rowY + layout.cellH),
+                borderColor,
+                5 * scale,
+                Enum.DrawFlags.None,
+                1.0)
+        end
+
+        if isCellHovered and clickTriggered and not PanelDrag.IsDragging then
+            SetAllyKickEnabled(cleanName, not enabled)
+        end
+    end
+end
+
+function Script.OnKeyEvent(_data, key, _event)
+    if not Engine.IsInGame() or not UI.Enabled:Get() or not UI.DrawPanel:Get() then
+        return
+    end
+    if Menu and Menu.VisualsIsEnabled and not SafeCall(Menu.VisualsIsEnabled) then
+        return
+    end
+
+    local myHero = Heroes.GetLocal()
+    if not IsTusk(myHero) then
+        return
+    end
+
+    if #State.cachedAllyNames == 0 then
+        return
+    end
+
+    local scale = (SafeCall(Menu.Scale) or 100) / 100
+    local screenSize = SafeCall(Render.ScreenSize)
+    if not screenSize or screenSize.x <= 1 or screenSize.y <= 1 then
+        return
+    end
+
+    local layout = GetPanelLayout(scale, #State.cachedAllyNames, screenSize)
+    local mx, my = GetMousePos()
+    local isCursorOverPanel = mx and my
+        and mx >= layout.x and mx <= layout.x + layout.width
+        and my >= layout.y and my <= layout.y + layout.height
+
+    if isCursorOverPanel or PanelDrag.IsDragging then
+        if key == Enum.ButtonCode.KEY_MOUSE1
+            or key == Enum.ButtonCode.KEY_MOUSE2
+            or key == Enum.ButtonCode.KEY_MOUSE3
+            or key == Enum.ButtonCode.KEY_MWHEELUP
+            or key == Enum.ButtonCode.KEY_MWHEELDOWN then
+            return false
+        end
+    end
+end
+
+--#endregion
+
 --#region Lifecycle
 
 function Script.OnScriptsLoaded()
+    LoadPanelPosition()
+    SyncColors()
+    fontPanel = ResolvePanelHeaderFont(PANEL_TITLE_SAMPLE) or 0
     State.lastAllySyncTime = -100
-    State.lastAllyRosterKey = ""
+    State.panelHeaderFaFont = nil
+    State.panelHeaderFaAvailable = nil
 
     if Engine.IsInGame() then
         local hero = Heroes.GetLocal()
         if IsTusk(hero) then
-            RefreshAllySelection(hero, GameRules.GetGameTime() or 0, true)
+            SyncAllyTargets(hero, GameRules.GetGameTime() or 0)
         end
     end
 
@@ -2613,7 +3527,7 @@ function Script.OnUpdate()
     end
 
     local now = GameRules.GetGameTime() or 0
-    RefreshAllySelection(hero, now, true)
+    SyncAllyTargets(hero, now)
 
     if not UI.Enabled:Get() then
         ClearVectorFollowup()
@@ -2781,12 +3695,23 @@ function Script.OnPrepareUnitOrders(data)
     return true
 end
 
+function Script.OnThemeUpdate()
+    SyncColors()
+    fontPanel = ResolvePanelHeaderFont(PANEL_TITLE_SAMPLE) or 0
+    State.panelHeaderFaFont = nil
+    State.panelHeaderFaAvailable = nil
+end
+
 function Script.OnGameEnd()
-    SyncAllyPrefsFromWidget()
     ClearTargetSelectionVisuals()
     State.lastCastTime = 0
     State.lastAllySyncTime = -100
-    State.lastAllyRosterKey = ""
+    State.wasMousePressed = false
+    PanelDrag.IsDragging = false
+    State.panelHeaderFaFont = nil
+    State.panelHeaderFaAvailable = nil
+    State.imgCache = nil
+    State.spellIcon = nil
     State.bestPlan = nil
     State.pendingOrderUntil = 0
     State.postOrderLockUntil = 0
@@ -2800,6 +3725,8 @@ function Script.OnGameEnd()
     State.lastTargetVisualTime = -100
     State.targetVisualPathSignature = ""
 end
+
+end)()
 
 --#endregion
 
