@@ -1,15 +1,30 @@
 --[[
-    Io — Relocate Return HUD
-    Fixed screen overlay showing countdown until Relocate teleports back.
-    Visible regardless of camera zoom or hero position on the map.
-    Script by Euphoria
+    Io Helper v1.1
+    Relocate return HUD, tether guard, spirits timer, auto-overcharge before heal items.
+    Script by 花曇り hanagumori
 --]]
 
 local Script = {}
 
 --#region Constants
 
-local LOG_PREFIX = "[IoRelocateHUD] "
+local LOG_PREFIX = "[IoHelper] "
+local HERO_NAME = "npc_dota_hero_wisp"
+local TETHER_NAME = "wisp_tether"
+local TETHER_BREAK_NAME = "wisp_tether_break"
+local OVERCHARGE_NAME = "wisp_overcharge"
+local SPIRITS_NAME = "wisp_spirits"
+local TETHER_MOD = "modifier_wisp_tether"
+local SPIRITS_MOD = "modifier_wisp_spirits"
+local OVERCHARGE_MOD = "modifier_wisp_overcharge"
+local CAST_ID_PREFIX = "io_helper."
+local ORDER_CAST_TARGET = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_TARGET
+local ORDER_CAST_NO_TARGET = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_NO_TARGET
+local SPIRIT_SCAN_INTERVAL = 0.1
+local OVERCHARGE_CAST_COOLDOWN = 0.15
+local SPIRIT_Z_OFFSET = 128
+local SPIRIT_MIN_FONT_SIZE = 22
+local HERO_SPIRIT_TIMER_Z_EXTRA = 48
 local RELOCATE_RETURN_MOD = "modifier_wisp_relocate_return"
 local RELOCATE_THINKER_MOD = "modifier_wisp_relocate_thinker"
 local RELOCATE_MOD_NAMES = {
@@ -33,7 +48,26 @@ local PANEL_BLUR_BASE_STRENGTH = 2.5
 local PANEL_BAR_H = 6
 local PANEL_BAR_PAD_Y = 6
 local DEFAULT_RETURN_DURATION = 12.0
+local DEFAULT_TETHER_GUARD_DURATION = 2.0
 local LANG_CACHE_INTERVAL = 1.0
+
+local HEAL_SOURCE_ITEMS = {
+    "item_faerie_fire",
+    "item_magic_stick",
+    "item_magic_wand",
+    "item_mekansm",
+    "item_guardian_greaves",
+    "item_holy_locket",
+}
+
+local HEAL_SOURCE_DEFAULTS = {
+    item_faerie_fire = true,
+    item_magic_stick = true,
+    item_magic_wand = true,
+    item_mekansm = true,
+    item_guardian_greaves = true,
+    item_holy_locket = true,
+}
 
 local Icons = {
     enable  = "\u{f00c}",
@@ -41,6 +75,10 @@ local Icons = {
     timer   = "\u{f017}",
     bar     = "\u{f080}",
     scale   = "\u{f065}",
+    shield  = "\u{f132}",
+    bomb    = "\u{f1e2}",
+    bolt    = "\u{f0e7}",
+    heal    = "\u{f21e}",
 }
 
 --#endregion
@@ -52,6 +90,12 @@ local UI = {}
 local MenuNodes = {
     group = nil,
     gear = nil,
+    tetherGroup = nil,
+    tetherGear = nil,
+    spiritsGroup = nil,
+    spiritsGear = nil,
+    overchargeGroup = nil,
+    overchargeGear = nil,
 }
 
 local LangState = {
@@ -66,9 +110,16 @@ local State = {
     wasMousePressed = false,
     returnState = nil,
     relocateTrack = nil,
+    relocateReturnWasActive = false,
+    tetherGuardUntil = 0,
+    spiritsState = nil,
+    spiritHitTracker = nil,
+    lastSpiritSyncAt = -100,
+    lastOverchargeCastAt = -100,
 }
 
 local fontPanel = 0
+local fontSpirits = 0
 
 local PanelConfig = {
     X = -1,
@@ -91,7 +142,7 @@ local Colors = {
     BarWarn = Color(255, 90, 90, 255),
 }
 
-local LoggerInstance = Logger and Logger("IoRelocateHUD") or nil
+local LoggerInstance = Logger and Logger("IoHelper") or nil
 
 --#endregion
 
@@ -180,6 +231,64 @@ local function LerpColor(a, b, t)
         math.floor(a.a + (b.a - a.a) * t))
 end
 
+local function GetLocalIoHero()
+    local hero = SafeCall(Heroes.GetLocal)
+    if not hero then
+        return nil
+    end
+    if SafeCall(NPC.GetUnitName, hero) ~= HERO_NAME then
+        return nil
+    end
+    if SafeCall(Entity.IsAlive, hero) == false then
+        return nil
+    end
+    return hero
+end
+
+local function GetAbilityName(ability)
+    if not ability then
+        return nil
+    end
+    return SafeCall(Ability.GetName, ability)
+        or SafeCall(Ability.GetAbilityName, ability)
+end
+
+local function GetManaPct(mana, maxMana)
+    if type(mana) ~= "number" or type(maxMana) ~= "number" or maxMana <= 0 then
+        return 0
+    end
+    return (mana / maxMana) * 100
+end
+
+local function IsOurOrderIdentifier(identifier)
+    return type(identifier) == "string"
+        and identifier:find(CAST_ID_PREFIX, 1, true) == 1
+end
+
+local function ResetRelocateTrack()
+    State.relocateTrack = nil
+end
+
+local function ResetRuntimeState()
+    State.returnState = nil
+    State.spiritsState = nil
+    State.spiritHitTracker = nil
+    ResetRelocateTrack()
+    State.relocateReturnWasActive = false
+    State.tetherGuardUntil = 0
+    State.lastSpiritSyncAt = -100
+    State.lastOverchargeCastAt = -100
+end
+
+local function ResetAllState()
+    ResetRuntimeState()
+    State.spellIcon = nil
+    State.wasMousePressed = false
+    PanelDrag.IsDragging = false
+    PanelDrag.OffsetX = 0
+    PanelDrag.OffsetY = 0
+end
+
 --#endregion
 
 --#region Localization
@@ -220,6 +329,78 @@ local Locale = {
     label_return = {
         en = "RETURN",
         ru = "ВОЗВРАТ",
+    },
+    tether_group_name = {
+        en = "Tether Guard",
+        ru = "Защита Tether",
+    },
+    spirits_group_name = {
+        en = "Spirits Explosion Timer",
+        ru = "Таймер взрыва Spirits",
+    },
+    overcharge_group_name = {
+        en = "Overcharge + Heal Items",
+        ru = "Overcharge + лечение",
+    },
+    ui_tether_duration = {
+        en = "Guard duration (s)",
+        ru = "Длительность защиты (с)",
+    },
+    ui_tether_hud = {
+        en = "Show lock indicator",
+        ru = "Показывать индикатор",
+    },
+    tip_tether = {
+        en = "Block Tether recast for a short time after Relocate teleports to prevent accidental unlink.",
+        ru = "Блокирует повторный каст Tether после телепорта Relocate, чтобы не разорвать привязку.",
+    },
+    tip_tether_duration = {
+        en = "How long Tether recasts are blocked while already tethered.",
+        ru = "На сколько секунд блокировать повторный каст Tether при активной привязке.",
+    },
+    label_tether_lock = {
+        en = "TETHER LOCK",
+        ru = "TETHER ЗАБЛОК",
+    },
+    ui_spirits_warn = {
+        en = "Warn at (s)",
+        ru = "Предупреждение (с)",
+    },
+    ui_spirits_scale = {
+        en = "Font scale",
+        ru = "Масштаб шрифта",
+    },
+    tip_spirits = {
+        en = "Io-blue countdown above hero: spirit count and time until explosion.",
+        ru = "Голубой счётчик над героем: число духов и время до взрыва.",
+    },
+    tip_spirits_warn = {
+        en = "Enlarge timer when remaining time drops below this threshold.",
+        ru = "Увеличивать таймер, когда осталось меньше указанного времени.",
+    },
+    ui_overcharge_mana = {
+        en = "Min mana (%)",
+        ru = "Мин. мана (%)",
+    },
+    ui_overcharge_tether = {
+        en = "Only with Tether",
+        ru = "Только с Tether",
+    },
+    ui_heal_sources = {
+        en = "Heal Sources",
+        ru = "Источники лечения",
+    },
+    tip_heal_sources = {
+        en = "Items that trigger auto-Overcharge before use.",
+        ru = "Предметы, перед использованием которых автоматически кастуется Overcharge.",
+    },
+    tip_overcharge = {
+        en = "Auto-cast Overcharge before using enabled team heal items when mana is above the threshold.",
+        ru = "Авто-Overcharge перед включёнными предметами лечения при достаточной мане.",
+    },
+    tip_overcharge_mana = {
+        en = "Minimum mana percent required to auto-cast Overcharge.",
+        ru = "Минимальный процент маны для авто-Overcharge.",
     },
 }
 
@@ -267,6 +448,12 @@ local function MenuIcon(widget, icon)
     end
 end
 
+local function MenuImage(widget, imagePath)
+    if widget and widget.Image then
+        SafeCall(widget.Image, widget, imagePath)
+    end
+end
+
 local function MenuTip(widget, key)
     if widget and widget.ToolTip then
         SafeCall(widget.ToolTip, widget, L(key))
@@ -294,6 +481,32 @@ local function ApplyLocalization(force)
     MenuTip(UI.WarnAt, "tip_warn")
     MenuLabel(UI.FontScale, "ui_font_scale")
     MenuLabel(UI.ShowBar, "ui_show_bar")
+
+    MenuLabel(MenuNodes.tetherGroup, "tether_group_name")
+    MenuLabel(MenuNodes.tetherGear, "gear_settings")
+    MenuLabel(UI.TetherEnabled, "ui_enabled")
+    MenuTip(UI.TetherEnabled, "tip_tether")
+    MenuLabel(UI.TetherDuration, "ui_tether_duration")
+    MenuTip(UI.TetherDuration, "tip_tether_duration")
+    MenuLabel(UI.TetherHud, "ui_tether_hud")
+
+    MenuLabel(MenuNodes.spiritsGroup, "spirits_group_name")
+    MenuLabel(MenuNodes.spiritsGear, "gear_settings")
+    MenuLabel(UI.SpiritsEnabled, "ui_enabled")
+    MenuTip(UI.SpiritsEnabled, "tip_spirits")
+    MenuLabel(UI.SpiritsWarnAt, "ui_spirits_warn")
+    MenuTip(UI.SpiritsWarnAt, "tip_spirits_warn")
+    MenuLabel(UI.SpiritsFontScale, "ui_spirits_scale")
+
+    MenuLabel(MenuNodes.overchargeGroup, "overcharge_group_name")
+    MenuLabel(MenuNodes.overchargeGear, "gear_settings")
+    MenuLabel(UI.OverchargeEnabled, "ui_enabled")
+    MenuTip(UI.OverchargeEnabled, "tip_overcharge")
+    MenuLabel(UI.OverchargeManaPct, "ui_overcharge_mana")
+    MenuTip(UI.OverchargeManaPct, "tip_overcharge_mana")
+    MenuLabel(UI.OverchargeRequireTether, "ui_overcharge_tether")
+    MenuLabel(UI.HealSources, "ui_heal_sources")
+    MenuTip(UI.HealSources, "tip_heal_sources")
 end
 
 local function SetupLanguageCallback()
@@ -389,17 +602,43 @@ local function SavePanelPosition()
     SafeCall(Config.WriteInt, CONFIG_SECTION, "panel_y", math.floor(PanelConfig.Y + 0.5))
 end
 
-local function InitializeUI()
-    local group = nil
+local function FindOrCreateIoGroup(title, fallbackPath)
     local mainSection = Menu.Find("Heroes", "Hero List", "Io", "Main Settings")
-
     if mainSection and mainSection.Create then
-        group = mainSection:Create("Relocate Return HUD")
+        return mainSection:Create(title)
     end
 
-    if not group then
-        group = Menu.Create("Scripts", "Support", "Io Relocate HUD", "Main", "Relocate Return HUD")
+    if type(fallbackPath) == "table" then
+        return Menu.Create(table.unpack(fallbackPath))
     end
+
+    return Menu.Create("Scripts", "Support", "Io Helper", "Main", title)
+end
+
+local function GetItemIconPath(itemId)
+    if type(itemId) ~= "string" or itemId == "" then
+        return nil
+    end
+    return "panorama/images/items/" .. itemId:gsub("^item_", "") .. "_png.vtex_c"
+end
+
+local function BuildHealSourcesMultiSelectItems()
+    local items = {}
+    for i = 1, #HEAL_SOURCE_ITEMS do
+        local itemId = HEAL_SOURCE_ITEMS[i]
+        items[#items + 1] = {
+            itemId,
+            GetItemIconPath(itemId),
+            HEAL_SOURCE_DEFAULTS[itemId] == true,
+        }
+    end
+    return items
+end
+
+local function InitializeUI()
+    local group = FindOrCreateIoGroup("Relocate Return HUD", {
+        "Scripts", "Support", "Io Helper", "Main", "Relocate Return HUD",
+    })
 
     if not group then
         Log("error", "Failed to create menu group")
@@ -431,6 +670,93 @@ local function InitializeUI()
     end
 
     UI.Enabled:SetCallback(UpdateControls, true)
+
+    local tetherGroup = FindOrCreateIoGroup("Tether Guard", {
+        "Scripts", "Support", "Io Helper", "Tether", "Tether Guard",
+    })
+    if tetherGroup then
+        MenuNodes.tetherGroup = tetherGroup
+        UI.TetherEnabled = tetherGroup:Switch("Enable", true)
+        MenuIcon(UI.TetherEnabled, Icons.enable)
+
+        local tetherGear = UI.TetherEnabled:Gear("Settings", Icons.gear, true)
+        MenuNodes.tetherGear = tetherGear
+
+        UI.TetherDuration = tetherGear:Slider("Guard duration (s)", 1, 4, 2, "%d")
+        MenuIcon(UI.TetherDuration, Icons.timer)
+
+        UI.TetherHud = tetherGear:Switch("Show lock indicator", true)
+        MenuIcon(UI.TetherHud, Icons.bar)
+
+        local function UpdateTetherControls()
+            local enabled = UI.TetherEnabled:Get()
+            UI.TetherDuration:Disabled(not enabled)
+            UI.TetherHud:Disabled(not enabled)
+        end
+
+        UI.TetherEnabled:SetCallback(UpdateTetherControls, true)
+    end
+
+    local spiritsGroup = FindOrCreateIoGroup("Spirits Explosion Timer", {
+        "Scripts", "Support", "Io Helper", "Spirits", "Spirits Explosion Timer",
+    })
+    if spiritsGroup then
+        MenuNodes.spiritsGroup = spiritsGroup
+        UI.SpiritsEnabled = spiritsGroup:Switch("Enable", true)
+        MenuIcon(UI.SpiritsEnabled, Icons.enable)
+
+        local spiritsGear = UI.SpiritsEnabled:Gear("Settings", Icons.gear, true)
+        MenuNodes.spiritsGear = spiritsGear
+
+        UI.SpiritsWarnAt = spiritsGear:Slider("Warn at (s)", 1, 6, 3, "%d")
+        MenuIcon(UI.SpiritsWarnAt, Icons.timer)
+
+        UI.SpiritsFontScale = spiritsGear:Slider("Font scale", 80, 160, 100, "%d%%")
+        MenuIcon(UI.SpiritsFontScale, Icons.scale)
+
+        local function UpdateSpiritsControls()
+            local enabled = UI.SpiritsEnabled:Get()
+            UI.SpiritsWarnAt:Disabled(not enabled)
+            UI.SpiritsFontScale:Disabled(not enabled)
+        end
+
+        UI.SpiritsEnabled:SetCallback(UpdateSpiritsControls, true)
+    end
+
+    local overchargeGroup = FindOrCreateIoGroup("Overcharge + Heal Items", {
+        "Scripts", "Support", "Io Helper", "Overcharge", "Overcharge + Heal Items",
+    })
+    if overchargeGroup then
+        MenuNodes.overchargeGroup = overchargeGroup
+        UI.OverchargeEnabled = overchargeGroup:Switch("Enable", true)
+        MenuIcon(UI.OverchargeEnabled, Icons.enable)
+
+        UI.HealSources = overchargeGroup:MultiSelect(
+            "Heal Sources",
+            BuildHealSourcesMultiSelectItems(),
+            false)
+        MenuIcon(UI.HealSources, Icons.heal)
+
+        local overchargeGear = UI.OverchargeEnabled:Gear("Settings", Icons.gear, true)
+        MenuNodes.overchargeGear = overchargeGear
+
+        UI.OverchargeManaPct = overchargeGear:Slider("Min mana (%)", 40, 90, 60, "%d%%")
+        MenuIcon(UI.OverchargeManaPct, Icons.timer)
+
+        UI.OverchargeRequireTether = overchargeGear:Switch("Only with Tether", false)
+        MenuIcon(UI.OverchargeRequireTether, Icons.shield)
+
+        local function UpdateOverchargeControls()
+            local enabled = UI.OverchargeEnabled:Get()
+            UI.OverchargeManaPct:Disabled(not enabled)
+            UI.OverchargeRequireTether:Disabled(not enabled)
+            if UI.HealSources and UI.HealSources.Disabled then
+                UI.HealSources:Disabled(not enabled)
+            end
+        end
+
+        UI.OverchargeEnabled:SetCallback(UpdateOverchargeControls, true)
+    end
 
     ApplyLocalization(true)
     SetupLanguageCallback()
@@ -531,10 +857,6 @@ local function FindRelocateModifier(hero)
     return nil, nil
 end
 
-local function ResetRelocateTrack()
-    State.relocateTrack = nil
-end
-
 local function UpdateRelocateTrack(mod, modName, now)
     local track = State.relocateTrack
     if track and track.mod == mod then
@@ -579,6 +901,607 @@ local function BuildRelocateReturnState(hero)
         duration = duration,
         fraction = Clamp(remaining / duration, 0, 1),
     }
+end
+
+--#endregion
+
+--#region Tether Guard
+
+local OrderCtx = nil
+
+local function ResolveEnumValue(container, candidates)
+    if type(container) ~= "table" or type(candidates) ~= "table" then
+        return nil
+    end
+    for i = 1, #candidates do
+        local value = container[candidates[i]]
+        if value ~= nil then
+            return value
+        end
+    end
+    return nil
+end
+
+local function GetOrderCtx()
+    if OrderCtx then
+        return OrderCtx
+    end
+
+    OrderCtx = {
+        castTarget = ResolveEnumValue(Enum and Enum.UnitOrder or nil, {
+            "DOTA_UNIT_ORDER_CAST_TARGET",
+            "CAST_TARGET",
+        }),
+        castNoTarget = ResolveEnumValue(Enum and Enum.UnitOrder or nil, {
+            "DOTA_UNIT_ORDER_CAST_NO_TARGET",
+            "CAST_NO_TARGET",
+        }),
+    }
+    return OrderCtx
+end
+
+local function NormalizeOrderContext(data, player, order, target, position, ability, orderIssuer, npc, queue, showEffects)
+    local dataTable = type(data) == "table" and data or nil
+    if not dataTable then
+        return dataTable, player, order, target, position, ability, orderIssuer, npc, queue, showEffects
+    end
+
+    if order == nil and dataTable.order ~= nil then
+        order = dataTable.order
+    end
+    if target == nil and dataTable.target ~= nil then
+        target = dataTable.target
+    end
+    if position == nil and dataTable.position ~= nil then
+        position = dataTable.position
+    end
+    if ability == nil and dataTable.ability ~= nil then
+        ability = dataTable.ability
+    end
+    if orderIssuer == nil and dataTable.orderIssuer ~= nil then
+        orderIssuer = dataTable.orderIssuer
+    elseif orderIssuer == nil and dataTable.issuer ~= nil then
+        orderIssuer = dataTable.issuer
+    end
+    if npc == nil and dataTable.npc ~= nil then
+        npc = dataTable.npc
+    end
+    if queue == nil and dataTable.queue ~= nil then
+        queue = dataTable.queue
+    end
+    if showEffects == nil and dataTable.showEffects ~= nil then
+        showEffects = dataTable.showEffects
+    end
+    if player == nil and dataTable.player ~= nil then
+        player = dataTable.player
+    end
+
+    return dataTable, player, order, target, position, ability, orderIssuer, npc, queue, showEffects
+end
+
+local function IsCastTargetOrder(order)
+    if order == nil then
+        return false
+    end
+    if order == ORDER_CAST_TARGET then
+        return true
+    end
+    local ctx = GetOrderCtx()
+    return ctx.castTarget ~= nil and order == ctx.castTarget
+end
+
+local function IsCastNoTargetOrder(order)
+    if order == nil then
+        return false
+    end
+    if order == ORDER_CAST_NO_TARGET then
+        return true
+    end
+    local ctx = GetOrderCtx()
+    return ctx.castNoTarget ~= nil and order == ctx.castNoTarget
+end
+
+local function HasActiveTether(hero)
+    if SafeCall(NPC.HasModifier, hero, TETHER_MOD) == true then
+        return true, "modifier"
+    end
+
+    local tether = SafeCall(NPC.GetAbility, hero, TETHER_NAME)
+    if tether and CustomEntities and CustomEntities.GetTetheredUnit then
+        local linked = SafeCall(CustomEntities.GetTetheredUnit, tether)
+        if linked then
+            return true, "linked"
+        end
+    end
+
+    return false, "none"
+end
+
+local function GetTetherGuardDuration()
+    if UI.TetherDuration and UI.TetherDuration.Get then
+        local value = SafeCall(UI.TetherDuration.Get, UI.TetherDuration)
+        if type(value) == "number" and value > 0 then
+            return value
+        end
+    end
+    return DEFAULT_TETHER_GUARD_DURATION
+end
+
+local function StartTetherGuard(now, _reason)
+    if not UI.TetherEnabled or not SafeCall(UI.TetherEnabled.Get, UI.TetherEnabled) then
+        return
+    end
+    local duration = GetTetherGuardDuration()
+    State.tetherGuardUntil = now + duration
+end
+
+local function HasRelocateReturnModifier(hero)
+    return SafeCall(NPC.HasModifier, hero, RELOCATE_RETURN_MOD) == true
+end
+
+local function TrackRelocateTeleports(hero, now)
+    if not hero then
+        State.relocateReturnWasActive = false
+        return
+    end
+
+    local hasReturn = HasRelocateReturnModifier(hero)
+    if hasReturn and not State.relocateReturnWasActive then
+        StartTetherGuard(now, "relocate_out")
+    elseif State.relocateReturnWasActive and not hasReturn then
+        StartTetherGuard(now, "relocate_back")
+    end
+    State.relocateReturnWasActive = hasReturn
+end
+
+local function IsTetherGuardActive(now)
+    now = now or GetGameTime()
+    return type(State.tetherGuardUntil) == "number" and now < State.tetherGuardUntil
+end
+
+local function IsTetherRelatedAbility(abilityName)
+    if type(abilityName) ~= "string" or abilityName == "" then
+        return false
+    end
+    return abilityName == TETHER_NAME
+        or abilityName == TETHER_BREAK_NAME
+        or abilityName:find("tether", 1, true) ~= nil
+end
+
+local function IsTetherBreakAbility(abilityName)
+    if type(abilityName) ~= "string" or abilityName == "" then
+        return false
+    end
+    return abilityName == TETHER_BREAK_NAME
+        or abilityName:find("tether_break", 1, true) ~= nil
+end
+
+local function ShouldBlockTetherOrder(hero, order, ability)
+    if not hero or not ability then
+        return false, "no_hero_or_ability"
+    end
+
+    local abilityName = GetAbilityName(ability) or ""
+    if not IsTetherRelatedAbility(abilityName) then
+        return false, "not_tether"
+    end
+
+    local hasTether = select(1, HasActiveTether(hero))
+
+    -- While tethered, Io's Tether slot becomes "Break Tether" (no-target cast).
+    if IsTetherBreakAbility(abilityName) then
+        if hasTether then
+            return true, "block_break"
+        end
+        return false, "break_not_tethered"
+    end
+
+    -- Fallback: recast Tether on a target while already linked.
+    if abilityName == TETHER_NAME and IsCastTargetOrder(order) and hasTether then
+        return true, "block_recast"
+    end
+
+    return false, "allow"
+end
+
+--#endregion
+
+--#region Spirits
+
+local function FindSpiritsModifier(hero)
+    if SafeCall(NPC.HasModifier, hero, SPIRITS_MOD) then
+        return SafeCall(NPC.GetModifier, hero, SPIRITS_MOD)
+    end
+
+    local modifiers = SafeCall(NPC.GetModifiers, hero) or {}
+    for _, mod in ipairs(modifiers) do
+        local name = SafeCall(Modifier.GetName, mod) or ""
+        if name == SPIRITS_MOD or name:find("wisp_spirits", 1, true) then
+            return mod
+        end
+    end
+
+    return nil
+end
+
+local function IsInfiniteSpiritsDuration(duration)
+    return type(duration) ~= "number" or duration <= 0 or duration > 300
+end
+
+local function GetSpiritsRemaining(mod, now)
+    now = now or GetGameTime()
+
+    local dieTime = SafeCall(Modifier.GetDieTime, mod)
+    if type(dieTime) == "number" and dieTime > now then
+        return dieTime - now
+    end
+
+    local duration = SafeCall(Modifier.GetDuration, mod)
+    local created = SafeCall(Modifier.GetCreationTime, mod)
+    if type(duration) == "number" and duration > 0 and type(created) == "number" and created > 0 then
+        local remaining = duration - (now - created)
+        if remaining > 0 then
+            return remaining
+        end
+    end
+
+    return nil
+end
+
+local function GetEntityPosition(entity)
+    if not entity then
+        return nil
+    end
+
+    local pos = SafeCall(Entity.GetAbsOrigin, entity)
+    if pos and type(pos.x) == "number" and type(pos.y) == "number" then
+        return pos
+    end
+
+    if Entity and Entity.GetAbsOriginXYZ then
+        local x, y, z = SafeCall(Entity.GetAbsOriginXYZ, entity)
+        if type(x) == "number" and type(y) == "number" then
+            return Vector(x, y, z or 0)
+        end
+    end
+
+    if NPC and NPC.GetAbsOrigin then
+        pos = SafeCall(NPC.GetAbsOrigin, entity)
+        if pos and type(pos.x) == "number" and type(pos.y) == "number" then
+            return pos
+        end
+    end
+
+    return nil
+end
+
+local function ReadSpiritNumericField(spiritsMod, spiritsAbility, fieldName)
+    local value = spiritsMod and SafeCall(Modifier.GetField, spiritsMod, fieldName)
+    if type(value) == "number" then
+        return value
+    end
+    value = spiritsAbility and SafeCall(Entity.GetField, spiritsAbility, fieldName)
+    if type(value) == "number" then
+        return value
+    end
+    return nil
+end
+
+local function GetSpiritsAbility(hero)
+    return SafeCall(NPC.GetAbility, hero, SPIRITS_NAME)
+end
+
+local function GetSpiritCount(hero, spiritsMod, spiritsAbility)
+    spiritsAbility = spiritsAbility or GetSpiritsAbility(hero)
+    local amount = ReadSpiritNumericField(spiritsMod, spiritsAbility, "spirit_amount")
+    if type(amount) == "number" and amount > 0 then
+        return math.floor(Clamp(amount, 1, 10))
+    end
+    return 5
+end
+
+local function IsWispSpiritUnit(npc, hero)
+    if not npc or not hero then
+        return false
+    end
+
+    local owner = SafeCall(Entity.GetOwner, npc)
+    if owner ~= hero then
+        return false
+    end
+
+    local unitName = SafeCall(NPC.GetUnitName, npc) or ""
+    if unitName:find("wisp_spirit", 1, true) then
+        return true
+    end
+
+    local className = SafeCall(Entity.GetClassName, npc) or ""
+    return className:find("Wisp_Spirit", 1, true) ~= nil
+end
+
+local function IsSpiritEntityActive(entity)
+    if not entity then
+        return false
+    end
+    if Entity and Entity.IsAlive and SafeCall(Entity.IsAlive, entity) == false then
+        return false
+    end
+    if Entity and Entity.IsDormant and SafeCall(Entity.IsDormant, entity) == true then
+        return false
+    end
+    return true
+end
+
+local function IsSpiritNpcActive(npc, hero)
+    return IsWispSpiritUnit(npc, hero) and IsSpiritEntityActive(npc)
+end
+
+local function CountActiveSpiritsFromNpcs(hero)
+    local count = 0
+    if not NPCs or not NPCs.GetAll then
+        return count
+    end
+
+    local all = SafeCall(NPCs.GetAll) or {}
+    for i = 1, #all do
+        local npc = all[i]
+        if IsSpiritNpcActive(npc, hero) then
+            count = count + 1
+        end
+    end
+
+    return count
+end
+
+local function ResetSpiritHitTracker()
+    State.spiritHitTracker = nil
+end
+
+local function CountConsumedSpirits(tracker)
+    if not tracker or type(tracker.consumed) ~= "table" then
+        return 0
+    end
+    local count = 0
+    for _ in pairs(tracker.consumed) do
+        count = count + 1
+    end
+    return count
+end
+
+local function SyncSpiritHitTracker(hero, spiritsMod, infinite)
+    if not hero or not spiritsMod then
+        ResetSpiritHitTracker()
+        return
+    end
+
+    local modCreated = SafeCall(Modifier.GetCreationTime, spiritsMod) or 0
+    local tracker = State.spiritHitTracker
+    if tracker and tracker.modCreated == modCreated then
+        tracker.infinite = infinite == true
+        return
+    end
+
+    local spiritsAbility = GetSpiritsAbility(hero)
+    local npcCount = CountActiveSpiritsFromNpcs(hero)
+    local maxCount = math.max(npcCount, GetSpiritCount(hero, spiritsMod, spiritsAbility))
+
+    State.spiritHitTracker = {
+        modCreated = modCreated,
+        maxCount = maxCount,
+        consumed = {},
+        infinite = infinite == true,
+    }
+end
+
+local function GetTrackedSpiritCount()
+    local tracker = State.spiritHitTracker
+    if not tracker or tracker.infinite then
+        return nil
+    end
+    local consumed = CountConsumedSpirits(tracker) + (tracker.fallbackHits or 0)
+    return math.max(0, (tracker.maxCount or 0) - consumed)
+end
+
+local function TryTrackSpiritHeroHit(hero, data)
+    if not hero or not data then
+        return
+    end
+    if not UI.SpiritsEnabled or not SafeCall(UI.SpiritsEnabled.Get, UI.SpiritsEnabled) then
+        return
+    end
+
+    local spiritsMod = FindSpiritsModifier(hero)
+    if not spiritsMod then
+        return
+    end
+
+    local tracker = State.spiritHitTracker
+    if not tracker or tracker.infinite then
+        return
+    end
+
+    local source = data.source
+    if IsWispSpiritUnit(source, hero) then
+        local target = data.target
+        if not target or SafeCall(NPC.IsHero, target) ~= true then
+            return
+        end
+
+        local damage = data.damage or 0
+        if damage <= 0 then
+            return
+        end
+
+        local idx = SafeCall(Entity.GetIndex, source)
+        if not idx or tracker.consumed[idx] then
+            return
+        end
+
+        tracker.consumed[idx] = true
+        return
+    end
+
+    if source ~= hero then
+        return
+    end
+
+    local ability = data.ability
+    local abilityName = ability and GetAbilityName(ability)
+    if abilityName ~= SPIRITS_NAME then
+        return
+    end
+
+    local target = data.target
+    if not target or SafeCall(NPC.IsHero, target) ~= true then
+        return
+    end
+
+    local damage = data.damage or 0
+    if damage <= 0 then
+        return
+    end
+
+    local consumedTotal = CountConsumedSpirits(tracker) + (tracker.fallbackHits or 0)
+    if consumedTotal >= (tracker.maxCount or 0) then
+        return
+    end
+
+    local now = GetGameTime()
+    if now - (tracker.lastFallbackHitAt or -100) < 0.15 then
+        return
+    end
+
+    tracker.lastFallbackHitAt = now
+    tracker.fallbackHits = (tracker.fallbackHits or 0) + 1
+end
+
+local function GetLiveSpiritCount(hero, spiritsMod, spiritsState)
+    local infinite = spiritsState and spiritsState.infinite == true
+    if not infinite and spiritsMod then
+        local tracked = GetTrackedSpiritCount()
+        if type(tracked) == "number" then
+            return tracked
+        end
+    end
+
+    local fromNpcs = CountActiveSpiritsFromNpcs(hero)
+    if fromNpcs > 0 then
+        return fromNpcs
+    end
+
+    return 0
+end
+
+local function BuildSpiritsState(hero, now)
+    local spiritsMod = FindSpiritsModifier(hero)
+    if not spiritsMod then
+        return nil
+    end
+
+    local duration = SafeCall(Modifier.GetDuration, spiritsMod)
+    local infinite = IsInfiniteSpiritsDuration(duration)
+    local remaining = infinite and nil or GetSpiritsRemaining(spiritsMod, now)
+    if not infinite and (not remaining or remaining <= 0) then
+        ResetSpiritHitTracker()
+        return nil
+    end
+
+    SyncSpiritHitTracker(hero, spiritsMod, infinite)
+
+    local spiritCount = GetLiveSpiritCount(hero, spiritsMod, { infinite = infinite })
+
+    return {
+        remaining = remaining,
+        infinite = infinite,
+        spiritCount = spiritCount,
+    }
+end
+
+--#endregion
+
+--#region Overcharge
+
+local function IsHealItemEnabled(itemId)
+    if not itemId or not UI.HealSources or not UI.HealSources.Get then
+        return false
+    end
+    return SafeCall(UI.HealSources.Get, UI.HealSources, itemId) == true
+end
+
+local function ShouldInterceptHealOrder(order, itemId)
+    if IsCastNoTargetOrder(order) then
+        return true
+    end
+    if IsCastTargetOrder(order) and itemId == "item_holy_locket" then
+        return true
+    end
+    return false
+end
+
+local function ShouldAutoOverchargeForItem(itemId, order)
+    if not itemId then
+        return false
+    end
+    if not ShouldInterceptHealOrder(order, itemId) then
+        return false
+    end
+    return IsHealItemEnabled(itemId)
+end
+
+local function TryAutoOvercharge(hero, now, _itemId)
+    if not UI.OverchargeEnabled or not SafeCall(UI.OverchargeEnabled.Get, UI.OverchargeEnabled) then
+        return false, "disabled"
+    end
+
+    if now - (State.lastOverchargeCastAt or -100) < OVERCHARGE_CAST_COOLDOWN then
+        return false, "cooldown"
+    end
+
+    if SafeCall(NPC.HasModifier, hero, OVERCHARGE_MOD) == true then
+        return false, "active"
+    end
+
+    if UI.OverchargeRequireTether and SafeCall(UI.OverchargeRequireTether.Get, UI.OverchargeRequireTether) then
+        if SafeCall(NPC.HasModifier, hero, TETHER_MOD) ~= true then
+            return false, "no_tether"
+        end
+    end
+
+    local mana = SafeCall(NPC.GetMana, hero) or 0
+    local maxMana = SafeCall(NPC.GetMaxMana, hero) or 1
+    local minPct = UI.OverchargeManaPct and SafeCall(UI.OverchargeManaPct.Get, UI.OverchargeManaPct) or 60
+    if GetManaPct(mana, maxMana) < minPct then
+        return false, "mana"
+    end
+
+    local overcharge = SafeCall(NPC.GetAbility, hero, OVERCHARGE_NAME)
+    if not overcharge then
+        return false, "no_ability"
+    end
+    if SafeCall(Ability.IsReady, overcharge) ~= true then
+        return false, "not_ready"
+    end
+    if Ability.IsCastable and SafeCall(Ability.IsCastable, overcharge, mana) ~= true then
+        return false, "not_castable"
+    end
+
+    if not Ability or not Ability.CastNoTarget then
+        return false, "no_api"
+    end
+
+    local ok = SafeCall(
+        Ability.CastNoTarget,
+        overcharge,
+        false,
+        true,
+        true,
+        CAST_ID_PREFIX .. "overcharge_heal")
+    if ok == false then
+        return false, "cast_failed"
+    end
+
+    State.lastOverchargeCastAt = now
+    return true, "cast"
 end
 
 --#endregion
@@ -733,6 +1656,86 @@ local function GetPanelFont()
         return fontPanel
     end
     return 0
+end
+
+local function GetSpiritsFont()
+    local sampleText = "9.9"
+    if not CanMeasureWithFont(fontSpirits, sampleText) then
+        fontSpirits = ResolvePanelHeaderFont(sampleText) or 0
+    end
+    if CanMeasureWithFont(fontSpirits, sampleText) then
+        return fontSpirits
+    end
+    return GetPanelFont()
+end
+
+local function WorldToScreenPos(worldPos)
+    if not Render or not Render.WorldToScreen or not worldPos then
+        return nil, false
+    end
+
+    local ok, screen, visible = pcall(Render.WorldToScreen, worldPos)
+    if not ok or not screen or type(screen.x) ~= "number" or type(screen.y) ~= "number" then
+        return nil, false
+    end
+
+    return screen, visible == true
+end
+
+local function IsOnScreen(screen, margin)
+    margin = margin or 80
+    local screenSize = SafeCall(Render.ScreenSize)
+    if not screenSize or type(screenSize.x) ~= "number" or type(screenSize.y) ~= "number" then
+        return true
+    end
+
+    return screen.x >= -margin
+        and screen.y >= -margin
+        and screen.x <= screenSize.x + margin
+        and screen.y <= screenSize.y + margin
+end
+
+local function DrawWorldLabel(font, size, text, worldPos, textColor)
+    local screen, isVisible = WorldToScreenPos(worldPos)
+    if not screen then
+        return false
+    end
+
+    if not isVisible and not IsOnScreen(screen) then
+        return false
+    end
+
+    if not IsValidFontHandle(font) then
+        font = GetPanelFont()
+    end
+    if not IsValidFontHandle(font) or not Render.Text then
+        return false
+    end
+
+    local anchorY = screen.y - 12
+    if Render.FilledCircle then
+        pcall(Render.FilledCircle, Vec2(screen.x, anchorY), 6, Color(textColor.r, textColor.g, textColor.b, 90))
+        pcall(Render.FilledCircle, Vec2(screen.x, anchorY), 3, Color(255, 255, 255, 220))
+    end
+
+    local textSize = SafeCall(Render.TextSize, font, size, text)
+    local textW = textSize and textSize.x or (text:len() * size * 0.55)
+    local textH = textSize and textSize.y or size
+    local padX, padY = 7, 4
+    local topLeft = Vec2(screen.x - textW * 0.5 - padX, anchorY - textH - padY - 10)
+    local bottomRight = Vec2(screen.x + textW * 0.5 + padX, anchorY - 10 + padY)
+
+    if Render.FilledRect then
+        pcall(Render.FilledRect, topLeft, bottomRight, Color(12, 12, 16, 220), 5)
+    end
+    if Render.Rect then
+        pcall(Render.Rect, topLeft, bottomRight, Color(textColor.r, textColor.g, textColor.b, 200), 5, Enum.DrawFlags.None, 1)
+    end
+
+    local textPos = Vec2(screen.x - textW * 0.5, anchorY - textH - 8)
+    local shadow = Color(0, 0, 0, 240)
+    pcall(Render.Text, font, size, text, Vec2(textPos.x + 1, textPos.y + 1), shadow)
+    return pcall(Render.Text, font, size, text, textPos, textColor) == true
 end
 
 local function MeasurePanelTextSize(fontSize, text)
@@ -969,6 +1972,118 @@ local function DrawRelocatePanel(layout, returnState, warnThreshold, scale)
     end
 end
 
+local function DrawTetherLockIndicator(scale, screenSize, now)
+    if not UI.TetherHud or not SafeCall(UI.TetherHud.Get, UI.TetherHud) then
+        return
+    end
+    if not IsTetherGuardActive(now) then
+        return
+    end
+
+    local remaining = State.tetherGuardUntil - now
+    if remaining <= 0 then
+        return
+    end
+
+    local label = L("label_tether_lock")
+    local timerText = string.format("%.1fs", remaining)
+    local fontSize = PANEL_HEADER_TEXT_SIZE * scale
+    local labelSize = MeasurePanelTextSize(fontSize, label)
+    local timerSize = MeasurePanelTextSize(fontSize, timerText)
+    local padX = PANEL_HEADER_PAD_X * scale
+    local labelW = labelSize and labelSize.x or 0
+    local timerW = timerSize and timerSize.x or 0
+    local width = padX + labelW + 8 * scale + timerW + padX
+    local height = PANEL_HEADER_HEIGHT * scale
+    local x = math.floor((screenSize.x - width) * 0.5 + 0.5)
+    local y = math.floor((PanelConfig.Y or 48) + height + 8 * scale + 0.5)
+
+    SafeCall(
+        Render.FilledRect,
+        Vec2(x, y),
+        Vec2(x + width, y + height),
+        Colors.HeaderBg,
+        PANEL_HEADER_RADIUS * scale)
+
+    local labelH = labelSize and labelSize.y or fontSize
+    local timerH = timerSize and timerSize.y or fontSize
+    local contentH = math.max(labelH, timerH)
+    local contentY = y + math.floor((height - contentH) * 0.5 + 0.5)
+    local textX = x + padX
+
+    DrawPanelText(fontSize, label, Vec2(textX, contentY), Colors.TextWarn)
+
+    local timerX = x + width - padX - timerW
+    DrawPanelText(fontSize, timerText, Vec2(timerX, contentY), Colors.TextWarn)
+end
+
+local function GetHeroSpiritTimerPosition(hero)
+    local pos = GetEntityPosition(hero)
+    if not pos then
+        return nil
+    end
+
+    local zOffset = SPIRIT_Z_OFFSET
+    local barOffset = SafeCall(NPC.GetHealthBarOffset, hero, true)
+    if type(barOffset) == "number" and barOffset > 0 then
+        zOffset = barOffset + HERO_SPIRIT_TIMER_Z_EXTRA
+    end
+
+    return Vector(pos.x, pos.y, (pos.z or 0) + zOffset)
+end
+
+local function DrawSpiritTimers(hero, spiritsState, scale, now)
+    if not hero or not spiritsState then
+        return
+    end
+
+    local spiritsMod = FindSpiritsModifier(hero)
+    if not spiritsMod then
+        return
+    end
+
+    local worldPos = GetHeroSpiritTimerPosition(hero)
+    if not worldPos then
+        return
+    end
+
+    local fontScale = (UI.SpiritsFontScale and SafeCall(UI.SpiritsFontScale.Get, UI.SpiritsFontScale) or 100) / 100
+    local warnThreshold = UI.SpiritsWarnAt and SafeCall(UI.SpiritsWarnAt.Get, UI.SpiritsWarnAt) or 3
+    local font = GetSpiritsFont()
+    if not IsValidFontHandle(font) then
+        return
+    end
+
+    local spiritCount = GetLiveSpiritCount(hero, spiritsMod, spiritsState)
+    spiritsState.spiritCount = spiritCount
+
+    local timerText
+    local isWarn = false
+
+    if spiritsState.infinite then
+        if spiritCount <= 0 then
+            return
+        end
+        timerText = tostring(spiritCount)
+    else
+        local remaining = GetSpiritsRemaining(spiritsMod, now)
+        if not remaining or remaining <= 0 then
+            return
+        end
+        spiritsState.remaining = remaining
+        timerText = string.format("%d · %.1f", spiritCount, remaining)
+        isWarn = remaining <= warnThreshold
+    end
+
+    local baseSize = math.max(SPIRIT_MIN_FONT_SIZE, PANEL_HEADER_TEXT_SIZE * scale * fontScale)
+    local fontSize = isWarn and (baseSize * 1.15) or baseSize
+    local color = isWarn
+        and LerpColor(Colors.TextTimer, Colors.TextHeader, 0.55)
+        or Colors.TextTimer
+
+    DrawWorldLabel(font, fontSize, timerText, worldPos, color)
+end
+
 --#endregion
 
 --#region Lifecycle
@@ -980,32 +2095,95 @@ function Script.OnScriptsLoaded()
     LoadPanelPosition()
     SyncColors()
     fontPanel = ResolvePanelHeaderFont(GetPanelSampleText()) or 0
+    fontSpirits = ResolvePanelHeaderFont("9.9") or 0
 end
 
 function Script.OnThemeUpdate()
     SyncColors()
     fontPanel = ResolvePanelHeaderFont(GetPanelSampleText()) or 0
+    fontSpirits = ResolvePanelHeaderFont("9.9") or 0
 end
 
 function Script.OnUpdate()
-    if not Engine.IsInGame() or not UI.Enabled or not UI.Enabled:Get() then
-        State.returnState = nil
-        ResetRelocateTrack()
+    if not SafeCall(Engine.IsInGame) then
+        ResetRuntimeState()
         return
     end
 
-    local hero = Heroes.GetLocal()
-    State.returnState = BuildRelocateReturnState(hero)
+    local hero = GetLocalIoHero()
+    if not hero then
+        ResetRuntimeState()
+        return
+    end
+
+    local now = GetGameTime()
+
+    if UI.Enabled and SafeCall(UI.Enabled.Get, UI.Enabled) then
+        State.returnState = BuildRelocateReturnState(hero)
+    else
+        State.returnState = nil
+        ResetRelocateTrack()
+    end
+
+    TrackRelocateTeleports(hero, now)
+
+    if UI.SpiritsEnabled and SafeCall(UI.SpiritsEnabled.Get, UI.SpiritsEnabled) then
+        if now - (State.lastSpiritSyncAt or -100) >= SPIRIT_SCAN_INTERVAL then
+            State.lastSpiritSyncAt = now
+            State.spiritsState = BuildSpiritsState(hero, now)
+        elseif State.spiritsState and not State.spiritsState.infinite then
+            local spiritsMod = FindSpiritsModifier(hero)
+            if spiritsMod then
+                State.spiritsState.remaining = GetSpiritsRemaining(spiritsMod, now)
+                State.spiritsState.spiritCount = GetLiveSpiritCount(
+                    hero, spiritsMod, { infinite = false })
+                if not State.spiritsState.remaining or State.spiritsState.remaining <= 0 then
+                    State.spiritsState = nil
+                    ResetSpiritHitTracker()
+                end
+            else
+                State.spiritsState = nil
+                ResetSpiritHitTracker()
+            end
+        end
+    else
+        State.spiritsState = nil
+        State.lastSpiritSyncAt = -100
+        ResetSpiritHitTracker()
+    end
 end
 
 function Script.OnDraw()
-    if not Engine.IsInGame() or not UI.Enabled or not UI.Enabled:Get() then
+    if not SafeCall(Engine.IsInGame) then
+        return
+    end
+
+    local hero = GetLocalIoHero()
+    if not hero then
         return
     end
 
     SyncColors()
 
     if Menu and Menu.VisualsIsEnabled and not SafeCall(Menu.VisualsIsEnabled) then
+        return
+    end
+
+    local scale = (SafeCall(Menu.Scale) or 100) / 100
+    local screenSize = SafeCall(Render.ScreenSize)
+    if not screenSize or screenSize.x <= 1 or screenSize.y <= 1 then
+        return
+    end
+
+    local now = GetGameTime()
+
+    if UI.SpiritsEnabled and SafeCall(UI.SpiritsEnabled.Get, UI.SpiritsEnabled) then
+        DrawSpiritTimers(hero, State.spiritsState, scale, now)
+    end
+
+    DrawTetherLockIndicator(scale, screenSize, now)
+
+    if not UI.Enabled or not SafeCall(UI.Enabled.Get, UI.Enabled) then
         return
     end
 
@@ -1016,12 +2194,6 @@ function Script.OnDraw()
     end
 
     EnsureSpellIcon()
-
-    local scale = (SafeCall(Menu.Scale) or 100) / 100
-    local screenSize = SafeCall(Render.ScreenSize)
-    if not screenSize or screenSize.x <= 1 or screenSize.y <= 1 then
-        return
-    end
 
     local warnThreshold = UI.WarnAt and UI.WarnAt:Get() or 3
     local layout = GetPanelLayout(scale, screenSize, returnState)
@@ -1057,8 +2229,55 @@ function Script.OnDraw()
     DrawRelocatePanel(layout, returnState, warnThreshold, scale)
 end
 
+function Script.OnPrepareUnitOrders(data, player, order, target, position, ability, orderIssuer, npc, queue, showEffects)
+    local dataTable
+    dataTable, player, order, target, position, ability, orderIssuer, npc, queue, showEffects =
+        NormalizeOrderContext(data, player, order, target, position, ability, orderIssuer, npc, queue, showEffects)
+
+    local identifier = dataTable and dataTable.identifier or nil
+    if IsOurOrderIdentifier(identifier) then
+        return true
+    end
+
+    local hero = GetLocalIoHero()
+    if not hero then
+        return true
+    end
+
+    local orderNpc = (dataTable and dataTable.npc) or npc
+    if orderNpc and Entity.GetIndex then
+        local heroIndex = SafeCall(Entity.GetIndex, hero)
+        local orderIndex = SafeCall(Entity.GetIndex, orderNpc)
+        if heroIndex and orderIndex and heroIndex ~= orderIndex then
+            return true
+        end
+    end
+
+    local now = GetGameTime()
+    local abilityName = ability and GetAbilityName(ability) or nil
+
+    if UI.TetherEnabled and SafeCall(UI.TetherEnabled.Get, UI.TetherEnabled)
+        and IsTetherGuardActive(now) then
+        local shouldBlock = ShouldBlockTetherOrder(hero, order, ability)
+        if shouldBlock then
+            return false
+        end
+    end
+
+    if abilityName and (IsCastNoTargetOrder(order) or IsCastTargetOrder(order)) then
+        if ShouldAutoOverchargeForItem(abilityName, order) then
+            TryAutoOvercharge(hero, now, abilityName)
+        end
+    end
+
+    return true
+end
+
 function Script.OnKeyEvent(_data, key, _event)
-    if not Engine.IsInGame() or not UI.Enabled or not UI.Enabled:Get() then
+    if not SafeCall(Engine.IsInGame) then
+        return
+    end
+    if not UI.Enabled or not SafeCall(UI.Enabled.Get, UI.Enabled) then
         return
     end
     if Menu and Menu.VisualsIsEnabled and not SafeCall(Menu.VisualsIsEnabled) then
@@ -1091,6 +2310,26 @@ function Script.OnKeyEvent(_data, key, _event)
             return false
         end
     end
+end
+
+function Script.OnEntityHurt(data)
+    if not SafeCall(Engine.IsInGame) then
+        return
+    end
+
+    local hero = GetLocalIoHero()
+    if not hero then
+        return
+    end
+
+    TryTrackSpiritHeroHit(hero, data)
+end
+
+function Script.OnGameEnd()
+    ResetAllState()
+    fontPanel = 0
+    fontSpirits = 0
+    OrderCtx = nil
 end
 
 --#endregion
