@@ -237,9 +237,9 @@ Core.Catalog.DisableModifiers = {
 }
 
 Core.Catalog.AbilityMeta = {
-    magnataur_reverse_polarity = { radiusSpecial = "pull_radius", defaultRadius = 410, noTarget = true },
+    magnataur_reverse_polarity = { radiusSpecial = "pull_radius", defaultRadius = 430, noTarget = true },
     enigma_black_hole = { radiusSpecial = "radius", defaultRadius = 420, point = true, channel = true },
-    tidehunter_ravage = { radiusSpecial = "radius", defaultRadius = 1025, noTarget = true },
+    tidehunter_ravage = { radiusSpecial = "radius", defaultRadius = 1250, noTarget = true },
     -- avoidAllies: place so teammates stay outside and can hit frozen enemies.
     -- L25 right (+140): special_bonus_unique_faceless_void_2 / TALENT_8.
     faceless_void_chronosphere = {
@@ -251,42 +251,45 @@ Core.Catalog.AbilityMeta = {
         radiusTalentBonus = 140,
         radiusTalentSlot = Enum.TalentTypes.TALENT_8,
     },
-    -- Global cast range in API/assets; limiter is max travel distance (650–800).
-    faceless_void_time_walk = { defaultRadius = 150, point = true, allowSingle = true },
+    -- Point dash; cast gate is CastRangeFallback (max travel), not AoE radius.
+    faceless_void_time_walk = { point = true, allowSingle = true },
     axe_berserkers_call = { radiusSpecial = "radius", defaultRadius = 315, noTarget = true, allowSingle = true },
-    earthshaker_echo_slam = { radiusSpecial = "echo_slam_damage_range", defaultRadius = 600, noTarget = true, allowSingle = true },
+    earthshaker_echo_slam = { radiusSpecial = "echo_slam_damage_range", defaultRadius = 700, noTarget = true, allowSingle = true },
     earthshaker_fissure = { radiusSpecial = "fissure_radius", defaultRadius = 225, point = true, allowSingle = true },
-    earthshaker_enchant_totem = { defaultRadius = 300, point = true, allowSingle = true },
-    crystal_maiden_freezing_field = { radiusSpecial = "radius", defaultRadius = 835, noTarget = true, channel = true },
+    -- Scepter leap is point-cast; non-scepter stays self buff (live POINT still uses bestPosition).
+    earthshaker_enchant_totem = { point = true, allowSingle = true },
+    crystal_maiden_freezing_field = { radiusSpecial = "radius", defaultRadius = 810, noTarget = true, channel = true },
     warlock_rain_of_chaos = { radiusSpecial = "aoe", defaultRadius = 600, point = true },
     nevermore_requiem = { radiusSpecial = "requiem_radius", defaultRadius = 1000, noTarget = true },
-    jakiro_macropyre = { radiusSpecial = "macropyre_range", defaultRadius = 1400, point = true, channel = true },
-    lina_light_strike_array = { radiusSpecial = "light_strike_array_aoe", defaultRadius = 225, point = true },
-    leshrac_split_earth = { radiusSpecial = "radius", defaultRadius = 225, point = true },
+    -- path_width is the damaging AoE; cast length lives in CastRangeFallback.
+    jakiro_macropyre = { radiusSpecial = "path_width", defaultRadius = 500, point = true, channel = true },
+    lina_light_strike_array = { radiusSpecial = "light_strike_array_aoe", defaultRadius = 250, point = true },
     invoker_sun_strike = { radiusSpecial = "area_of_effect", defaultRadius = 175, point = true },
     invoker_emp = { defaultRadius = 675, point = true, predictionTime = 1.0 },
     sniper_shrapnel = {
         radiusSpecial = "radius",
-        defaultRadius = 550,
+        defaultRadius = 475,
         point = true,
         debuffMods = { "modifier_sniper_shrapnel_slow", "modifier_sniper_shrapnel" },
     },
     -- Onslaught reports global/0 cast range in API; charge reaches up to 2000.
     primal_beast_onslaught = { defaultRadius = 190, point = true, channel = true, allowSingle = true },
-    primal_beast_rock_throw = { defaultRadius = 230, point = true, allowSingle = true },
-    -- HeroKits wave-1 AoE / gap-close meta.
-    centaur_hoof_stomp = { defaultRadius = 315, noTarget = true },
-    sandking_epicenter = { defaultRadius = 550, noTarget = true, channel = true },
+    primal_beast_rock_throw = { defaultRadius = 225, point = true, allowSingle = true },
+    -- HeroKits wave-1 AoE / gap-close meta (radii from assets/data/npc_abilities.json).
+    centaur_hoof_stomp = { defaultRadius = 325, noTarget = true },
+    sandking_epicenter = { defaultRadius = 500, noTarget = true, channel = true },
     sandking_burrowstrike = { defaultRadius = 150, point = true, allowSingle = true },
-    slardar_slithereen_crush = { defaultRadius = 350, noTarget = true },
+    slardar_slithereen_crush = { defaultRadius = 325, noTarget = true },
     rattletrap_battery_assault = { defaultRadius = 275, noTarget = true },
     rattletrap_hookshot = { defaultRadius = 125, point = true, allowSingle = true },
     mars_arena_of_blood = { defaultRadius = 550, point = true },
     mars_spear = { defaultRadius = 125, point = true, allowSingle = true },
+    -- Cone / frontal slam: cast point within radius of self.
+    mars_gods_rebuke = { defaultRadius = 500, point = true, allowSingle = true },
     skywrath_mage_mystic_flare = { defaultRadius = 170, point = true, allowSingle = true },
     nyx_assassin_impale = { defaultRadius = 140, point = true, allowSingle = true },
     witch_doctor_death_ward = { defaultRadius = 600, point = true, channel = true },
-    shadow_shaman_mass_serpent_ward = { defaultRadius = 225, point = true },
+    shadow_shaman_mass_serpent_ward = { defaultRadius = 150, point = true },
     morphling_waveform = { defaultRadius = 200, point = true, allowSingle = true },
     -- Point field: AS for allies + enemy miss. Cast under self/local, not on enemy.
     arc_warden_magnetic_field = {
@@ -304,13 +307,10 @@ Core.Catalog.FriendlyBuffAbilities = {
     oracle_false_promise = true,
     dazzle_shallow_grave = true,
     dazzle_shadow_wave = true,
-    dazzle_poison_touch = false,
     ogre_magi_bloodlust = true,
-    ogre_magi_smash = false,
     abaddon_aphotic_shield = true,
     abaddon_borrowed_time = true,
     treant_living_armor = true,
-    treant_overgrowth = false,
     witch_doctor_voodoo_restoration = true,
     omniknight_repel = true,
     omniknight_guardian_angel = true,
@@ -320,9 +320,6 @@ Core.Catalog.FriendlyBuffAbilities = {
     io_tether = true,
     shadow_demon_disruption = true,
     shadow_demon_purge = true,
-    tusk_snowball = false,
-    tusk_walrus_punch = false,
-    warlock_fatal_bonds = false,
 }
 
 Core.Catalog.AbilityKindOverrides = {
@@ -368,42 +365,47 @@ Core.Catalog.CastRangeFallback = {
     item_orchid = 900,
     item_rod_of_atos = 1100,
     item_gungir = 1100,
-    item_abyssal_blade = 450,
-    item_heavens_halberd = 650,
+    -- assets AbilityCastRange=150; hull-aware IsEntityInRange handles melee contact.
+    item_abyssal_blade = 150,
+    item_heavens_halberd = 750,
     item_nullifier = 900,
     item_ethereal_blade = 800,
-    item_dagon = 700,
+    item_dagon = 640,
     item_spirit_vessel = 750,
     item_urn_of_shadows = 750,
     sniper_shrapnel = 1800,
-    sniper_assassinate = 3500,
-    sniper_headshot = 650,
+    sniper_assassinate = 3000,
     invoker_cold_snap = 1000,
     invoker_tornado = 2000,
     invoker_chaos_meteor = 700,
     invoker_sun_strike = 99999,
     invoker_deafening_blast = 1000,
-    invoker_alacrity = 650,
+    invoker_alacrity = 700,
     invoker_emp = 950,
     invoker_ice_wall = 300,
     item_blink = 1200,
     item_arcane_blink = 1400,
     item_overwhelming_blink = 1200,
     item_swift_blink = 1200,
-    lion_voodoo = 575,
+    lion_voodoo = 650,
     lion_impale = 650,
     lion_finger_of_death = 900,
     item_sheepstick = 800,
     primal_beast_onslaught = 2000,
     primal_beast_rock_throw = 1800,
     primal_beast_pulverize = 200,
-    morphling_waveform = 1000,
-    morphling_adaptive_strike_agi = 900,
-    morphling_adaptive_strike_str = 900,
+    -- Max travel / cast from npc_abilities AbilityValues (API often returns 0).
+    morphling_waveform = 925,
+    morphling_adaptive_strike_agi = 825,
     morphling_replicate = 1000,
-    morphling_morph = 1000,
-    -- Time Walk reports global/0 cast range; use max travel (L4) as cast gate.
     faceless_void_time_walk = 800,
+    mars_spear = 1200,
+    mars_gods_rebuke = 500,
+    magnataur_skewer = 1100,
+    sandking_burrowstrike = 775,
+    jakiro_macropyre = 1400,
+    earthshaker_fissure = 1600,
+    earthshaker_enchant_totem = 950,
 }
 
 Core.Catalog.InvokerSteps = {
@@ -483,7 +485,6 @@ Core.Catalog.SkipAbilities = {
 -- Confirmed once per bind normally; these may be re-queued while still castable.
 Core.Catalog.ReusableComboAbilities = {
     morphling_adaptive_strike_agi = true,
-    morphling_adaptive_strike_str = true,
     nevermore_shadowraze1 = true,
     nevermore_shadowraze2 = true,
     nevermore_shadowraze3 = true,
@@ -3489,7 +3490,7 @@ local function MorphWaveformLandPos(controlled, enemy)
     end
     -- Surf through the target so Waveform actually closes and deals path damage.
     local overshoot = 120
-    local castRange = 1000
+    local castRange = 925
     local waveform = FindAbilityEntry(controlled, "morphling_waveform")
     if waveform then
         local ranged = GetCastRange(controlled, waveform)
@@ -3720,9 +3721,8 @@ local function BuildMorphlingPlan(ctx, actions)
         end
     end
 
-    -- Adaptive: prefer AGI strike for damage; STR strike only when clearly STR-heavy.
-    local preferStrStrike = str > agi * 1.5
-    local strikeId = preferStrStrike and "morphling_adaptive_strike_str" or "morphling_adaptive_strike_agi"
+    -- Adaptive Strike (AGI) — STR variant no longer exists in npc_abilities.
+    local strikeId = "morphling_adaptive_strike_agi"
     if IsAbilityEnabled(strikeId)
         and not IsActionBlocked(strikeId, ctx.now)
     then
