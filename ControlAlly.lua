@@ -1,15 +1,13 @@
---[[
+﻿--[[
     Control Ally
-    Smart combo for controllable allied heroes (disconnect / shared control).
-    Script by 花曇り hanagumori
+    Hold your hero Combo Key to run a smart combo on a controllable ally
+    (disconnect / shared unit control). Menu: Heroes > Settings > General > Units Controller.
+    Script by hanagumori
 --]]
 
 local Script = {}
 local Core = {
-    RuntimeAdapter = {},
     Snapshot = {},
-    Targeting = {},
-    AoeSolver = {},
     Catalog = {},
     GenericPlanner = {},
     InvokerController = {},
@@ -24,6 +22,7 @@ local Core = {
 
 local LOG_PREFIX = "[ControlAlly] "
 local CONFIG_SECTION = "control_ally"
+-- One-way migrate from the pre-release config section name.
 local CONFIG_SECTION_LEGACY = "leaked_ally_combo"
 local ORDER_PREFIX = "control_ally:"
 
@@ -38,6 +37,9 @@ local MELEE_ATTACK_ORDER_INTERVAL = 0.50
 local RANGE_ATTACK_BUFFER = 35
 local RANGE_CAST_BUFFER = 90
 local RANGE_TOLERANCE = 25
+-- AbilityCastRange=0 (true global) or unresolved API/asset range. Callers must not
+-- melee-approach or block casts on this sentinel.
+local GLOBAL_CAST_RANGE = 99999
 local DEBUG_VERBOSE_INTERVAL = 0.12
 local EXTEND_BUFFER = 0.15
 local BLINK_SETTLE = 0.12
@@ -48,7 +50,8 @@ local INVOKER_ORB_ACK_SETTLE = 0.02
 local MAX_ACTION_ATTEMPTS = 8
 local INVOKER_SPELL_GAP = 0.02
 local INVOKER_INVOKE_SETTLE = 0.03
-local INVOKER_SLOT_WAIT = 0.30
+-- Post-invoke: spell can sit on the bar before CanBeExecuted/IsCastable flips true.
+local INVOKER_SLOT_WAIT = 0.45
 local COMBO_RELEASE_GRACE = 0.22
 local FAIL_SKIP_DURATION = 4.0
 local TARGET_LOCK_BONUS = 2500
@@ -119,7 +122,7 @@ Core.Catalog.SkipItems = {
     item_gauntlets = true,
     item_slippers = true,
     item_mantle = true,
-    -- Creep/consume utilities — not hero-combo actives.
+    -- Creep/consume utilities -- not hero-combo actives.
     item_hand_of_midas = true,
     item_helm_of_the_dominator = true,
     item_helm_of_the_overlord = true,
@@ -319,6 +322,7 @@ Core.Catalog.DisableModifiers = {
     item_heavens_halberd = { "modifier_heavens_halberd_debuff" },
     item_nullifier = { "modifier_item_nullifier_mute" },
     item_ethereal_blade = { "modifier_item_ethereal_blade_ethereal" },
+    naga_siren_ensnare = { "modifier_naga_siren_ensnare" },
 }
 
 Core.Catalog.AbilityMeta = {
@@ -395,6 +399,12 @@ Core.Catalog.AbilityMeta = {
         positionPolicy = "selfOrLocal",
         allowSingle = true,
     },
+    -- Bushwhack roots only if a tree is inside trap_radius of the cast point.
+    hoodwink_bushwhack = { radiusSpecial = "trap_radius", defaultRadius = 265, point = true, allowSingle = true },
+    hoodwink_acorn_shot = { point = true, allowSingle = true },
+    pudge_rot = { radiusSpecial = "rot_radius", defaultRadius = 250, noTarget = true, allowSingle = true },
+    -- Map-wide NO_TARGET; sight_* values are post-cast vision, not hit radius.
+    zuus_thundergods_wrath = { noTarget = true, allowSingle = true, global = true },
 }
 
 Core.Catalog.FriendlyBuffAbilities = {
@@ -420,10 +430,12 @@ Core.Catalog.FriendlyBuffAbilities = {
 
 Core.Catalog.AbilityKindOverrides = {
     ogre_magi_ignite = "lockedEnemy",
-    -- assets: NO_TARGET; Morph/live often reports POINT|UNIT|AOE — CAST_POSITION only works.
+    -- assets: NO_TARGET; Morph/live often reports POINT|UNIT|AOE -- CAST_POSITION only works.
     earthshaker_enchant_totem = "bestPosition",
     -- Keep bestPosition issue path; AbilityMeta.positionPolicy = selfOrLocal.
     arc_warden_magnetic_field = "bestPosition",
+    -- Global UNIT_TARGET|POINT; AbilityCastRange=0 -- not bestPosition (walks to melee).
+    furion_wrath_of_nature = "lockedEnemy",
 }
 
 Core.Catalog.HexAbilities = {
@@ -496,6 +508,8 @@ Core.Catalog.CastRangeFallback = {
     morphling_waveform = 925,
     morphling_adaptive_strike_agi = 825,
     morphling_replicate = 1000,
+    -- Global nuke; AbilityCastRange=0 -- without fallback combo_approach walks to 80 forever.
+    furion_wrath_of_nature = 99999,
     faceless_void_time_walk = 800,
     -- max_travel_distance L3; Ability.GetCastRange often returns 0 (no AbilityCastRange).
     void_spirit_astral_step = 1000,
@@ -507,6 +521,7 @@ Core.Catalog.CastRangeFallback = {
     jakiro_macropyre = 1400,
     earthshaker_fissure = 1600,
     earthshaker_enchant_totem = 950,
+    pudge_meat_hook = 1300,
 }
 
 Core.Catalog.InvokerSteps = {
@@ -579,8 +594,18 @@ Core.Catalog.SkipAbilities = {
     morphling_morph = true,
     morphling_replicate = true,
     morphling_morph_replicate = true,
-    -- Post–Time Walk escape; generic must not reverse an engage mid-combo.
+    -- Post-Time Walk escape; generic must not reverse an engage mid-combo.
     faceless_void_time_walk_reverse = true,
+    -- Farm / reposition; never part of a kill combo.
+    furion_teleportation = true,
+    furion_force_of_nature = true,
+    -- Autocast orb attack; CAST_TARGET never goes on CD and soft-locks the queue.
+    drow_ranger_frost_arrows = true,
+    -- Passive.
+    drow_ranger_marksmanship = true,
+    -- Defensive active / eject; not part of the kill combo.
+    pudge_flesh_heap = true,
+    pudge_eject = true,
 }
 
 -- Confirmed once per bind normally; these may be re-queued while still castable.
@@ -589,6 +614,41 @@ Core.Catalog.ReusableComboAbilities = {
     nevermore_shadowraze1 = true,
     nevermore_shadowraze2 = true,
     nevermore_shadowraze3 = true,
+}
+
+-- Release / end abilities: only queue while the parent spell is channelling.
+Core.Catalog.ChannelReleaseOf = {
+    hoodwink_sharpshooter_release = "hoodwink_sharpshooter",
+}
+
+-- Self buffs: do not re-queue while the active modifier is present.
+Core.Catalog.SkipWhileSelfModifier = {
+    hoodwink_scurry = "modifier_hoodwink_scurry_active",
+    pudge_rot = "modifier_pudge_rot",
+}
+
+-- Point spells used to close distance; safe to drop once already in melee/ult range.
+-- Do NOT list nukes (Lightning Bolt, etc.) — prune must not delete damage spells.
+Core.Catalog.GapCloserAbilities = {
+    pudge_meat_hook = true,
+    rattletrap_hookshot = true,
+    magnataur_skewer = true,
+    mirana_leap = true,
+    sandking_burrowstrike = true,
+    morphling_waveform = true,
+    ember_spirit_fire_remnant = true,
+    void_spirit_astral_step = true,
+    faceless_void_time_walk = true,
+    phoenix_icarus_dive = true,
+    spirit_breaker_charge_of_darkness = true,
+    huskar_life_break = true,
+    mars_spear = true,
+    bat_rider_flaming_lasso = true,
+}
+
+-- Only queue while the locked enemy still has this modifier (e.g. Reel In needs Ensnare).
+Core.Catalog.RequiresEnemyModifier = {
+    naga_siren_reel_in = "modifier_naga_siren_ensnare",
 }
 
 Core.Catalog.Shadowraze = {
@@ -635,13 +695,15 @@ Core.PickBestShadowraze = function(dist)
     return best
 end
 
--- Silence/root/disarm: do not treat as hard CC for hex/sheep extend gating.
+-- Silence/root/disarm/amp: do not treat as hard CC for hex/sheep extend gating,
+-- and do not park casts waiting for an extend window (cast through active stun/hex).
 Core.Catalog.SoftDisableAbilities = {
     item_orchid = true,
     item_bloodthorn = true,
     item_rod_of_atos = true,
     item_gungir = true,
     item_heavens_halberd = true,
+    item_ethereal_blade = true,
 }
 
 Core.Catalog.InvokerEndItems = {
@@ -721,6 +783,7 @@ local Runtime = {
     lastFollowPos = nil,
     failedActions = {},
     usedActions = {},
+    usedActionCharges = {},
     sfUltBurstActive = false,
     sfUltSetupId = nil,
     debugVerboseAt = {},
@@ -952,8 +1015,24 @@ local function IsActionBlocked(actionKey, now)
 end
 
 local function MarkActionUsed(abilityId)
-    if abilityId then
-        Runtime.usedActions[abilityId] = true
+    if not abilityId then
+        return
+    end
+    Runtime.usedActions[abilityId] = true
+    local ability = Runtime.pending and Runtime.pending.ability
+    if not ability or Runtime.pending.abilityId ~= abilityId then
+        Runtime.usedActionCharges[abilityId] = nil
+        return
+    end
+    -- Charge spells (Scurry, etc.) stay IsCastable with leftover charges; remember
+    -- post-cast charge count so ClearUsedActionsWhenReady does not immediately unmark.
+    local charges = SafeValue(Ability.GetCurrentCharges, ability)
+    local restore = SafeValue(Ability.ChargeRestoreTimeRemaining, ability)
+    if type(charges) == "number"
+        and (charges > 0 or (type(restore) == "number" and restore > 0)) then
+        Runtime.usedActionCharges[abilityId] = charges
+    else
+        Runtime.usedActionCharges[abilityId] = nil
     end
 end
 
@@ -1101,7 +1180,7 @@ local function MenuIcon(widget, icon)
     end
 end
 
-local function L(en, _)
+local function L(en)
     return en
 end
 
@@ -1330,7 +1409,18 @@ local function GetCastRange(unit, ability)
             end
         end
     end
-    return (range or 0) + (SafeValue(NPC.GetCastRangeBonus, unit) or 0)
+    range = range or 0
+    -- True global (KV cast range 0) or still-unknown after fallbacks: never treat as
+    -- "walk to 80". Prefer cast-attempt + fail over melee approach deadlock.
+    if range <= 0 then
+        return GLOBAL_CAST_RANGE
+    end
+    return range + (SafeValue(NPC.GetCastRangeBonus, unit) or 0)
+end
+
+-- On Core to avoid Lua local-limit; mirrors GLOBAL_CAST_RANGE sentinel.
+Core.IsUnboundedCastRange = function(range)
+    return type(range) ~= "number" or range <= 0 or range >= GLOBAL_CAST_RANGE
 end
 
 local function GetAttackRange(unit)
@@ -1797,6 +1887,8 @@ end
 
 -- usedActions blocks re-queue within one cast cycle; once CD is up again, allow reuse
 -- while the combo bind stays held (do not wait for bind release / EndSession).
+-- Charge abilities: only clear after a charge restores (charges rose), not while leftover
+-- charges keep IsCastable true.
 local function ClearUsedActionsWhenReady(ctx)
     if not ctx or not ctx.controlled then
         return
@@ -1810,10 +1902,33 @@ local function ClearUsedActionsWhenReady(ctx)
             end
             if not ability then
                 Runtime.usedActions[abilityId] = nil
-            elseif SafeValue(Ability.IsCastable, ability, mana) then
-                Runtime.usedActions[abilityId] = nil
+                Runtime.usedActionCharges[abilityId] = nil
+            else
+                local usedCharges = Runtime.usedActionCharges[abilityId]
+                local charges = SafeValue(Ability.GetCurrentCharges, ability)
+                if type(usedCharges) == "number" and type(charges) == "number" then
+                    if charges > usedCharges then
+                        Runtime.usedActions[abilityId] = nil
+                        Runtime.usedActionCharges[abilityId] = nil
+                    end
+                elseif SafeValue(Ability.IsCastable, ability, mana) then
+                    -- Toggles are always castable; clearing used re-queues and flips them.
+                    -- Keep used for the whole bind (EndSession clears).
+                    local beh = SafeValue(Ability.GetBehavior, ability, true)
+                        or SafeValue(Ability.GetBehavior, ability, false) or 0
+                    if HasAbilityBehaviorFlag(beh, BEH.DOTA_ABILITY_BEHAVIOR_TOGGLE) then
+                        goto continue_clear_used
+                    end
+                    local skipMod = Core.Catalog.SkipWhileSelfModifier[abilityId]
+                    if skipMod and SafeValue(NPC.HasModifier, ctx.controlled, skipMod) == true then
+                        goto continue_clear_used
+                    end
+                    Runtime.usedActions[abilityId] = nil
+                    Runtime.usedActionCharges[abilityId] = nil
+                end
             end
         end
+        ::continue_clear_used::
     end
 end
 
@@ -2063,6 +2178,19 @@ local function GetEnemiesNear(origin, radius, controlled)
         return {}
     end
     return SafeValue(Heroes.InRadius, origin, radius, teamNum, TEAM_ENEMY, true, true) or {}
+end
+
+-- Static + temp trees (Acorn / Iron Branch / Furion) inside radius of a world position.
+Core.HasTreesNear = function(pos, radius)
+    if not pos or type(radius) ~= "number" or radius <= 0 then
+        return false
+    end
+    local trees = SafeValue(Trees.InRadius, pos, radius, true) or {}
+    if type(trees) == "table" and #trees > 0 then
+        return true
+    end
+    local temps = SafeValue(TempTrees.InRadius, pos, radius) or {}
+    return type(temps) == "table" and #temps > 0
 end
 
 -- Allied heroes near origin; excludes `controlled` (Void is immune to his Chronosphere).
@@ -2441,7 +2569,7 @@ local function TryAppendInitiateBlink(ctx, actions, opts)
 end
 
 -- Mars: Arena/Spear/blink aligned so Spear pins on the ally-side Arena wall.
--- Push dir = enemy → ally centroid (fallback LocalHero, then Mars).
+-- Push dir = enemy -> ally centroid (fallback LocalHero, then Mars).
 -- Defined after TryAppendInitiateBlink so the local is in scope.
 function Core.BuildMarsPlan(ctx, actions)
     if not ctx or not ctx.controlled or not ctx.enemy or not actions then
@@ -2578,7 +2706,8 @@ FindHexPointCastPosition = function(ctx, ability, abilityId, preferTarget)
     end
 
     local castRange = GetCastRange(ctx.controlled, ability)
-    if castRange <= 0 then
+    -- Unbounded / global: do not scan the whole map for hex clusters.
+    if Core.IsUnboundedCastRange(castRange) then
         return preferPos
     end
 
@@ -2637,11 +2766,29 @@ end
 
 local function InvalidateLostTarget(controlled)
     if Runtime.lockedEnemy and not CanTargetEnemy(Runtime.lockedEnemy, controlled) then
-        Runtime.lockedEnemy = nil
-        Runtime.lockedEnemyScore = nil
-        Runtime.actionQueue = {}
-        if Runtime.pending and (Runtime.pending.kind == "lockedEnemy" or Runtime.pending.kind == "linkbreak") then
-            Runtime.pending = nil
+        local pending = Runtime.pending
+        local holdChanneled = false
+        if pending and pending.ability then
+            local chBehavior = SafeValue(Ability.GetBehavior, pending.ability, true)
+                or SafeValue(Ability.GetBehavior, pending.ability, false) or 0
+            -- Once a channelled cast is in flight, only ConfirmAction / timeout may clear it.
+            -- Clearing here races the end-of-channel frame and lets follow cancel Dismember.
+            if HasAbilityBehaviorFlag(chBehavior, BEH.DOTA_ABILITY_BEHAVIOR_CHANNELLED) then
+                holdChanneled = true
+            end
+        end
+        if not holdChanneled then
+            Runtime.lockedEnemy = nil
+            Runtime.lockedEnemyScore = nil
+            Runtime.actionQueue = {}
+            if pending and (pending.kind == "lockedEnemy" or pending.kind == "linkbreak") then
+                Runtime.pending = nil
+            end
+        else
+            -- Drop the lock/queue but keep pending so movement stays blocked.
+            Runtime.lockedEnemy = nil
+            Runtime.lockedEnemyScore = nil
+            Runtime.actionQueue = {}
         end
     end
 end
@@ -2768,7 +2915,7 @@ local function ResolveTargetByCursor(controlled, enemies, searchRadius)
     local best = nil
     local bestDist = math.huge
 
-    -- Prefer world distance to cursor (100–300). Screen fallback only if world pos missing.
+    -- Prefer world distance to cursor (100-300). Screen fallback only if world pos missing.
     local cx, cy = nil, nil
     if not cursorWorld then
         if not Input or not Input.GetCursorPos or not Render then
@@ -2815,7 +2962,7 @@ local function ResolveTargetByCursor(controlled, enemies, searchRadius)
         end
     end
 
-    -- Prefer a tight hover (≤ min) when several heroes sit in the 300 ring.
+    -- Prefer a tight hover (<= min) when several heroes sit in the 300 ring.
     if best and cursorWorld and bestDist > CURSOR_WORLD_PICK_MIN then
         local tight = nil
         local tightDist = math.huge
@@ -3004,7 +3151,7 @@ local function ResolveLockedEnemy(ctx, force)
     if styleMode == TARGET_STYLE_SCORE then
         picked, score = ResolveTargetByScore(controlled, enemies, clusterRadius, minCluster)
     else
-        -- Cursor: only lock/switch when a hero is within 100–300 of the world cursor.
+        -- Cursor: only lock/switch when a hero is within 100-300 of the world cursor.
         -- Do not fall back to nearest-to-self (that felt like max search-radius targeting).
         picked = ResolveTargetByCursor(controlled, enemies, searchRadius)
             or ResolveTargetByNearest(controlled, searchRadius, false)
@@ -3190,7 +3337,7 @@ local function RefreshControllableAllies(now)
             end
             if #items == 0 then
                 items[1] = { "none", "", false }
-                tips.none = L("No controllable ally", "Нет доступного союзника")
+                tips.none = L("No controllable ally")
             end
             -- expanded=false avoids reopen animation on roster rebuild.
             SafeValue(UI.AllyHero.Update, UI.AllyHero, items, false, false)
@@ -3401,6 +3548,20 @@ local function ShouldCastDisable(ctx, enemy, abilityId, ability)
         return false
     end
 
+    -- Soft/amp items (orchid, ethereal, …): cast through hard CC; never wait/extend.
+    if Core.Catalog.SoftDisableAbilities[abilityId] then
+        local ownRemaining = GetActiveDisableRemaining(enemy, abilityId, ctx.now)
+        if ownRemaining and ownRemaining > 0 then
+            local extendEnabled = UI.ExtendDisables and SafeValue(UI.ExtendDisables.Get, UI.ExtendDisables)
+            if not extendEnabled then
+                return false
+            end
+            local castPoint = SafeValue(Ability.GetCastPoint, ability, true) or 0.2
+            return ownRemaining <= castPoint + EXTEND_BUFFER
+        end
+        return true
+    end
+
     local remaining = GetActiveDisableRemaining(enemy, abilityId, ctx.now)
     if not remaining then
         remaining = GetHardCcRemaining(enemy, ctx.now)
@@ -3423,6 +3584,21 @@ local function ShouldCastDisable(ctx, enemy, abilityId, ability)
     return remaining <= castPoint + EXTEND_BUFFER
 end
 
+-- Invoker plans one spell at a time; parking on cold_snap for CC-extend stalls EMP/meteor.
+function Core.InvokerShouldDeferDisable(ctx, abilityId, ability)
+    if not ctx or not ctx.enemy or not abilityId or not ability then
+        return false
+    end
+    if not Core.Catalog.DisableModifiers[abilityId]
+        and not Core.Catalog.HexAbilities[abilityId] then
+        return false
+    end
+    if Core.Catalog.SoftDisableAbilities[abilityId] then
+        return false
+    end
+    return not ShouldCastDisable(ctx, ctx.enemy, abilityId, ability)
+end
+
 local function BuildGenericAoeUltPlan(ctx, actions, abilityId)
     if not IsAbilityEnabled(abilityId) then
         return
@@ -3442,6 +3618,19 @@ local function BuildGenericAoeUltPlan(ctx, actions, abilityId)
 
     local meta = Core.Catalog.AbilityMeta[abilityId]
     local radius = GetAoeRadius(ability, abilityId, meta)
+    -- Global NO_TARGET ults (Zeus Wrath): no local AoE — cast on lock during combo.
+    if meta and meta.noTarget and (meta.global == true or radius <= 0) then
+        if Runtime.comboActive and ctx.enemy then
+            actions[#actions + 1] = {
+                kind = "noTarget",
+                ability = ability,
+                abilityId = abilityId,
+                priority = 860,
+                tag = abilityId,
+            }
+        end
+        return
+    end
     local minHits = UI.MinClusterHits and SafeValue(UI.MinClusterHits.Get, UI.MinClusterHits) or 2
     -- Combo on a locked target: allow single-hero AOE when that enemy is already in radius.
     if Runtime.comboActive and ctx.enemy and (meta == nil or meta.allowSingle ~= false) then
@@ -3801,7 +3990,7 @@ local function MorphWaveformLandPos(controlled, enemy)
     return myPos:Extend2D(enemyPos, travel)
 end
 
--- Native form: Waveform → Ethereal → Adaptive → Morph.
+-- Native form: Waveform -> Ethereal -> Adaptive -> Morph.
 -- Morphed form: steal target kit/profile; generic planner casts remaining stolen spells.
 local function BuildMorphlingPlan(ctx, actions)
     if not ctx.controlled then
@@ -3833,7 +4022,7 @@ local function BuildMorphlingPlan(ctx, actions)
         return
     end
 
-    -- Keep Morph source while the Morph timer is still up (native ↔ stolen toggle window).
+    -- Keep Morph source while the Morph timer is still up (native <-> stolen toggle window).
     local morphWindow = SafeValue(NPC.HasModifier, ctx.controlled, "modifier_morphling_replicate_manager") == true
     if Runtime.morphWasReplicated
         and not Runtime.morphAwaitReplicate
@@ -3904,7 +4093,7 @@ local function BuildMorphlingPlan(ctx, actions)
     end
 
     -- Morph timer still active on native model: Morph Replicate toggles back into the enemy.
-    -- This is not a fresh Morph cast — morphling_replicate stays on CD for the window.
+    -- This is not a fresh Morph cast -- morphling_replicate stays on CD for the window.
     if morphWindow then
         Runtime.usedActions["morphling_morph_replicate"] = nil
         Runtime.failedActions["morphling_morph_replicate"] = nil
@@ -4020,7 +4209,7 @@ local function BuildMorphlingPlan(ctx, actions)
         end
     end
 
-    -- Adaptive Strike (AGI) — STR variant no longer exists in npc_abilities.
+    -- Adaptive Strike (AGI) -- STR variant no longer exists in npc_abilities.
     local strikeId = "morphling_adaptive_strike_agi"
     if IsAbilityEnabled(strikeId)
         and not IsActionBlocked(strikeId, ctx.now)
@@ -4112,7 +4301,7 @@ Core.BuildNevermorePlan = function(ctx, actions)
         end
     end
 
-    -- Ult burst: blink → land → (Feast?) → abyssal|hex → Requiem → refresher.
+    -- Ult burst: blink -> land -> (Feast?) -> abyssal|hex -> Requiem -> refresher.
     -- Abyssal only with L25 Feast cast-speed talent; otherwise prefer hex (longer disable).
     -- Feast is post-blink only (never while blink is still queued).
     local requiemId = "nevermore_requiem"
@@ -4148,7 +4337,7 @@ Core.BuildNevermorePlan = function(ctx, actions)
     Runtime.sfUltSetupId = nil
 
     -- While blink is still in flight, queue ONLY blink. Setup/Feast/Requiem must
-    -- replan after land — otherwise the stale [abyssal, requiem] queue skips Feast.
+    -- replan after land -- otherwise the stale [abyssal, requiem] queue skips Feast.
     if waitingBlink then
         setupNote = "defer:postBlink"
         feastNote = "defer:postBlink"
@@ -4189,7 +4378,7 @@ Core.BuildNevermorePlan = function(ctx, actions)
                     setupNote = string.format("%s@%d", setupId, setup.priority)
 
                     -- Feast only with L25 cast-speed talent, post-blink / in pocket,
-                    -- immediately before Abyssal→Requiem.
+                    -- immediately before Abyssal->Requiem.
                     if setupId == "item_abyssal_blade" and hasCastTalent then
                         local feastId = Core.Catalog.NevermoreFeastId
                         local feastMod = Core.Catalog.NevermoreFeastMod
@@ -4374,12 +4563,92 @@ local function AppendKitAbility(ctx, actions, step)
         or IsActionBlocked(abilityId, ctx.now) then
         return
     end
+    local skipMod = Core.Catalog.SkipWhileSelfModifier[abilityId]
+    if skipMod and ctx.controlled
+        and SafeValue(NPC.HasModifier, ctx.controlled, skipMod) then
+        return
+    end
+    local needEnemyMod = Core.Catalog.RequiresEnemyModifier[abilityId]
+    if needEnemyMod then
+        if not ctx.enemy
+            or not SafeValue(NPC.HasModifier, ctx.enemy, needEnemyMod) then
+            return
+        end
+    end
+    local channelParent = Core.Catalog.ChannelReleaseOf[abilityId]
+    if channelParent then
+        local parent = FindAbilityEntry(ctx.controlled, channelParent)
+        local channelling = parent and (
+            SafeValue(Ability.IsChannelling, parent)
+            or (
+                SafeValue(NPC.IsChannellingAbility, ctx.controlled)
+                and SafeValue(NPC.GetChannellingAbility, ctx.controlled) == parent
+            )
+        )
+        if not channelling then
+            return
+        end
+        -- Let the channel wind up / other casts dump before releasing a weak shot.
+        local since = SafeValue(Ability.SecondsSinceLastUse, parent)
+        if type(since) == "number" and since >= 0 and since < 0.85 then
+            return
+        end
+    end
     local ability = FindAbilityEntry(ctx.controlled, abilityId)
     if not ability or not SafeValue(Ability.IsCastable, ability, ctx.mana) then
         return
     end
 
     local priority = type(step.priority) == "number" and step.priority or 700
+    -- Hoodwink: Bushwhack needs a tree in trap radius. If none, plant Acorn on the
+    -- lock first, then Bushwhack once a tree exists (or Acorn is already spent/blocked).
+    if abilityId == "hoodwink_acorn_shot" or abilityId == "hoodwink_bushwhack" then
+        local enemyPos = ctx.enemy and SafeValue(Entity.GetAbsOrigin, ctx.enemy)
+        local trapR = 265
+        local bushMeta = Core.Catalog.AbilityMeta.hoodwink_bushwhack
+        if bushMeta and type(bushMeta.defaultRadius) == "number" then
+            trapR = bushMeta.defaultRadius
+        end
+        local hasTree = enemyPos ~= nil and Core.HasTreesNear(enemyPos, trapR)
+        if abilityId == "hoodwink_acorn_shot" then
+            priority = hasTree and 880 or 920
+        else
+            if not hasTree and not IsActionUsed("hoodwink_acorn_shot") then
+                local acorn = FindAbilityEntry(ctx.controlled, "hoodwink_acorn_shot")
+                local acornReady = acorn
+                    and IsAbilityEnabled("hoodwink_acorn_shot")
+                    and not IsActionBlocked("hoodwink_acorn_shot", ctx.now)
+                    and SafeValue(Ability.IsCastable, acorn, ctx.mana)
+                if acornReady then
+                    return
+                end
+            end
+            priority = hasTree and 900 or 860
+        end
+    end
+    -- Curse scales with trees near the lock; never solo-fire before a lock / Sprout setup.
+    if abilityId == "furion_curse_of_the_forest" then
+        if not ctx.enemy then
+            return
+        end
+        local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
+        local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
+        -- AbilityValues.range = 900: heroes farther than this are unaffected.
+        if myPos and enemyPos and Dist2D(myPos, enemyPos) > 900 then
+            return
+        end
+        local hasTree = enemyPos ~= nil and Core.HasTreesNear(enemyPos, 275)
+        if not hasTree and not IsActionUsed("furion_sprout") then
+            local sprout = FindAbilityEntry(ctx.controlled, "furion_sprout")
+            local sproutReady = sprout
+                and IsAbilityEnabled("furion_sprout")
+                and not IsActionBlocked("furion_sprout", ctx.now)
+                and SafeValue(Ability.IsCastable, sprout, ctx.mana)
+            if sproutReady then
+                return
+            end
+        end
+    end
     local meta = Core.Catalog.AbilityMeta[abilityId]
     if builder == "lockedEnemy" then
         if not ctx.enemy then
@@ -4431,6 +4700,27 @@ local function AppendKitAbility(ctx, actions, step)
             }
             return
         end
+        -- Toggle (Rot): only turn ON once, and only when an enemy is in AoE.
+        if HasAbilityBehaviorFlag(liveBeh, BEH.DOTA_ABILITY_BEHAVIOR_TOGGLE) then
+            if SafeValue(Ability.GetToggleState, ability) == true then
+                MarkActionUsed(abilityId)
+                return
+            end
+            if not ctx.enemy then
+                return
+            end
+            local aoeRadius = GetAoeRadius(ability, abilityId, meta)
+            if aoeRadius and aoeRadius > 0 then
+                local myPos = ctx.snapshot and ctx.snapshot.positions.controlled
+                    or SafeValue(Entity.GetAbsOrigin, ctx.controlled)
+                local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
+                if myPos and enemyPos and Dist2D(myPos, enemyPos) > aoeRadius + 40 then
+                    return
+                end
+            end
+        elseif Runtime.comboActive and not ctx.enemy then
+            return
+        end
         actions[#actions + 1] = {
             kind = "noTarget",
             ability = ability,
@@ -4441,6 +4731,15 @@ local function AppendKitAbility(ctx, actions, step)
     elseif builder == "bestPosition" then
         if not ctx.enemy then
             return
+        end
+        -- Already in Dismember / melee range: Hook only delays the ult.
+        if abilityId == "pudge_meat_hook" then
+            local myPos = ctx.snapshot and ctx.snapshot.positions.controlled
+                or SafeValue(Entity.GetAbsOrigin, ctx.controlled)
+            local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
+            if myPos and enemyPos and Dist2D(myPos, enemyPos) <= 300 then
+                return
+            end
         end
         actions[#actions + 1] = {
             kind = "bestPosition",
@@ -4648,12 +4947,14 @@ Core.Catalog.HeroKitsManual = {
             { id = "nyx_assassin_vendetta", builder = "noTarget", priority = 900 },
         },
     },
+    -- Seal → Concussive → items(735) → Flare → Bolt so root/amp land before Flare AoE.
     npc_dota_hero_skywrath_mage = {
         initiate = { blink = true, landDist = 160, minDist = 500, priority = 980 },
         steps = {
             { id = "skywrath_mage_ancient_seal", builder = "lockedEnemy", priority = 900 },
-            { id = "skywrath_mage_mystic_flare", builder = "bestPosition", priority = 840 },
-            { id = "skywrath_mage_arcane_bolt", builder = "lockedEnemy", priority = 720 },
+            { id = "skywrath_mage_concussive_shot", builder = "noTarget", priority = 760 },
+            { id = "skywrath_mage_mystic_flare", builder = "bestPosition", priority = 710 },
+            { id = "skywrath_mage_arcane_bolt", builder = "lockedEnemy", priority = 690 },
         },
     },
     npc_dota_hero_jakiro = {
@@ -4673,7 +4974,7 @@ Core.Catalog.HeroKitsManual = {
         },
     },
     npc_dota_hero_nevermore = {
-        -- Blink whenever outside Requiem pocket so combo is blink → items → ult.
+        -- Blink whenever outside Requiem pocket so combo is blink -> items -> ult.
         initiate = { blink = true, landDist = 200, minDist = 320, priority = 980 },
         -- Razes + Requiem are owned by BuildNevermorePlan (face/align + ult timing).
         steps = {},
@@ -4702,6 +5003,54 @@ Core.Catalog.HeroKitsManual = {
         steps = {
             { builder = "supportSelf" },
             { id = "abaddon_death_coil", builder = "lockedEnemy", priority = 760 },
+        },
+    },
+    -- Acorn plants a tree for Bushwhack when none are near the lock; SS / boom / scurry fill.
+    npc_dota_hero_hoodwink = {
+        initiate = { blink = true, landDist = 160, minDist = 450, priority = 980 },
+        steps = {
+            { id = "hoodwink_acorn_shot", builder = "bestPosition", priority = 920 },
+            { id = "hoodwink_bushwhack", builder = "bestPosition", priority = 900 },
+            { id = "hoodwink_sharpshooter", builder = "bestPosition", priority = 860 },
+            { id = "hoodwink_hunters_boomerang", builder = "bestPosition", priority = 780 },
+            { id = "hoodwink_sharpshooter_release", builder = "noTarget", priority = 600 },
+            { id = "hoodwink_scurry", builder = "noTarget", priority = 520 },
+        },
+    },
+    -- Ensnare -> Mirror; Reel In only while net is on the lock. Song is a save, not kill combo.
+    npc_dota_hero_naga_siren = {
+        initiate = { blink = true, landDist = 120, minDist = 400, priority = 980 },
+        steps = {
+            { id = "naga_siren_ensnare", builder = "lockedEnemy", priority = 900 },
+            { id = "naga_siren_mirror_image", builder = "noTarget", priority = 860 },
+            { id = "naga_siren_reel_in", builder = "noTarget", priority = 780 },
+        },
+    },
+    -- Sprout trap → Wrath → shard Curse (after trees). TP / Force of Nature are SkipAbilities.
+    npc_dota_hero_furion = {
+        initiate = { blink = true, landDist = 160, minDist = 700, priority = 980 },
+        steps = {
+            { id = "furion_sprout", builder = "lockedEnemy", priority = 900 },
+            { id = "furion_wrath_of_nature", builder = "lockedEnemy", priority = 860 },
+            { id = "furion_curse_of_the_forest", builder = "noTarget", priority = 720 },
+        },
+    },
+    -- Gust → Multishot; Frost Arrows are SkipAbilities (autocast orb). Blink lands at range.
+    npc_dota_hero_drow_ranger = {
+        initiate = { blink = true, landDist = 520, minDist = 750, priority = 980 },
+        steps = {
+            { id = "drow_ranger_wave_of_silence", builder = "bestPosition", priority = 900 },
+            { id = "drow_ranger_multishot", builder = "bestPosition", priority = 820 },
+            { id = "drow_ranger_glacier", builder = "noTarget", priority = 520 },
+        },
+    },
+    -- Hook → Dismember when close; Rot toggles on once in radius. Flesh Heap is SkipAbilities.
+    npc_dota_hero_pudge = {
+        initiate = { blink = true, landDist = 140, minDist = 450, priority = 980 },
+        steps = {
+            { id = "pudge_meat_hook", builder = "bestPosition", priority = 920 },
+            { id = "pudge_dismember", builder = "lockedEnemy", priority = 860 },
+            { id = "pudge_rot", builder = "noTarget", priority = 800 },
         },
     },
 }
@@ -4829,6 +5178,17 @@ Core.Catalog.HeroProfiles = {
                         if awaitId == "invoker_ice_wall" and awaitKind == "noTarget" then
                             awaitKind = "iceWall"
                         end
+                        if (awaitKind == "lockedEnemy" or awaitKind == "linkbreak")
+                            and Core.InvokerShouldDeferDisable(ctx, awaitId, awaitSpell) then
+                            Core.DbgEvent(
+                                "invoker skip_disable | %s | wait/extend active cc | %s",
+                                awaitId,
+                                FormatRangeContext(ctx)
+                            )
+                            MarkActionUsed(awaitId)
+                            Runtime.invokerAwaitSpell = nil
+                            goto invoker_continue_await
+                        end
                         if SafeValue(Ability.CanBeExecuted, awaitSpell) == ABILITY_CAST_READY
                             or SafeValue(Ability.IsCastable, awaitSpell, ctx.mana) then
                             actions[#actions + 1] = {
@@ -4842,6 +5202,10 @@ Core.Catalog.HeroProfiles = {
                             }
                             return
                         end
+                        -- Visible after invoke but not ready yet — wait, do not MarkActionUsed.
+                        if invokeAge < INVOKER_SLOT_WAIT then
+                            return
+                        end
                         DbgImportant("invoker skip | %s not castable", awaitId)
                         MarkActionUsed(awaitId)
                         Runtime.invokerAwaitSpell = nil
@@ -4853,6 +5217,7 @@ Core.Catalog.HeroProfiles = {
                 end
                 Runtime.invokerAwaitSpell = nil
             end
+            ::invoker_continue_await::
         end
         for i = 1, #Core.Catalog.InvokerSteps do
             local step = Core.Catalog.InvokerSteps[i]
@@ -4885,6 +5250,16 @@ Core.Catalog.HeroProfiles = {
                     if step.id == "invoker_ice_wall" and kind == "noTarget" then
                         kind = "iceWall"
                     end
+                    if (kind == "lockedEnemy" or kind == "linkbreak")
+                        and Core.InvokerShouldDeferDisable(ctx, step.id, spell) then
+                        Core.DbgEvent(
+                            "invoker skip_disable | %s | wait/extend active cc | %s",
+                            step.id,
+                            FormatRangeContext(ctx)
+                        )
+                        MarkActionUsed(step.id)
+                        goto invoker_continue_step
+                    end
                     if SafeValue(Ability.CanBeExecuted, spell) == ABILITY_CAST_READY
                         or SafeValue(Ability.IsCastable, spell, ctx.mana) then
                         actions[#actions + 1] = {
@@ -4896,6 +5271,14 @@ Core.Catalog.HeroProfiles = {
                             meta = Core.Catalog.AbilityMeta[step.id],
                             allowSingle = true,
                         }
+                        return
+                    end
+                    local cd = SafeValue(Ability.GetCooldown, spell)
+                    local onCd = type(cd) == "number" and cd > 0.05
+                    local invokeAge = Runtime.invokerLastInvokeAt > 0
+                        and (ctx.now - Runtime.invokerLastInvokeAt) or math.huge
+                    -- Post-invoke settle / cast lock: hold the planner, do not advance steps.
+                    if not onCd and invokeAge < INVOKER_SLOT_WAIT then
                         return
                     end
                     DbgImportant("invoker skip | %s not castable", step.id)
@@ -5003,6 +5386,10 @@ local function AppendGenericActions(ctx, actions)
 
     for _, entry in ipairs(ctx.snapshot and ctx.snapshot.items or CollectHeroItems(ctx.controlled)) do
         if IsItemEnabled(entry.id) and Core.Catalog.SelfNoTargetItems[entry.id] then
+            -- Combat actives (Satanic / MoM / …) need a lock; do not fire on empty plan ticks.
+            if Runtime.comboActive and not ctx.enemy then
+                goto continue_team_item
+            end
             if IsActionBlocked(entry.id, ctx.now) or IsActionUsed(entry.id) then
                 goto continue_team_item
             end
@@ -5066,11 +5453,27 @@ local function AppendGenericActions(ctx, actions)
             goto continue_ability
         end
         if IsAbilityEnabled(entry.id) and SafeValue(Ability.IsCastable, entry.ability, ctx.mana) then
+            -- Kit owns these ids (even when gated out this tick); do not re-add via generic.
+            if Runtime.kitAbilityIds and Runtime.kitAbilityIds[entry.id] then
+                goto continue_ability
+            end
             if IsActionBlocked(entry.id, ctx.now) then
                 goto continue_ability
             end
             if IsActionUsed(entry.id) then
                 goto continue_ability
+            end
+            local skipSelfMod = Core.Catalog.SkipWhileSelfModifier[entry.id]
+            if skipSelfMod and ctx.controlled
+                and SafeValue(NPC.HasModifier, ctx.controlled, skipSelfMod) then
+                goto continue_ability
+            end
+            local needEnemyMod = Core.Catalog.RequiresEnemyModifier[entry.id]
+            if needEnemyMod then
+                if not ctx.enemy
+                    or not SafeValue(NPC.HasModifier, ctx.enemy, needEnemyMod) then
+                    goto continue_ability
+                end
             end
             -- Defer Pulverize while Trample is active (orbit first, ult after).
             if entry.id == "primal_beast_pulverize"
@@ -5111,7 +5514,7 @@ local function AppendGenericActions(ctx, actions)
                 goto continue_ability
             end
 
-            -- Pointless no-target AOE (Call, Stomp, …) outside radius — wait / blink instead.
+            -- Pointless no-target AOE (Call, Stomp, ...) outside radius -- wait / blink instead.
             if policy == "noTarget" and meta and meta.noTarget and ctx.enemy then
                 local aoeRadius = GetAoeRadius(entry.ability, entry.id, meta)
                 if aoeRadius and aoeRadius > 0 then
@@ -5275,7 +5678,7 @@ local function AppendGenericActions(ctx, actions)
                     if isDisable then
                         should = ShouldCastDisable(ctx, ctx.enemy, entry.id, entry.item)
                     else
-                        -- Offensive target items (harpoon, force, vessel, …).
+                        -- Offensive target items (harpoon, force, vessel, ...).
                         should = true
                     end
                     if should and canCastOnEnemyNow(entry.item, policy) then
@@ -5334,24 +5737,47 @@ local function AppendGenericActions(ctx, actions)
         end
         local refresher = FindItemEntry(ctx.controlled, "item_refresher")
         if refresher and SafeValue(Ability.IsCastable, refresher, ctx.mana) then
+            -- Ignore toggles / short-CD spam (Arc, Lightning Hands): they stay ready and
+            -- permanently blocked "all skills on CD" refresher.
+            local REFRESHER_MIN_CD = 8.0
+            local function countsForRefresher(ability, abilityId)
+                if not ability or type(abilityId) ~= "string" then
+                    return false
+                end
+                if Core.Catalog.ReusableComboAbilities[abilityId] then
+                    return false
+                end
+                local beh = SafeValue(Ability.GetBehavior, ability, true)
+                    or SafeValue(Ability.GetBehavior, ability, false) or 0
+                if HasAbilityBehaviorFlag(beh, BEH.DOTA_ABILITY_BEHAVIOR_TOGGLE) then
+                    return false
+                end
+                local cdLen = SafeValue(Ability.GetCooldownLength, ability)
+                if type(cdLen) ~= "number" or cdLen < REFRESHER_MIN_CD then
+                    return false
+                end
+                return true
+            end
             local allOnCooldown = true
             local sawEnabledAbility = false
             if SafeValue(NPC.GetUnitName, ctx.controlled) == "npc_dota_hero_invoker" then
                 for ri = 1, #Core.Catalog.InvokerSteps do
                     local step = Core.Catalog.InvokerSteps[ri]
                     if IsAbilityEnabled(step.id) then
-                        sawEnabledAbility = true
                         local spell = SafeValue(NPC.GetAbility, ctx.controlled, step.id)
-                        local cooldown = spell and SafeValue(Ability.GetCooldown, spell)
-                        if type(cooldown) ~= "number" or cooldown <= 0 then
-                            allOnCooldown = false
-                            break
+                        if countsForRefresher(spell, step.id) then
+                            sawEnabledAbility = true
+                            local cooldown = SafeValue(Ability.GetCooldown, spell)
+                            if type(cooldown) ~= "number" or cooldown <= 0 then
+                                allOnCooldown = false
+                                break
+                            end
                         end
                     end
                 end
             else
                 for _, entry in ipairs(ctx.snapshot and ctx.snapshot.abilities or CollectHeroAbilities(ctx.controlled)) do
-                    if IsAbilityEnabled(entry.id) then
+                    if IsAbilityEnabled(entry.id) and countsForRefresher(entry.ability, entry.id) then
                         sawEnabledAbility = true
                         local cooldown = SafeValue(Ability.GetCooldown, entry.ability)
                         if type(cooldown) ~= "number" or cooldown <= 0 then
@@ -5369,7 +5795,7 @@ local function AppendGenericActions(ctx, actions)
                     priority = 500,
                     tag = "item_refresher_all_skills_cd",
                 }
-                DbgVerbose("refresher_ready", "refresher ready | all enabled abilities on cooldown")
+                DbgVerbose("refresher_ready", "refresher ready | long-cd abilities on cooldown")
             end
         end
         ::skip_generic_refresher::
@@ -5437,7 +5863,7 @@ local function ResolveActionPosition(ctx, action)
         allies
     )
 
-    -- Locked target wins over densest nearby cluster (HUD target ≠ random pack).
+    -- Locked target wins over densest nearby cluster (HUD target != random pack).
     if preferPos then
         local coversPreferred = pos and Dist2D(pos, preferPos) <= radius + RANGE_TOLERANCE
         if not coversPreferred or (hits or 0) < minHits then
@@ -5620,6 +6046,7 @@ local function BuildActionPlan(ctx)
     local actions = {}
     Runtime.sfUltBurstActive = false
     Runtime.sfUltSetupId = nil
+    Runtime.kitAbilityIds = {}
 
     local unitName = SafeValue(NPC.GetUnitName, ctx.controlled)
     local morphSource = nil
@@ -5632,6 +6059,15 @@ local function BuildActionPlan(ctx)
         local kit = Core.Catalog.HeroKits[kitName]
         if kit then
             ApplyHeroKit(ctx, actions, kit)
+            local steps = kit.steps
+            if type(steps) == "table" then
+                for i = 1, #steps do
+                    local sid = steps[i] and steps[i].id
+                    if type(sid) == "string" then
+                        Runtime.kitAbilityIds[sid] = true
+                    end
+                end
+            end
         end
     end
 
@@ -5672,9 +6108,12 @@ local function BuildActionPlan(ctx)
             end
         end
         if not hasBlink then
+            local atk = GetAttackRange(ctx.controlled)
+            local ranged = IsRangedAttacker(ctx.controlled)
+            -- Ranged: land at attack range, not melee (160). Melee stays close.
             TryAppendInitiateBlink(ctx, actions, {
-                minDist = 550,
-                landDist = 160,
+                minDist = ranged and (atk + 80) or 550,
+                landDist = ranged and math.max(atk - 50, 350) or 160,
                 priority = 980,
             })
         end
@@ -5728,6 +6167,7 @@ local function EndSession(reason)
     Runtime.comboForceResolve = false
     Runtime.failedActions = {}
     Runtime.usedActions = {}
+    Runtime.usedActionCharges = {}
     Runtime.sfUltBurstActive = false
     Runtime.sfUltSetupId = nil
     Runtime.shrapnelLastCastAt = 0
@@ -6049,7 +6489,15 @@ function Core.ActionRunner.Normalize(action)
         elseif isInvokerStep then
             action.confirmationPolicy = "usageEvidence"
         else
-            action.confirmationPolicy = "usageOrAck"
+            local behavior = action.ability and (
+                SafeValue(Ability.GetBehavior, action.ability, true)
+                    or SafeValue(Ability.GetBehavior, action.ability, false) or 0
+            ) or 0
+            if HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_TOGGLE) then
+                action.confirmationPolicy = "toggleFlip"
+            else
+                action.confirmationPolicy = "usageOrAck"
+            end
         end
     end
     return action
@@ -6073,8 +6521,10 @@ function Core.ActionRunner.PreparePending(ctx, action)
         confirmationPolicy = action.confirmationPolicy,
         ability = action.ability,
         abilityId = action.abilityId,
-        target = action.targetPolicy == "localHero" and ctx.localHero
-            or (action.targetPolicy == "lockedEnemy" and ctx.enemy or nil),
+        target = action.target
+            or (action.targetPolicy == "localHero" and ctx.localHero)
+            or (action.targetPolicy == "lockedEnemy" and ctx.enemy)
+            or nil,
         position = action.position,
         positionAt = action.positionAt,
         positionTtl = action.positionTtl,
@@ -6255,11 +6705,42 @@ local function ConfirmAction(ctx, pending)
         return not TargetNeedsLinkBreak(ctx.enemy)
     end
 
+    if confirmationPolicy == "toggleFlip" then
+        local toggle = SafeValue(Ability.GetToggleState, pending.ability)
+        if toggle == true then
+            return true
+        end
+        local skipMod = pending.abilityId and Core.Catalog.SkipWhileSelfModifier[pending.abilityId]
+        if skipMod and ctx.controlled
+            and SafeValue(NPC.HasModifier, ctx.controlled, skipMod) == true then
+            return true
+        end
+        if type(pending.toggleAtStart) == "boolean"
+            and type(toggle) == "boolean"
+            and toggle ~= pending.toggleAtStart
+            and toggle == true then
+            return true
+        end
+        -- GetToggleState is unreliable for some toggles (Rot); after ack settle assume ON.
+        -- usedActions stays sticky for toggles for the bind, so this does not re-flip.
+        if pending.orderAck and hasOrderAckSettled() then
+            local ackAt = pending.ackAt or pending.startedAt
+            if type(ackAt) == "number" and ctx.now - ackAt >= 0.25 then
+                return true
+            end
+        end
+        return false
+    end
+
     if pending.kind == "lockedEnemy" and pending.target then
         if Core.Catalog.DisableModifiers[pending.abilityId] then
             local remaining = GetActiveDisableRemaining(pending.target, pending.abilityId, ctx.now)
             if remaining and remaining > 0.05 then
-                return true
+                local chBehaviorEarly = SafeValue(Ability.GetBehavior, pending.ability, true)
+                    or SafeValue(Ability.GetBehavior, pending.ability, false) or 0
+                if not HasAbilityBehaviorFlag(chBehaviorEarly, BEH.DOTA_ABILITY_BEHAVIOR_CHANNELLED) then
+                    return true
+                end
             end
         end
         if Core.Catalog.HexAbilities[pending.abilityId]
@@ -6272,14 +6753,33 @@ local function ConfirmAction(ctx, pending)
         local isChanneled = HasAbilityBehaviorFlag(chBehavior, BEH.DOTA_ABILITY_BEHAVIOR_CHANNELLED)
         if isChanneled then
             if SafeValue(Ability.IsChannelling, pending.ability)
-                or SafeValue(NPC.IsChannellingAbility, ctx.controlled) then
+                or SafeValue(NPC.IsChannellingAbility, ctx.controlled)
+                or SafeValue(Ability.IsInAbilityPhase, pending.ability) then
                 local channel = SafeValue(NPC.GetChannellingAbility, ctx.controlled)
-                if channel == pending.ability or SafeValue(Ability.IsChannelling, pending.ability) then
+                if channel == pending.ability
+                    or SafeValue(Ability.IsChannelling, pending.ability)
+                    or SafeValue(Ability.IsInAbilityPhase, pending.ability) then
                     pending.channelObserved = true
+                    pending.lastChannelAt = ctx.now
                     return false
                 end
             end
-            return pending.channelObserved and confirmDefault()
+            if pending.orderAck and hasUsageEvidence() then
+                pending.channelObserved = true
+                if type(pending.lastChannelAt) ~= "number" then
+                    pending.lastChannelAt = ctx.now
+                end
+                return false
+            end
+            -- Anti-flicker: one false IsChannelling frame must not confirm mid-channel.
+            if pending.channelObserved then
+                local lastAt = pending.lastChannelAt or pending.startedAt
+                if type(lastAt) == "number" and ctx.now - lastAt < 0.2 then
+                    return false
+                end
+                return true
+            end
+            return false
         end
         if SafeValue(NPC.IsChannellingAbility, ctx.controlled) then
             local channel = SafeValue(NPC.GetChannellingAbility, ctx.controlled)
@@ -6317,14 +6817,42 @@ local function ConfirmAction(ctx, pending)
         local isChanneled = HasAbilityBehaviorFlag(chBehavior, BEH.DOTA_ABILITY_BEHAVIOR_CHANNELLED)
         if isChanneled then
             if SafeValue(Ability.IsChannelling, pending.ability)
-                or SafeValue(NPC.IsChannellingAbility, ctx.controlled) then
+                or SafeValue(NPC.IsChannellingAbility, ctx.controlled)
+                or SafeValue(Ability.IsInAbilityPhase, pending.ability) then
                 local channel = SafeValue(NPC.GetChannellingAbility, ctx.controlled)
-                if channel == pending.ability or SafeValue(Ability.IsChannelling, pending.ability) then
+                if channel == pending.ability
+                    or SafeValue(Ability.IsChannelling, pending.ability)
+                    or SafeValue(Ability.IsInAbilityPhase, pending.ability) then
                     pending.channelObserved = true
+                    pending.lastChannelAt = ctx.now
                     return false
                 end
             end
-            return pending.channelObserved and confirmDefault()
+            -- Multishot etc.: API may not report IsChannelling; usage/ack means channel began.
+            if pending.orderAck and hasUsageEvidence() then
+                pending.channelObserved = true
+                if type(pending.lastChannelAt) ~= "number" then
+                    pending.lastChannelAt = ctx.now
+                end
+            end
+            if pending.channelObserved then
+                local lastAt = pending.lastChannelAt or pending.startedAt
+                if type(lastAt) == "number" and ctx.now - lastAt < 0.2 then
+                    return false
+                end
+                -- Still channelling by usage window: hold until quiet or soft timeout.
+                if SafeValue(Ability.IsInAbilityPhase, pending.ability) then
+                    pending.lastChannelAt = ctx.now
+                    return false
+                end
+                return true
+            end
+            -- Soft unblock if channel never surfaced after full channel window.
+            local ackAt = pending.ackAt or pending.startedAt
+            if pending.orderAck and type(ackAt) == "number" and ctx.now - ackAt >= 2.0 then
+                return true
+            end
+            return false
         end
         return confirmDefault()
     end
@@ -6368,7 +6896,7 @@ local function IssueMoveToPosition(ctx, pos, tag)
 end
 
 -- Face + short align so Shadowraze (forward cone) lands on the locked enemy.
--- Returns true (ready), false (wait/align), or "drop" (stale/wrong-range — remove from queue).
+-- Returns true (ready), false (wait/align), or "drop" (stale/wrong-range -- remove from queue).
 Core.EnsureNevermoreRazeReady = function(ctx, action)
     if not ctx or not ctx.controlled or not ctx.enemy or not action then
         return false
@@ -6576,7 +7104,8 @@ local function GetActionTargetPos(ctx, ref)
         return target and SafeValue(Entity.GetAbsOrigin, target) or nil
     end
     if targetPolicy == "localHero" then
-        return ctx.localHero and SafeValue(Entity.GetAbsOrigin, ctx.localHero) or nil
+        local target = ref.target or ctx.localHero
+        return target and SafeValue(Entity.GetAbsOrigin, target) or nil
     end
     return nil
 end
@@ -6624,7 +7153,7 @@ local function PrepareActionForExecution(ctx, action)
             local dashTo = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
             if dashFrom and dashTo and Dist2D(dashFrom, dashTo) >= 1 then
                 local maxTravel = GetCastRange(ctx.controlled, action.ability)
-                if type(maxTravel) ~= "number" or maxTravel <= 0 then
+                if Core.IsUnboundedCastRange(maxTravel) then
                     maxTravel = dashMeta.minTravel
                 end
                 local overshoot = type(dashMeta.overshoot) == "number" and dashMeta.overshoot or 120
@@ -6647,6 +7176,15 @@ local function IsWithinCastRange(ctx, ref)
     end
     local rangePolicy = ref.rangePolicy or ref.kind
     if rangePolicy == "noTarget" then
+        local meta = ref.meta or (ref.abilityId and Core.Catalog.AbilityMeta[ref.abilityId])
+        local radius = GetAoeRadius(ref.ability, ref.abilityId, meta)
+        if type(radius) == "number" and radius > 0 and ctx.enemy and ctx.controlled then
+            local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
+            local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
+            if myPos and enemyPos then
+                return Dist2D(myPos, enemyPos) <= radius + 40
+            end
+        end
         return true
     end
     if not PrepareActionForExecution(ctx, ref) then
@@ -6666,15 +7204,18 @@ local function IsWithinCastRange(ctx, ref)
             and type(faceTime) == "number" and faceTime <= 0.08
     end
     local castRange = GetCastRange(ctx.controlled, ref.ability)
-    if castRange <= 0 then
-        return false
+    if Core.IsUnboundedCastRange(castRange) then
+        return true
     end
     local target = ref.target
         or ((rangePolicy == "lockedEnemy" or ref.kind == "lockedEnemy" or ref.kind == "linkbreak")
             and ctx.enemy)
-        or (ref.kind == "localHero" and ctx.localHero)
+        or (ref.kind == "localHero" and (ref.target or ctx.localHero))
         or nil
     if target then
+        if target == ctx.controlled then
+            return true
+        end
         local inRange = SafeValue(NPC.IsEntityInRange, ctx.controlled, target, castRange)
         if inRange == true then
             return true
@@ -6707,8 +7248,11 @@ local function ExecuteAction(ctx, action)
     end
     local issuePolicy = action.issuePolicy or action.kind
 
-    if issuePolicy == "localHero" and ctx.localHero then
-        return CastOnTarget(ctx, action.ability, ctx.localHero, action.tag, action.identifier)
+    if issuePolicy == "localHero" then
+        local target = action.target or ctx.localHero
+        if target then
+            return CastOnTarget(ctx, action.ability, target, action.tag, action.identifier)
+        end
     end
 
     if issuePolicy == "linkbreak" and (action.target or ctx.enemy) then
@@ -6933,9 +7477,22 @@ local function ProcessMovement(ctx)
     EnsureCtxEnemy(ctx)
     local moveEnemy = GetMovementEnemy(ctx)
     if Runtime.comboActive and not moveEnemy and Runtime.lockedEnemy then
-        Runtime.lockedEnemy = nil
-        Runtime.lockedEnemyScore = nil
-        Runtime.actionQueue = {}
+        local holdForChannel = false
+        if Runtime.pending and Runtime.pending.ability then
+            local chBehavior = SafeValue(Ability.GetBehavior, Runtime.pending.ability, true)
+                or SafeValue(Ability.GetBehavior, Runtime.pending.ability, false) or 0
+            if HasAbilityBehaviorFlag(chBehavior, BEH.DOTA_ABILITY_BEHAVIOR_CHANNELLED) then
+                holdForChannel = true
+            end
+        end
+        if not holdForChannel and SafeValue(NPC.IsChannellingAbility, ctx.controlled) then
+            holdForChannel = true
+        end
+        if not holdForChannel then
+            Runtime.lockedEnemy = nil
+            Runtime.lockedEnemyScore = nil
+            Runtime.actionQueue = {}
+        end
     end
     local hasEnemy = moveEnemy ~= nil
 
@@ -6993,7 +7550,7 @@ local function ProcessMovement(ctx)
         end
     end
 
-    -- While Trample is active, never freeze movement for a "ready" Pulverize —
+    -- While Trample is active, never freeze movement for a "ready" Pulverize --
     -- orbit must continue for the full buff duration.
     local tramplingForMove = Runtime.comboActive and IsPrimalBeastTrampling(ctx.controlled)
     if queueBlocksMove and not tramplingForMove then
@@ -7075,16 +7632,19 @@ local function ProcessMovement(ctx)
                     local deferUltForTrample = head
                         and head.abilityId == "primal_beast_pulverize"
                         and IsPrimalBeastTrampling(ctx.controlled)
-                    local enterDist = math.max(range - RANGE_CAST_BUFFER, 80)
-                    if not deferUltForTrample and dist > enterDist + RANGE_TOLERANCE then
-                        DbgVerbose("event",
-                            "combo_approach | dist=%.0f need<=%d action=%s | %s",
-                            dist,
-                            math.floor(enterDist + RANGE_TOLERANCE),
-                            head and head.abilityId or "?",
-                            FormatRangeContext(ctx)
-                        )
-                        issued = IssueMoveToPosition(ctx, targetPos:Extend2D(myPos, enterDist), "combo_approach")
+                    -- Global / unresolved cast range: do not walk into melee for the head action.
+                    if not deferUltForTrample and not Core.IsUnboundedCastRange(range) then
+                        local enterDist = math.max(range - RANGE_CAST_BUFFER, 80)
+                        if dist > enterDist + RANGE_TOLERANCE then
+                            DbgVerbose("event",
+                                "combo_approach | dist=%.0f need<=%d action=%s | %s",
+                                dist,
+                                math.floor(enterDist + RANGE_TOLERANCE),
+                                head and head.abilityId or "?",
+                                FormatRangeContext(ctx)
+                            )
+                            issued = IssueMoveToPosition(ctx, targetPos:Extend2D(myPos, enterDist), "combo_approach")
+                        end
                     end
                 end
             end
@@ -7168,8 +7728,14 @@ local function ProcessCombo(ctx)
                     end
                 end
             end
-            if stillChanneling and ctx.now < (pending.absoluteDeadline or deadline) then
-                pending.deadline = math.min(ctx.now + 0.75, pending.absoluteDeadline or (ctx.now + 0.75))
+            local absDeadline = pending.absoluteDeadline or deadline
+            if stillChanneling and ctx.now < absDeadline then
+                pending.deadline = math.min(ctx.now + 0.75, absDeadline)
+            elseif ConfirmAction(ctx, pending) then
+                -- Soft deadline raced channel quiet / toggle settle; confirm below.
+            elseif pending.channelObserved and ctx.now < absDeadline then
+                -- Channel ended; wait for ConfirmAction quiet window instead of failing.
+                pending.deadline = math.min(ctx.now + 0.3, absDeadline)
             else
                 local recoveredInvoke = false
                 if abilityId == "invoker_invoke" and ctx.controlled and Runtime.invokerAwaitSpell then
@@ -7223,7 +7789,11 @@ local function ProcessCombo(ctx)
                     ResetPending()
                 end
             end
-        elseif ConfirmAction(ctx, pending) then
+        end
+        pending = Runtime.pending
+        if pending and ConfirmAction(ctx, pending) then
+            tag = pending.tag
+            abilityId = pending.abilityId
             DbgImportant("confirmed | %s", tag or "?")
             Runtime.comboTrace[#Runtime.comboTrace + 1] = abilityId or tag or "?"
             if abilityId then
@@ -7232,6 +7802,7 @@ local function ProcessCombo(ctx)
                 if not isInvokerOrb then
                     if abilityId == "item_refresher" then
                         Runtime.usedActions = { item_refresher = true }
+                        Runtime.usedActionCharges = {}
                         Runtime.failedActions = {}
                         Runtime.actionQueue = {}
                         Runtime.invokerAwaitSpell = nil
@@ -7317,7 +7888,7 @@ local function ProcessCombo(ctx)
                     or SafeValue(Entity.GetAbsOrigin, ctx.enemy)
             end
             ResetPending()
-        elseif pending.orderAck then
+        elseif pending and pending.orderAck then
             local castPoint = SafeValue(Ability.GetCastPoint, pending.ability, true) or 0
             local faceTime = GetFaceTimeToAction(ctx, pending)
             local settleFor = math.max(
@@ -7345,6 +7916,20 @@ local function ProcessCombo(ctx)
                     and SafeValue(NPC.GetChannellingAbility, ctx.controlled) == pending.ability)
             ) then
                 DbgVerbose("cast_wait", "phase/channel | %s | %s", tag or "?", FormatRangeContext(ctx))
+            elseif pending.ability and HasAbilityBehaviorFlag(
+                SafeValue(Ability.GetBehavior, pending.ability, true)
+                    or SafeValue(Ability.GetBehavior, pending.ability, false) or 0,
+                BEH.DOTA_ABILITY_BEHAVIOR_CHANNELLED
+            ) then
+                -- Re-issue cancels Multishot / Epicenter mid-channel.
+                DbgVerbose("cast_wait", "channel wait (no retry) | %s | %s", tag or "?", FormatRangeContext(ctx))
+            elseif pending.ability and HasAbilityBehaviorFlag(
+                SafeValue(Ability.GetBehavior, pending.ability, true)
+                    or SafeValue(Ability.GetBehavior, pending.ability, false) or 0,
+                BEH.DOTA_ABILITY_BEHAVIOR_TOGGLE
+            ) then
+                -- Re-issue flips Rot / Radiance off after a successful ON.
+                DbgVerbose("cast_wait", "toggle wait (no retry) | %s | %s", tag or "?", FormatRangeContext(ctx))
             elseif ctx.canCast and lastAttempt
                 and ctx.now - lastAttempt >= ACTION_RETRY_INTERVAL and attempts < MAX_ACTION_ATTEMPTS then
                 if IsWithinCastRange(ctx, pending) then
@@ -7358,13 +7943,25 @@ local function ProcessCombo(ctx)
                     end
                 end
             end
-        elseif pending.ability and (
+        elseif pending and pending.ability and (
             SafeValue(Ability.IsInAbilityPhase, pending.ability)
             or (SafeValue(NPC.IsChannellingAbility, ctx.controlled)
                 and SafeValue(NPC.GetChannellingAbility, ctx.controlled) == pending.ability)
         ) then
             DbgVerbose("cast_wait", "phase/channel | %s | %s", tag or "?", FormatRangeContext(ctx))
-        elseif ctx.canCast and lastAttempt
+        elseif pending and pending.ability and HasAbilityBehaviorFlag(
+            SafeValue(Ability.GetBehavior, pending.ability, true)
+                or SafeValue(Ability.GetBehavior, pending.ability, false) or 0,
+            BEH.DOTA_ABILITY_BEHAVIOR_CHANNELLED
+        ) then
+            DbgVerbose("cast_wait", "channel wait (no retry) | %s | %s", tag or "?", FormatRangeContext(ctx))
+        elseif pending and pending.ability and HasAbilityBehaviorFlag(
+            SafeValue(Ability.GetBehavior, pending.ability, true)
+                or SafeValue(Ability.GetBehavior, pending.ability, false) or 0,
+            BEH.DOTA_ABILITY_BEHAVIOR_TOGGLE
+        ) then
+            DbgVerbose("cast_wait", "toggle wait (no retry) | %s | %s", tag or "?", FormatRangeContext(ctx))
+        elseif pending and ctx.canCast and lastAttempt
             and ctx.now - lastAttempt >= ACTION_RETRY_INTERVAL and attempts < MAX_ACTION_ATTEMPTS then
             if IsWithinCastRange(ctx, pending) then
                 if Core.Catalog.HexAbilities[abilityId] and attempts >= 1 then
@@ -7394,6 +7991,8 @@ local function ProcessCombo(ctx)
         return
     end
 
+    Core.TryInjectApproachKitActions(ctx)
+
     if #Runtime.actionQueue == 0 then
         local unitName = SafeValue(NPC.GetUnitName, ctx.controlled)
         ClearUsedActionsWhenReady(ctx)
@@ -7415,6 +8014,8 @@ local function ProcessCombo(ctx)
             )
         end
     end
+
+    Core.PruneCloseGapClosers(ctx)
 
     while #Runtime.actionQueue > 0 do
         local action = Runtime.actionQueue[1]
@@ -7549,6 +8150,26 @@ local function ProcessCombo(ctx)
                     end
                 end
             end
+            -- Head is out of range: cast a later in-range action while approaching
+            -- (e.g. global Wrath while closing for Sprout).
+            for j = 2, #Runtime.actionQueue do
+                local later = Runtime.actionQueue[j]
+                if later and later.ability
+                    and PrepareActionForExecution(ctx, later)
+                    and IsWithinCastRange(ctx, later)
+                then
+                    table.remove(Runtime.actionQueue, j)
+                    table.insert(Runtime.actionQueue, 1, later)
+                    DbgVerbose("event",
+                        "cast_while_approach | promote %s over %s | %s",
+                        later.abilityId or "?",
+                        action.abilityId or "?",
+                        FormatRangeContext(ctx)
+                    )
+                    action = later
+                    goto continue_queue_after_prepare
+                end
+            end
             local targetPos = GetActionTargetPos(ctx, action)
             local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
             local castRange = GetCastRange(ctx.controlled, action.ability)
@@ -7577,7 +8198,7 @@ local function ProcessCombo(ctx)
                 local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
                 local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
                 local castRange = GetCastRange(ctx.controlled, action.ability)
-                if castRange <= 0 then
+                if Core.IsUnboundedCastRange(castRange) then
                     castRange = 200
                 end
                 local dist = myPos and enemyPos and Dist2D(myPos, enemyPos) or 0
@@ -7716,13 +8337,10 @@ local function InitializeMenu()
 
     local ui = {}
 
-    ui.Enabled = group:Switch(L("Control Ally", "Control Ally"), LoadConfigInt("enabled", 0) == 1, Icons.enable)
-    ui.Enabled:ToolTip(L(
-        "Control a controllable allied hero while your hero Combo Key is held.",
-        "Управление союзником при удержании Combo Key вашего героя (Heroes > Settings > Units Controller)."
-    ))
+    ui.Enabled = group:Switch(L("Control Ally"), LoadConfigInt("enabled", 0) == 1, Icons.enable)
+    ui.Enabled:ToolTip(L("Control a controllable allied hero while your hero Combo Key is held."))
 
-    ui.AllyHero = group:MultiSelect(L("Ally Hero", "Союзный герой"), {}, true)
+    ui.AllyHero = group:MultiSelect(L("Ally Hero"), {}, true)
     MenuIcon(ui.AllyHero, Icons.hero)
     if ui.AllyHero.OneItemSelection then
         ui.AllyHero:OneItemSelection(true)
@@ -7730,24 +8348,15 @@ local function InitializeMenu()
     if ui.AllyHero.DragAllowed then
         ui.AllyHero:DragAllowed(false)
     end
-    ui.AllyHero:ToolTip(L(
-        "Pick which controllable allied hero to command.",
-        "Выберите союзного героя под вашим контролем."
-    ))
+    ui.AllyHero:ToolTip(L("Pick which controllable allied hero to command."))
 
-    ui.Abilities = group:MultiSelect(L("Abilities", "Способности"), {}, true)
+    ui.Abilities = group:MultiSelect(L("Abilities"), {}, true)
     MenuIcon(ui.Abilities, Icons.abilities)
-    ui.Abilities:ToolTip(L(
-        "Toggle which abilities the ally may cast in combo.",
-        "Какие способности союзник может использовать в комбо."
-    ))
+    ui.Abilities:ToolTip(L("Toggle which abilities the ally may cast in combo."))
 
-    ui.Items = group:MultiSelect(L("Items", "Предметы"), {}, true)
+    ui.Items = group:MultiSelect(L("Items"), {}, true)
     MenuIcon(ui.Items, Icons.items)
-    ui.Items:ToolTip(L(
-        "Toggle which items this ally may use (saved per selected ally hero). Buffs/dispels go to your hero.",
-        "Какие предметы использовать у выбранного союзника (сохраняется отдельно на героя). Бафы/развеивание — на вашего героя."
-    ))
+    ui.Items:ToolTip(L("Toggle which items this ally may use (saved per selected ally hero). Buffs/dispels go to your hero."))
 
     ui.Abilities:SetCallback(function()
         local widget = UI.Abilities
@@ -7790,41 +8399,41 @@ local function InitializeMenu()
         end
     end, false)
 
-    local gear = ui.Enabled:Gear(L("Settings", "Настройки"), Icons.gear, true)
+    local gear = ui.Enabled:Gear(L("Settings"), Icons.gear, true)
     ui.SettingsGear = gear
 
-    ui.TargetMode = gear:Combo(L("Target Mode", "Режим цели"), TARGET_MODE_ITEMS, LoadConfigInt("target_mode", 0))
+    ui.TargetMode = gear:Combo(L("Target Mode"), TARGET_MODE_ITEMS, LoadConfigInt("target_mode", 0))
     MenuIcon(ui.TargetMode, Icons.target)
     ui.TargetMode:ToolTip(L(
-        "Cursor: lock/switch only within 100–300 of mouse (world). Auto Score: threat/cluster. Overrides Heroes Style.",
-        "Cursor: лок/смена только в радиусе 100–300 от мыши (мир). Auto Score: угроза/кластер. Приоритет над Style в Heroes."
+        "Cursor: lock/switch only within 100-300 of the mouse (world). Auto Score: threat/cluster scoring. Overrides Heroes Target Selection Style."
     ))
 
-    ui.MinClusterHits = gear:Slider(L("Min AOE hits", "Мин. AOE попаданий"), 1, 5, LoadConfigInt("min_cluster", 2), "%d")
+    ui.MinClusterHits = gear:Slider(L("Min AOE hits"), 1, 5, LoadConfigInt("min_cluster", 2), "%d")
     MenuIcon(ui.MinClusterHits, Icons.hits)
+    ui.MinClusterHits:ToolTip(L("Minimum enemy heroes an AOE ability should hit before casting (when a better multi-hit spot exists)."))
 
-    ui.ManaThreshold = gear:Slider(L("Min Mana %", "Мин. MP %"), 0, 100, LoadConfigInt("mana_pct", 15), "%d%%")
+    ui.ManaThreshold = gear:Slider(L("Min Mana %"), 0, 100, LoadConfigInt("mana_pct", 15), "%d%%")
     MenuIcon(ui.ManaThreshold, Icons.mana)
+    ui.ManaThreshold:ToolTip(L("Skip spending casts while the ally is below this mana percent (keeps room for movement/attacks)."))
 
-    ui.ExtendDisables = gear:Switch(L("Extend disables", "Продлевать контроль"), LoadConfigInt("extend", 1) == 1, Icons.extend)
-    ui.ExtendDisables:ToolTip(L(
-        "Chain disables when remaining CC is about to expire.",
-        "Кастовать следующий контроль перед окончанием текущего."
-    ))
+    ui.ExtendDisables = gear:Switch(L("Extend disables"), LoadConfigInt("extend", 1) == 1, Icons.extend)
+    ui.ExtendDisables:ToolTip(L("Chain disables when remaining CC is about to expire."))
 
-    ui.UseLinkBreak = gear:Switch(L("Use Linken's break", "Сбивать Linken's"), LoadConfigInt("linkbreak", 1) == 1, Icons.link)
+    ui.UseLinkBreak = gear:Switch(L("Use Linken's break"), LoadConfigInt("linkbreak", 1) == 1, Icons.link)
+    ui.UseLinkBreak:ToolTip(L("Spend a cheap targeted spell/item first when the locked enemy has Linken's Sphere."))
 
-    ui.Debug = gear:Switch(L("Debug logs", "Debug логи"), LoadConfigInt("debug", 0) == 1)
+    ui.Debug = gear:Switch(L("Debug logs"), LoadConfigInt("debug", 0) == 1)
     MenuIcon(ui.Debug, Icons.bug)
+    ui.Debug:ToolTip(L("Write Control Ally logs to the Umbrella console (casts, confirms, aborts)."))
 
-    ui.DebugVerbose = gear:Switch(L("Verbose range debug", "Подробный debug дистанции"), LoadConfigInt("debug_verbose", 0) == 1)
+    ui.DebugVerbose = gear:Switch(L("Verbose debug"), LoadConfigInt("debug_verbose", 0) == 1)
     MenuIcon(ui.DebugVerbose, Icons.bug)
     ui.DebugVerbose:ToolTip(L(
-        "Requires Debug logs. Unthrottled plan/cast events with priorities (@N), skip reasons (sf_plan, initiate_blink, queue drop), plus throttled move/attack range ticks.",
-        "Нужен Debug логи. Без троттла: plan/cast с приоритетами (@N), причины skip (sf_plan, initiate_blink, queue drop); плюс троттл-тики атаки/дистанции."
+        "Requires Debug logs. Unthrottled plan/cast events with priorities (@N), skip reasons, plus throttled move/attack range ticks."
     ))
 
-    ui.DrawOverlay = gear:Switch(L("Draw overlay", "Оверлей"), LoadConfigInt("draw_overlay", 1) == 1, Icons.draw)
+    ui.DrawOverlay = gear:Switch(L("Draw overlay"), LoadConfigInt("draw_overlay", 0) == 1, Icons.draw)
+    ui.DrawOverlay:ToolTip(L("Show on-screen ally/target/queue info while the combo key is held."))
 
     ui.Enabled:SetCallback(function()
         if not ui.Enabled then
@@ -7994,24 +8603,119 @@ local function DrawOverlay(snapshot)
     end
 end
 
-Core.RuntimeAdapter.TryCall = TryCall
-Core.RuntimeAdapter.SafeValue = SafeValue
 Core.Snapshot.Build = BuildContext
-Core.Targeting.Resolve = ResolveLockedEnemy
-Core.Targeting.EnemiesNear = GetEnemiesNear
-Core.AoeSolver.CountHits = CountHitsAt
-Core.AoeSolver.FindBestPosition = FindBestAoePosition
-Core.AoeSolver.FindBlinkPosition = FindBlinkPositionForAoe
-Core.Catalog.GetAbilityId = GetAbilityId
-Core.Catalog.GetAoeRadius = GetAoeRadius
 Core.GenericPlanner.Build = BuildActionPlan
-Core.ActionRunner.Confirm = ConfirmAction
 Core.ActionRunner.Process = ProcessCombo
 Core.MovementController.Process = ProcessMovement
-Core.Settings.LoadInt = LoadConfigInt
-Core.Settings.SaveInt = SaveConfigInt
-Core.Settings.GetUI = function()
-    return UI
+-- While approaching an OOR head (Dismember), inject kit actions that just entered range (Rot).
+Core.TryInjectApproachKitActions = function(ctx)
+    if not ctx or not ctx.controlled or not ctx.enemy or Runtime.pending then
+        return
+    end
+    if #Runtime.actionQueue == 0 then
+        return
+    end
+    local head = Runtime.actionQueue[1]
+    if not head or not head.ability then
+        return
+    end
+    if head.kind == "noTarget" then
+        return
+    end
+    if IsWithinCastRange(ctx, head) then
+        return
+    end
+    local unitName = SafeValue(NPC.GetUnitName, ctx.controlled)
+    local kit = Core.Catalog.HeroKits and unitName and Core.Catalog.HeroKits[unitName]
+    if not kit or type(kit.steps) ~= "table" then
+        return
+    end
+    local queuedIds = {}
+    for q = 1, #Runtime.actionQueue do
+        local id = Runtime.actionQueue[q].abilityId
+        if id then
+            queuedIds[id] = true
+        end
+    end
+    local injected = {}
+    for i = 1, #kit.steps do
+        local step = kit.steps[i]
+        if step and step.id and not queuedIds[step.id] and not IsActionUsed(step.id) then
+            AppendKitAbility(ctx, injected, step)
+        end
+    end
+    for i = 1, #injected do
+        local action = injected[i]
+        if action and action.ability and IsWithinCastRange(ctx, action) then
+            Runtime.actionQueue[#Runtime.actionQueue + 1] = action
+            queuedIds[action.abilityId] = true
+            DbgVerbose("event",
+                "approach_inject | %s while waiting on %s | %s",
+                action.abilityId or "?",
+                head.abilityId or "?",
+                FormatRangeContext(ctx)
+            )
+        end
+    end
+end
+-- Drop known gap-closers once already in short lockedEnemy range (post-blink).
+-- Never prune nukes by attack range (that deleted Zeus Lightning Bolt / Nimbus).
+Core.PruneCloseGapClosers = function(ctx)
+    if not ctx or not ctx.controlled or not ctx.enemy then
+        return
+    end
+    if #Runtime.actionQueue == 0 then
+        return
+    end
+    local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
+    local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
+    if not myPos or not enemyPos then
+        return
+    end
+    local dist = Dist2D(myPos, enemyPos)
+    local threshold = nil
+    for i = 1, #Runtime.actionQueue do
+        local action = Runtime.actionQueue[i]
+        if action and action.kind == "lockedEnemy" and action.ability then
+            local castRange = GetCastRange(ctx.controlled, action.ability)
+            if type(castRange) == "number"
+                and castRange > 0
+                and castRange <= 350
+                and not Core.IsUnboundedCastRange(castRange) then
+                threshold = castRange + 100
+                break
+            end
+        end
+    end
+    if type(threshold) ~= "number" or dist > threshold then
+        return
+    end
+    local i = 1
+    while i <= #Runtime.actionQueue do
+        local action = Runtime.actionQueue[i]
+        local abilityId = action and action.abilityId or ""
+        local tag = action and action.tag or ""
+        local isBlink = type(abilityId) == "string" and abilityId:find("blink", 1, true) ~= nil
+        local isInitiate = tag == "initiate_blink"
+        local isGap = Core.Catalog.GapCloserAbilities[abilityId] == true
+        if action
+            and action.kind == "bestPosition"
+            and isGap
+            and not isBlink
+            and not isInitiate
+        then
+            DbgVerbose("event",
+                "prune_close | drop %s dist=%.0f thr=%.0f | %s",
+                abilityId,
+                dist,
+                threshold,
+                FormatRangeContext(ctx)
+            )
+            table.remove(Runtime.actionQueue, i)
+        else
+            i = i + 1
+        end
+    end
 end
 Core.Overlay.Draw = DrawOverlay
 
@@ -8046,6 +8750,7 @@ function Script.OnGameEnd()
     Runtime.lastFollowPos = nil
     Runtime.failedActions = {}
     Runtime.usedActions = {}
+    Runtime.usedActionCharges = {}
     Runtime.debugVerboseAt = {}
     Runtime.shrapnelLastCastAt = 0
     Runtime.shrapnelLastPos = nil
@@ -8064,7 +8769,6 @@ end
 function Script.OnScriptsLoaded()
     Persistent.logger = Logger("ControlAlly")
     EnsureMenu()
-    Persistent.logger:info("loaded")
 end
 
 function Script.OnUpdate()
