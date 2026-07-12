@@ -33,10 +33,13 @@ local ATTACK_GAP = 0.35
 local ORDER_QUEUE_MAX = 1
 local DEBUG_HEARTBEAT = 0.50
 -- Cast+self-hop ≈ 0.3 cast point + 0.48 jump; start early so land overlaps old stun.
-local COOKIE_STUN_REFRESH = 1.20
+local COOKIE_STUN_REFRESH = 1.35
 -- After Refresher: AA while stun is healthy; open 2nd Cookie with the same cast+hop lead
 -- (0.55 was too late — enemy walked out before hop landed).
 local POST_REFRESH_STUN_LEAD = 1.15
+-- Brief pause after shredder lands so 1–2 hits land before stun-refresh cookie.
+-- Kept short: longer waits drop the stun chain (refresh at rem≤0).
+local SHREDDER_HITS_BEFORE_REFRESH = 0.06
 local BLAST_MIN_AIM_DIST = 300
 -- Keep a small slack so hull / cast-point drift does not fire past the cone tip.
 local BLAST_RANGE_SLACK = 50
@@ -359,9 +362,6 @@ local DAGON_ITEMS = {
     "item_dagon_5",
 }
 
--- Brief pause after shredder lands so 1–2 hits land before stun-refresh cookie.
-local SHREDDER_HITS_BEFORE_REFRESH = 0.18
-
 local HEX_MODIFIERS = {
     "modifier_sheepstick_debuff",
 }
@@ -509,6 +509,11 @@ local Runtime = {
     kissesMotion = { pos = nil, at = -math.huge, vx = 0, vy = 0 },
     ---True once Mortimer Kisses channel modifier/API was observed this cast.
     kissesChannelSeen = false,
+    ---Sticky lock: entity index + last world pos (re-acquire near corpse, not cursor thrash).
+    lockEntIndex = nil,
+    ---@type Vector|nil
+    lockWorldPos = nil,
+    lockLostAt = -math.huge,
 }
 
 --#endregion
@@ -583,6 +588,9 @@ local function ResetRuntime()
     Runtime.waitStunBeforeCycleAt = -math.huge
     Runtime.kissesMotion = { pos = nil, at = -math.huge, vx = 0, vy = 0 }
     Runtime.kissesChannelSeen = false
+    Runtime.lockEntIndex = nil
+    Runtime.lockWorldPos = nil
+    Runtime.lockLostAt = -math.huge
 end
 
 local function ResetComboSession()
@@ -610,6 +618,9 @@ local function ResetComboSession()
     Runtime.refresherUsed = false
     Runtime.lastFollowCursorAt = -math.huge
     Runtime.kissesChannelSeen = false
+    Runtime.lockEntIndex = nil
+    Runtime.lockWorldPos = nil
+    Runtime.lockLostAt = -math.huge
 end
 
 ---@param fmt string
@@ -1815,7 +1826,10 @@ Script.Timing = {
     -- Extra padding beyond hop-impact when stepping back for cookie (engage).
     COOKIE_STEPBACK_EXTRA = 35,
     -- Stun-refresh: tiny step only — stun window is short.
-    COOKIE_STEPBACK_REFRESH = 28,
+    COOKIE_STEPBACK_REFRESH = 20,
+    -- After lock dies: wait before re-picking (cursor thrash).
+    LOCK_REACQUIRE_DELAY = 0.28,
+    LOCK_REACQUIRE_RADIUS_MUL = 1.75,
 }
 
 Script.Target = {
@@ -2042,29 +2056,24 @@ function Script.Target.ScoreEnemy(me, unit)
     return score
 end
 
----Search Range = world radius around the CURSOR (not around the hero).
+---Search Range = world radius around a point (cursor or last lock).
 ---@param me userdata
+---@param center Vector
 ---@param searchRadius number
 ---@return userdata|nil
-function Script.Target.PickNearCursor(me, searchRadius)
+function Script.Target.PickNearPos(me, center, searchRadius)
     local team = SafeValue(Entity.GetTeamNum, me)
-    if team == nil then
+    if team == nil or not center or type(searchRadius) ~= "number" then
         return nil
     end
 
-    local nearest = SafeValue(Input.GetNearestHeroToCursor, team, Enum.TeamType.TEAM_ENEMY)
-    if IsValidEnemyHero(nearest) and Script.Target.NearCursor(nearest, searchRadius) then
-        return nearest
-    end
-
-    local cursor = SafeValue(Input.GetWorldCursorPos)
-    if not cursor or not Heroes or not Heroes.InRadius then
+    if not Heroes or not Heroes.InRadius then
         return nil
     end
 
     local heroes = SafeValue(
         Heroes.InRadius,
-        cursor,
+        center,
         searchRadius,
         team,
         Enum.TeamType.TEAM_ENEMY,
@@ -2081,7 +2090,7 @@ function Script.Target.PickNearCursor(me, searchRadius)
         if IsValidEnemyHero(enemy) then
             local pos = SafeValue(Entity.GetAbsOrigin, enemy)
             if pos then
-                local d = Dist2D(cursor, pos)
+                local d = Dist2D(center, pos)
                 if d < bestDist then
                     bestDist = d
                     best = enemy
@@ -2090,6 +2099,28 @@ function Script.Target.PickNearCursor(me, searchRadius)
         end
     end
     return best
+end
+
+---Search Range = world radius around the CURSOR (not around the hero).
+---@param me userdata
+---@param searchRadius number
+---@return userdata|nil
+function Script.Target.PickNearCursor(me, searchRadius)
+    local team = SafeValue(Entity.GetTeamNum, me)
+    if team == nil then
+        return nil
+    end
+
+    local nearest = SafeValue(Input.GetNearestHeroToCursor, team, Enum.TeamType.TEAM_ENEMY)
+    if IsValidEnemyHero(nearest) and Script.Target.NearCursor(nearest, searchRadius) then
+        return nearest
+    end
+
+    local cursor = SafeValue(Input.GetWorldCursorPos)
+    if not cursor then
+        return nil
+    end
+    return Script.Target.PickNearPos(me, cursor, searchRadius)
 end
 
 ---@param me userdata
@@ -2125,41 +2156,116 @@ function Script.Target.PickByScore(me, searchRadius)
     return best
 end
 
+---@param entIndex number|nil
+---@return userdata|nil
+function Script.Target.FindByEntIndex(entIndex)
+    if type(entIndex) ~= "number" or not Heroes then
+        return nil
+    end
+    if Heroes.GetAll then
+        local all = SafeValue(Heroes.GetAll)
+        if type(all) == "table" then
+            for i = 1, #all do
+                local hero = all[i]
+                if hero and SafeValue(Entity.GetIndex, hero) == entIndex then
+                    return hero
+                end
+            end
+        end
+    end
+    local count = SafeValue(Heroes.Count)
+    if type(count) == "number" and Heroes.Get then
+        for i = 0, count - 1 do
+            local hero = SafeValue(Heroes.Get, i)
+            if hero and SafeValue(Entity.GetIndex, hero) == entIndex then
+                return hero
+            end
+        end
+    end
+    return nil
+end
+
+---@param unit userdata|nil
+function Script.Target.RememberLock(unit)
+    if not unit then
+        return
+    end
+    local idx = SafeValue(Entity.GetIndex, unit)
+    if type(idx) == "number" then
+        Runtime.lockEntIndex = idx
+    end
+    local pos = SafeValue(Entity.GetAbsOrigin, unit)
+    if pos then
+        Runtime.lockWorldPos = pos
+    end
+    Runtime.lockLostAt = -math.huge
+end
+
 ---@param now number
 ---@param me userdata
 ---@param locked userdata|nil
 ---@param label string
 ---@return userdata|nil
 function Script.Target.ResolveOrKeep(now, me, locked, label)
-    local searchRadius = Script.Target.GetSearchRadius()
-    local style = Script.Target.GetStyleMode()
-    local cursorPick = Script.Target.PickNearCursor(me, searchRadius)
-
-    -- Cursor hover always wins (HUD under mouse).
-    if cursorPick then
-        if locked ~= cursorPick then
-            Dbg("%s lock target=%s", label, FmtUnit(cursorPick))
-        end
-        return cursorPick
+    if locked == nil and type(Runtime.lockEntIndex) == "number" then
+        locked = Script.Target.FindByEntIndex(Runtime.lockEntIndex)
     end
 
-    -- While Combo/Kisses is held: keep sticky lock so the cycle never drops mid-fight
-    -- just because the cursor briefly left the enemy (any Style).
+    -- Alive lock sticks — cursor must not steal mid-combo.
     if IsValidLockedEnemy(locked) then
+        Script.Target.RememberLock(locked)
         return locked
+    end
+
+    -- Target died / invalid: short pause, then continue on the next enemy (same combo state).
+    if locked ~= nil or type(Runtime.lockEntIndex) == "number" then
+        if Runtime.lockLostAt < 0 then
+            Runtime.lockLostAt = now
+            Dbg("%s target lost → next enemy", label)
+        end
+        local delay = (Script.Timing and Script.Timing.LOCK_REACQUIRE_DELAY) or 0.28
+        if (now - Runtime.lockLostAt) < delay then
+            return nil
+        end
+    end
+
+    local searchRadius = Script.Target.GetSearchRadius()
+    local style = Script.Target.GetStyleMode()
+
+    -- Prefer fight cluster around the corpse, then cursor.
+    local pick = nil
+    if Runtime.lockWorldPos then
+        local mul = (Script.Timing and Script.Timing.LOCK_REACQUIRE_RADIUS_MUL) or 1.75
+        pick = Script.Target.PickNearPos(me, Runtime.lockWorldPos, searchRadius * mul)
+    end
+    if not pick then
+        pick = Script.Target.PickNearCursor(me, searchRadius)
+    end
+
+    -- Never re-lock the same dead index; Prefer a different living hero when possible.
+    if pick and type(Runtime.lockEntIndex) == "number" then
+        local pickIdx = SafeValue(Entity.GetIndex, pick)
+        if pickIdx == Runtime.lockEntIndex and not IsValidLockedEnemy(pick) then
+            pick = nil
+        end
+    end
+
+    if pick then
+        Script.Target.RememberLock(pick)
+        Dbg("%s lock target=%s", label, FmtUnit(pick))
+        return pick
     end
 
     if style == Script.Target.STYLE_SCORE then
         local scored = Script.Target.PickByScore(me, searchRadius)
         if scored then
+            Script.Target.RememberLock(scored)
             Dbg("%s lock target=%s (score)", label, FmtUnit(scored))
             return scored
         end
     end
 
-    if locked ~= nil then
-        Dbg("%s target lost", label)
-    elseif (now - Runtime.debugHeartbeatAt) >= DEBUG_HEARTBEAT then
+    if (now - Runtime.debugHeartbeatAt) >= DEBUG_HEARTBEAT then
         Runtime.debugHeartbeatAt = now
         Dbg("%s: no enemy near cursor (range=%.0f)", label, searchRadius)
     end
@@ -5365,7 +5471,7 @@ function Script.StepBackForCookie(now, me, targetPos, ideal, minStand)
         if SafeValue(NPC.IsRunning, me) == true then
             return true
         end
-        if (now - (Runtime.cookieSpaceOrderAt or -math.huge)) < 0.22 then
+        if (now - (Runtime.cookieSpaceOrderAt or -math.huge)) < 0.12 then
             return true
         end
     end
@@ -5379,12 +5485,12 @@ function Script.StepBackForCookie(now, me, targetPos, ideal, minStand)
         Dbg("skip %s: %s", tag, reason or "?")
         return true
     end
-    if not CanIssue(now, tag, 0.22) then
+    if not CanIssue(now, tag, 0.12) then
         return true
     end
     local ok, err = TryCall(NPC.MoveTo, me, backPos, false, false, false, true, OrderId(tag), false)
     if ok then
-        MarkIssued(now, tag, 0.06)
+        MarkIssued(now, tag, 0.04)
         Runtime.cookieSpacing = true
         Runtime.cookieNeedFace = false
         if (Runtime.cookieSpaceAt or -math.huge) < 0 then
@@ -5400,10 +5506,12 @@ end
 
 ---@param me userdata
 ---@param aimPos Vector
+---@param loose? boolean  urgent refresh: cast sooner when almost facing
 ---@return boolean
-local function NeedsFaceForCookie(me, aimPos)
+local function NeedsFaceForCookie(me, aimPos, loose)
+    local limit = loose and 0.05 or 0.08
     local faceTime = SafeValue(NPC.GetTimeToFacePosition, me, aimPos)
-    if type(faceTime) == "number" and faceTime > 0.08 then
+    if type(faceTime) == "number" and faceTime > limit then
         return true
     end
     if SafeValue(NPC.IsTurning, me) == true then
@@ -5416,9 +5524,10 @@ end
 ---@param now number
 ---@param me userdata
 ---@param targetPos Vector
+---@param urgent? boolean
 ---@return boolean issuedFace
-function Script.EnsureCookieFacing(now, me, targetPos)
-    if not NeedsFaceForCookie(me, targetPos) then
+function Script.EnsureCookieFacing(now, me, targetPos, urgent)
+    if not NeedsFaceForCookie(me, targetPos, urgent == true) then
         Runtime.cookieNeedFace = false
         return false
     end
@@ -5427,7 +5536,7 @@ function Script.EnsureCookieFacing(now, me, targetPos)
         if SafeValue(NPC.IsTurning, me) == true or SafeValue(NPC.IsRunning, me) == true then
             return true
         end
-        if (now - (Runtime.lastAnyOrderAt or -math.huge)) < 0.20 then
+        if (now - (Runtime.lastAnyOrderAt or -math.huge)) < (urgent and 0.10 or 0.20) then
             return true
         end
     end
@@ -5442,12 +5551,12 @@ function Script.EnsureCookieFacing(now, me, targetPos)
         Dbg("skip %s: %s", tag, reason or "?")
         return true
     end
-    if not CanIssue(now, tag, 0.28) then
+    if not CanIssue(now, tag, urgent and 0.14 or 0.22) then
         return true
     end
     local ok, err = TryCall(NPC.MoveTo, me, facePos, false, false, false, true, OrderId(tag), false)
     if ok then
-        MarkIssued(now, tag, 0.08)
+        MarkIssued(now, tag, 0.05)
         Runtime.cookieNeedFace = true
         Dbg("cookie face → enemy")
         return true
@@ -5456,7 +5565,42 @@ function Script.EnsureCookieFacing(now, me, targetPos)
     return Runtime.cookieNeedFace == true
 end
 
----Spacing → hold. Urgent (stun refresh): never MoveTo.
+---Walk to cookie standoff early (during AA / shredder wait) so refresh does not burn stun on spacing.
+---@param now number
+---@param me userdata
+---@param targetPos Vector
+---@param cookie userdata|nil
+---@return boolean busy
+function Script.TryPreSpaceForCookie(now, me, targetPos, cookie)
+    if not cookie or not targetPos then
+        return false
+    end
+    if Runtime.abilityIssued[ABILITY.cookie] or IsCookieTraveling(me) then
+        return false
+    end
+    local minStand, ideal = Script.GetCookieStandoff(cookie, true)
+    local myPos = SafeValue(Entity.GetAbsOrigin, me)
+    if not myPos then
+        return false
+    end
+    local dist = Dist2D(myPos, targetPos)
+    if dist >= minStand then
+        if Runtime.cookieSpacing then
+            Runtime.cookieSpacing = false
+        end
+        return false
+    end
+    if (now - Runtime.debugHeartbeatAt) >= DEBUG_HEARTBEAT then
+        Runtime.debugHeartbeatAt = now
+        Dbg("cookie pre-space dist=%.0f min=%.0f", dist, minStand)
+    end
+    Script.StepBackForCookie(now, me, targetPos, ideal, minStand)
+    return true
+end
+
+---Spacing → face enemy → hold. Cookie hop follows facing; kiting away without a turn
+---makes the jump go the wrong way. Refresh also steps back when hugging — hop from
+---dist≈50 overshoots past impact and the stun never lands (then post-refresher stalls).
 ---@param now number
 ---@param me userdata
 ---@param targetPos Vector
@@ -5464,24 +5608,19 @@ end
 ---@param urgent boolean|nil
 ---@return boolean wait
 function Script.PrepCookieForCast(now, me, targetPos, cookie, urgent)
-    if urgent then
-        Runtime.cookieSpacing = false
-        Runtime.cookieNeedFace = false
-        Runtime.cookieSpaceAt = -math.huge
-        if HoldForAbilityCast(now, me) then
-            return true
-        end
-        return false
-    end
-
-    local minStand, ideal = Script.GetCookieStandoff(cookie, false)
+    local minStand, ideal = Script.GetCookieStandoff(cookie, urgent == true)
     local myPos = SafeValue(Entity.GetAbsOrigin, me)
     local dist = (myPos and targetPos) and Dist2D(myPos, targetPos) or 0
 
     if dist < minStand then
         if (now - Runtime.debugHeartbeatAt) >= DEBUG_HEARTBEAT then
             Runtime.debugHeartbeatAt = now
-            Dbg("cookie too close dist=%.0f min=%.0f → step back", dist, minStand)
+            Dbg(
+                "cookie too close dist=%.0f min=%.0f → step back%s",
+                dist,
+                minStand,
+                urgent and " (refresh)" or ""
+            )
         end
         Script.StepBackForCookie(now, me, targetPos, ideal, minStand)
         return true
@@ -5489,8 +5628,38 @@ function Script.PrepCookieForCast(now, me, targetPos, cookie, urgent)
 
     Runtime.cookieSpacing = false
     Runtime.cookieSpaceAt = -math.huge
+
+    if urgent then
+        -- One MoveTo toward the enemy stops kite-away and faces — no Hold/stop frame.
+        if Script.EnsureCookieFacing(now, me, targetPos, true) then
+            return true
+        end
+        Runtime.cookieNeedFace = false
+        return false
+    end
+
+    -- Engage: still running after step-back / manual kite — stop, then face.
+    if SafeValue(NPC.IsRunning, me) == true and NeedsFaceForCookie(me, targetPos) then
+        local okSend = CanSendOrder(now, me, false)
+        if okSend and CanIssue(now, "cookie_stop", 0.12) then
+            local player = SafeValue(Players.GetLocal)
+            if player then
+                local ok = TryCall(Player.HoldPosition, player, me, false, true, true, OrderId("cookie_stop"))
+                if ok then
+                    MarkIssued(now, "cookie_stop", 0.04)
+                    Dbg("cookie stop (face before hop)")
+                    return true
+                end
+            end
+        end
+        return true
+    end
+
+    if Script.EnsureCookieFacing(now, me, targetPos, false) then
+        return true
+    end
     Runtime.cookieNeedFace = false
-    -- Engage: no face-walk — cast in place (hop uses current facing / cast turn).
+
     if HoldForAbilityCast(now, me) then
         return true
     end
@@ -6979,6 +7148,11 @@ local function UpdateCombo(now, me, target)
                 Runtime.debugHeartbeatAt = now
                 Dbg("post-refresher: AA while stun remaining=%.2f", rem)
             end
+            -- Space for 2nd Cookie while AA'ing so engage does not pause on step-back.
+            local cookiePre = GetAbility(me, ABILITY.cookie)
+            if cookiePre and Script.TryPreSpaceForCookie(now, me, targetPos, cookiePre) then
+                return
+            end
             if not Script.IsComboWindowClosed(target, now) then
                 AttackEnemy(now, me, target)
             end
@@ -6987,7 +7161,9 @@ local function UpdateCombo(now, me, target)
 
         if not Runtime.postRefreshStunArmed then
             local waited = now - (Runtime.waitStunBeforeCycleAt or now)
-            if waited < 2.4 then
+            -- Hop+land ≈ 0.8s. If no healthy stun by then, refresh missed — don't idle 2.4s.
+            local noFreshStun = rem == nil or rem <= POST_REFRESH_STUN_LEAD
+            if noFreshStun and waited < 0.90 then
                 if (now - Runtime.debugHeartbeatAt) >= DEBUG_HEARTBEAT then
                     Runtime.debugHeartbeatAt = now
                     Dbg(
@@ -7000,7 +7176,11 @@ local function UpdateCombo(now, me, target)
                 end
                 return
             end
-            Dbg("post-refresher: stun arm timeout — start 2nd cycle")
+            if noFreshStun then
+                Dbg("post-refresher: no fresh stun — start 2nd cycle")
+            else
+                Dbg("post-refresher: stun arm timeout — start 2nd cycle")
+            end
         else
             Dbg(
                 "post-refresher: stun low — start 2nd Cookie cycle (rem=%s)",
@@ -7022,12 +7202,29 @@ local function UpdateCombo(now, me, target)
         local shredderHitWait = Runtime.shredderLandedAt > 0
             and (now - Runtime.shredderLandedAt) < SHREDDER_HITS_BEFORE_REFRESH
         local holdCookieForKisses = ShouldHoldCookieForKisses(me, target)
+        local stunRemNow = GetStunRemaining(target, now)
+        local stunUrgent = stunRemNow ~= nil and stunRemNow <= COOKIE_STUN_REFRESH
+        -- Stun already gone: do not wait shredder hits — refresh immediately to re-stun.
+        local stunDropped = stunRemNow == nil and not targetStunned
+
+        -- Pre-space right after cookie hop (even while blast/shredder still pending) so
+        -- Scatterblast fires from standoff and refresh does not burn stun on walking.
+        if cookie
+            and (Runtime.deferExtraCookie or Runtime.cookieRefreshPending or Runtime.cookieSpacing)
+            and not IsCookieTraveling(me)
+            and not Runtime.abilityIssued[ABILITY.cookie]
+        then
+            if Script.TryPreSpaceForCookie(now, me, targetPos, cookie) then
+                return
+            end
+        end
 
         -- Deferred 2nd charge: reserved until blast/shredder finish — never unlock early
         -- (that spent the charge as a random engage and broke the cycle).
         -- Also wait for Mortimer Kisses: refresh hop cancels the channel.
         local deferredRefresh = false
-        if Runtime.deferExtraCookie and not followupPending and not shredderHitWait then
+        local skipShredderWait = stunUrgent or stunDropped
+        if Runtime.deferExtraCookie and not followupPending and (not shredderHitWait or skipShredderWait) then
             if holdCookieForKisses then
                 if (now - Runtime.debugHeartbeatAt) >= DEBUG_HEARTBEAT then
                     Runtime.debugHeartbeatAt = now
@@ -7038,7 +7235,7 @@ local function UpdateCombo(now, me, target)
                 Runtime.deferExtraCookie = false
                 Runtime.cookieIssueFails = 0
                 Runtime.cookieRefreshPending = true
-                if targetStunned then
+                if targetStunned or (stunRemNow ~= nil and stunRemNow > 0) then
                     Dbg("extra cookie refresh (stun held)")
                 else
                     Dbg("extra cookie after followups")
@@ -7052,7 +7249,7 @@ local function UpdateCombo(now, me, target)
         if stunRefresh and followupPending then
             stunRefresh = false
         end
-        if stunRefresh and shredderHitWait then
+        if stunRefresh and shredderHitWait and not skipShredderWait then
             stunRefresh = false
         end
         if stunRefresh and holdCookieForKisses then
@@ -7074,13 +7271,14 @@ local function UpdateCombo(now, me, target)
         end
         if allowCookie and cookie and CanUseAbilityOnce(ABILITY.cookie, cookie, me) then
             if stunRefresh or targetStunned or Runtime.cookieRefreshPending then
-                -- Refresh charge: never step-back/face — cast in place while stun holds.
+                -- Refresh: allowClose for max-reach check; PrepCookie steps back when hugging
+                -- (cast-in-place from dist<minStand overshoots past impact).
                 local canStun, dist, hop, impact = CanCookieLandStun(me, target, cookie, true)
                 if not canStun and (deferredRefresh or Runtime.cookieRefreshPending) then
-                    local canReach, d2, hop2, after2 = CanCookieEngageReach(me, target, cookie, GetAbility(me, ABILITY.blast))
+                    local canReach, d2, hop2 = CanCookieEngageReach(me, target, cookie, GetAbility(me, ABILITY.blast))
                     if canReach then
                         canStun = true
-                        dist, hop, impact = d2, hop2, after2
+                        dist, hop = d2, hop2
                     end
                 end
                 if not canStun then
@@ -7097,9 +7295,7 @@ local function UpdateCombo(now, me, target)
                     FaceToward(now, me, targetPos)
                     return
                 end
-                Runtime.cookieSpacing = false
-                Runtime.cookieNeedFace = false
-                if HoldForAbilityCast(now, me) then
+                if Script.PrepCookieForCast(now, me, targetPos, cookie, true) then
                     return
                 end
                 if CastTarget(now, me, cookie, me, stunRefresh and "cookie_refresh" or "cookie") then
@@ -7215,7 +7411,9 @@ local function UpdateCombo(now, me, target)
             return
         end
         local blastRange = blast and (GetBlastCastRange(me, blast) - BLAST_RANGE_SLACK) or 800
-        local nearFight = SafeValue(NPC.IsEntityInRange, me, target, blastRange) == true
+        -- Mid-chain / post-refresher: always try shredder once Cookie opened the fight.
+        local nearFight = Runtime.abilityChainStarted
+            or SafeValue(NPC.IsEntityInRange, me, target, blastRange) == true
             or SafeValue(NPC.HasModifier, me, SHREDDER_BUFF) == true
         if nearFight and shredder and CanUseAbilityOnce(ABILITY.shredder, shredder, me) then
             local attacks = GetSpecial(shredder, "buffed_attacks", 5)
@@ -7300,17 +7498,20 @@ local function UpdateCombo(now, me, target)
     -- Hold attacks while a cookie refresh is about to go out (or cast is in flight).
     local cookieAb = GetAbility(me, ABILITY.cookie)
     local stunLeft = GetStunRemaining(target, now)
-    local canLandCookie = cookieAb ~= nil and CanCookieLandStun(me, target, cookieAb)
     local wantCookieRefresh = cookieAb ~= nil
         and CanCastAbility(cookieAb, me)
-        and canLandCookie
         and (Runtime.cookieIssueFails or 0) < 2
         and not ShouldHoldCookieForKisses(me, target)
         and (
             Runtime.deferExtraCookie
+            or Runtime.cookieRefreshPending
+            or Runtime.cookieSpacing
             or (stunLeft ~= nil and stunLeft <= COOKIE_STUN_REFRESH)
         )
     if wantCookieRefresh then
+        if Script.TryPreSpaceForCookie(now, me, targetPos, cookieAb) then
+            return
+        end
         return
     end
 
@@ -7381,6 +7582,9 @@ local function UpdateCombat(now)
             ResetComboSession()
         else
             Runtime.comboTarget = nil
+            Runtime.lockEntIndex = nil
+            Runtime.lockWorldPos = nil
+            Runtime.lockLostAt = -math.huge
         end
     end
 
