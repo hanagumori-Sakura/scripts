@@ -57,7 +57,7 @@ local CURSOR_WORLD_PICK_MIN = 100
 local CURSOR_WORLD_PICK_MAX = 300
 local CURSOR_MAX_SCREEN_DIST = 80
 local FALLBACK_ABILITY_SLOTS = 24
-local FALLBACK_ITEM_SLOTS = 9
+local FALLBACK_ITEM_SLOTS = 17 -- 0..16 inclusive; slot 16 is the neutral item slot
 -- Trample stomps after ~140 travel; orbit radius keeps PB near the target.
 local TRAMPLE_ORBIT_RADIUS = 175
 local TRAMPLE_ORBIT_STEP = 1.15
@@ -119,6 +119,16 @@ Core.Catalog.SkipItems = {
     item_gauntlets = true,
     item_slippers = true,
     item_mantle = true,
+    -- Creep/consume utilities — not hero-combo actives.
+    item_hand_of_midas = true,
+    item_helm_of_the_dominator = true,
+    item_helm_of_the_overlord = true,
+    item_bfury = true,
+    item_iron_talon = true,
+    item_moon_shard = true,
+    item_ultimate_scepter_roshan = true,
+    item_power_treads = true,
+    item_radiance = true,
 }
 
 Core.Catalog.BlinkItems = {
@@ -145,6 +155,7 @@ Core.Catalog.LinkbreakItems = {
     "item_disperser",
     "item_spirit_vessel",
     "item_urn_of_shadows",
+    "item_harpoon",
 }
 
 Core.Catalog.SelfItems = {
@@ -161,6 +172,13 @@ Core.Catalog.SelfItems = {
     item_greater_faerie_fire = true,
     item_cheese = true,
     item_phase_boots = true,
+    item_solar_crest = true,
+    item_pavise = true,
+    item_sphere = true,
+    item_holy_locket = true,
+    item_mjollnir = true,
+    item_shadow_amulet = true,
+    item_polliwog_charm = true,
 }
 
 Core.Catalog.SelfNoTargetItems = {
@@ -171,6 +189,71 @@ Core.Catalog.SelfNoTargetItems = {
     item_pipe = true,
     item_ancient_janggo = true,
     item_boots_of_bearing = true,
+    item_shivas_guard = true,
+    item_blade_mail = true,
+    item_satanic = true,
+    item_mask_of_madness = true,
+    item_silver_edge = true,
+    item_invis_sword = true,
+    item_bloodstone = true,
+    item_veil_of_discord = true,
+    item_manta = true,
+    item_phase_boots = true,
+    -- Neutral actives (tier + legacy KV still in items.json).
+    item_ash_legion_shield = true,
+    item_dagger_of_ristul = true,
+    item_demonicon = true,
+    item_essence_ring = true,
+    item_flayers_bota = true,
+    item_force_field = true,
+    item_havoc_hammer = true,
+    item_idol_of_screeauk = true,
+    item_jidi_pollen_bag = true,
+    item_kobold_cup = true,
+    item_mana_draught = true,
+    item_metamorphic_mandible = true,
+    item_minotaur_horn = true,
+    item_ogre_seal_totem = true,
+    item_pogo_stick = true,
+    item_riftshadow_prism = true,
+    item_spider_legs = true,
+    item_stonefeather_satchel = true,
+}
+
+-- Activatable neutrals (combo + UI). Passives omitted; point/unit use ClassifyItemPolicy.
+Core.Catalog.NeutralActiveItems = {
+    item_ash_legion_shield = true,
+    item_crippling_crossbow = true,
+    item_dagger_of_ristul = true,
+    item_demonicon = true,
+    item_essence_ring = true,
+    item_fallen_sky = true,
+    item_flayers_bota = true,
+    item_force_field = true,
+    item_havoc_hammer = true,
+    item_heavy_blade = true,
+    item_idol_of_screeauk = true,
+    item_jidi_pollen_bag = true,
+    item_kobold_cup = true,
+    item_mana_draught = true,
+    item_medallion_of_courage = true,
+    item_metamorphic_mandible = true,
+    item_minotaur_horn = true,
+    item_ogre_seal_totem = true,
+    item_pogo_stick = true,
+    item_polliwog_charm = true,
+    item_psychic_headband = true,
+    item_riftshadow_prism = true,
+    item_seeds_of_serenity = true,
+    item_spider_legs = true,
+    item_stonefeather_satchel = true,
+}
+
+-- Point neutrals used as combat land / gap tools (priority in AppendGenericActions).
+Core.Catalog.CombatLandItems = {
+    item_fallen_sky = 855,
+    item_heavy_blade = 750,
+    item_seeds_of_serenity = 640,
 }
 
 Core.Catalog.MagicImmuneModifiers = {
@@ -234,6 +317,8 @@ Core.Catalog.DisableModifiers = {
     item_bloodthorn = { "modifier_bloodthorn_debuff" },
     item_abyssal_blade = { "modifier_abyssal_blade_stun" },
     item_heavens_halberd = { "modifier_heavens_halberd_debuff" },
+    item_nullifier = { "modifier_item_nullifier_mute" },
+    item_ethereal_blade = { "modifier_item_ethereal_blade_ethereal" },
 }
 
 Core.Catalog.AbilityMeta = {
@@ -253,6 +338,17 @@ Core.Catalog.AbilityMeta = {
     },
     -- Point dash; cast gate is CastRangeFallback (max travel), not AoE radius.
     faceless_void_time_walk = { point = true, allowSingle = true },
+    -- Astral Step: API cast range is 0; gate on max_travel_distance, land past min_travel.
+    void_spirit_astral_step = {
+        point = true,
+        allowSingle = true,
+        defaultRadius = 170,
+        minTravel = 200,
+        overshoot = 120,
+    },
+    void_spirit_aether_remnant = { point = true, allowSingle = true, defaultRadius = 130 },
+    void_spirit_dissimilate = { defaultRadius = 520, noTarget = true, allowSingle = true },
+    void_spirit_resonant_pulse = { defaultRadius = 500, noTarget = true, allowSingle = true },
     axe_berserkers_call = { radiusSpecial = "radius", defaultRadius = 315, noTarget = true, allowSingle = true },
     earthshaker_echo_slam = { radiusSpecial = "echo_slam_damage_range", defaultRadius = 700, noTarget = true, allowSingle = true },
     earthshaker_fissure = { radiusSpecial = "fissure_radius", defaultRadius = 225, point = true, allowSingle = true },
@@ -373,6 +469,8 @@ Core.Catalog.CastRangeFallback = {
     item_dagon = 640,
     item_spirit_vessel = 750,
     item_urn_of_shadows = 750,
+    item_harpoon = 700,
+    item_meteor_hammer = 600,
     sniper_shrapnel = 1800,
     sniper_assassinate = 3000,
     invoker_cold_snap = 1000,
@@ -399,6 +497,9 @@ Core.Catalog.CastRangeFallback = {
     morphling_adaptive_strike_agi = 825,
     morphling_replicate = 1000,
     faceless_void_time_walk = 800,
+    -- max_travel_distance L3; Ability.GetCastRange often returns 0 (no AbilityCastRange).
+    void_spirit_astral_step = 1000,
+    void_spirit_aether_remnant = 850,
     mars_spear = 1200,
     mars_gods_rebuke = 500,
     magnataur_skewer = 1100,
@@ -886,6 +987,9 @@ local function IsKnownComboItem(id)
     if Core.Catalog.SelfItems[id] or Core.Catalog.SelfNoTargetItems[id] then
         return true
     end
+    if Core.Catalog.NeutralActiveItems and Core.Catalog.NeutralActiveItems[id] then
+        return true
+    end
     if IsLinkBreakItem(id) then
         return true
     end
@@ -908,26 +1012,21 @@ local function IsRealHeroItem(ability, id)
         return false
     end
 
+    -- Menu/combo only care about activatable items (not pure passives like Cuirass/Daedalus).
+    if IsKnownComboItem(id) then
+        return true
+    end
+    local asset = Core.Catalog.GetAssetCastInfo(id)
+    if asset and asset.kind then
+        return true
+    end
     local behavior = SafeValue(Ability.GetBehavior, ability, true)
         or SafeValue(Ability.GetBehavior, ability, false)
         or 0
-    local isItemBehavior = HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_ITEM)
-    if not isItemBehavior and not IsKnownComboItem(id) then
-        return false
-    end
-
-    if Item and Item.GetCost then
-        local cost = SafeValue(Item.GetCost, ability)
-        if type(cost) == "number" and cost > 0 then
-            return true
-        end
-    end
-
-    if Item and Item.IsPermanent and SafeValue(Item.IsPermanent, ability) then
-        return true
-    end
-
-    return IsKnownComboItem(id)
+    return HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_NO_TARGET)
+        or HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_UNIT_TARGET)
+        or HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_POINT)
+        or HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_TOGGLE)
 end
 
 local function ActionTag(prefix, id)
@@ -958,6 +1057,42 @@ local function LoadConfigInt(key, defaultValue)
         return defaultValue
     end
     return value
+end
+
+-- Item toggles are scoped per ally hero (shared item ids like BKB must not bleed across allies).
+function Core.Settings.ItemToggleKey(heroName, itemId)
+    return "itm_" .. tostring(heroName) .. "_" .. tostring(itemId)
+end
+
+function Core.Settings.LoadItemToggle(heroName, itemId)
+    if type(itemId) ~= "string" or itemId == "" then
+        return true
+    end
+    if type(heroName) == "string" and heroName ~= "" then
+        local key = Core.Settings.ItemToggleKey(heroName, itemId)
+        local sentinel = 2147483646
+        local scoped = SafeValue(Config.ReadInt, CONFIG_SECTION, key, sentinel)
+        if type(scoped) == "number" and scoped ~= sentinel then
+            return scoped == 1
+        end
+        -- One-time migrate from the old global itm_<id> key.
+        local legacy = LoadConfigInt("itm_" .. itemId, 1)
+        SaveConfigInt(key, legacy)
+        return legacy == 1
+    end
+    return LoadConfigInt("itm_" .. itemId, 1) == 1
+end
+
+function Core.Settings.SaveItemToggle(heroName, itemId, enabled)
+    if type(itemId) ~= "string" or itemId == "" then
+        return
+    end
+    local value = enabled and 1 or 0
+    if type(heroName) == "string" and heroName ~= "" then
+        SaveConfigInt(Core.Settings.ItemToggleKey(heroName, itemId), value)
+        return
+    end
+    SaveConfigInt("itm_" .. itemId, value)
 end
 
 local function MenuIcon(widget, icon)
@@ -1002,23 +1137,6 @@ local function HasAnyModifier(unit, mods)
         end
     end
     return false
-end
-
-local function GetUnitStatusResistance(unit)
-    if not unit or not NPC.GetModifierPropertyHighest then
-        return 0
-    end
-    local base = SafeValue(
-        NPC.GetModifierPropertyHighest,
-        unit,
-        Enum.ModifierFunction.MODIFIER_PROPERTY_STATUS_RESISTANCE
-    ) or 0
-    local stacking = SafeValue(
-        NPC.GetModifierPropertyHighest,
-        unit,
-        Enum.ModifierFunction.MODIFIER_PROPERTY_STATUS_RESISTANCE_STACKING
-    ) or 0
-    return math.min(0.85, math.max(0, base + stacking))
 end
 
 local function GetModifierRemaining(mod, now)
@@ -1171,6 +1289,10 @@ do
     local ok, mod = pcall(require, "assets.data.cast_catalog")
     if ok and type(mod) == "table" then
         Core.Catalog.AssetCast = mod
+    end
+    ok, mod = pcall(require, "assets.data.hero_kits")
+    if ok and type(mod) == "table" then
+        Core.Catalog.HeroKitsGenerated = mod
     end
 end
 
@@ -1586,6 +1708,16 @@ local function CollectHeroItems(hero)
         AddItem(SafeValue(NPC.GetItem, hero, "item_refresher", true))
     end
 
+    -- Neutrals may live only in slot 16; also resolve by name like blinks/linkbreaks.
+    local neutrals = Core.Catalog.NeutralActiveItems
+    if type(neutrals) == "table" then
+        for id in pairs(neutrals) do
+            if type(id) == "string" and not seenIds[id] then
+                AddItem(SafeValue(NPC.GetItem, hero, id, true))
+            end
+        end
+    end
+
     table.sort(out, function(a, b)
         return a.id < b.id
     end)
@@ -1962,6 +2094,28 @@ function Core.GetAlliesNear(origin, radius, controlled)
     return out
 end
 
+-- Centroid of allied heroes near origin (excludes controlled). Nil when none found.
+function Core.GetAllyCentroidNear(origin, radius, controlled)
+    local allies = Core.GetAlliesNear(origin, radius, controlled)
+    if #allies == 0 then
+        return nil
+    end
+    local sx, sy, sz, n = 0, 0, 0, 0
+    for i = 1, #allies do
+        local pos = SafeValue(Entity.GetAbsOrigin, allies[i])
+        if pos then
+            sx = sx + pos.x
+            sy = sy + pos.y
+            sz = sz + pos.z
+            n = n + 1
+        end
+    end
+    if n == 0 then
+        return nil
+    end
+    return Vector(sx / n, sy / n, sz / n)
+end
+
 local function CountHitsAt(origin, entries, radius)
     local count = 0
     for i = 1, #entries do
@@ -2187,6 +2341,7 @@ local function FindBlinkLandNearEnemy(controlled, enemy, landDist)
 end
 
 -- Gap-close first: blink toward locked enemy when still far.
+-- opts.landPos: optional fixed land (e.g. Mars ally-side wall pin); still clamped to blink range.
 local function TryAppendInitiateBlink(ctx, actions, opts)
     opts = opts or {}
     if not ctx or not ctx.controlled or not ctx.enemy or not actions then
@@ -2214,7 +2369,34 @@ local function TryAppendInitiateBlink(ctx, actions, opts)
         return false
     end
 
-    local landPos, blink, blinkId = FindBlinkLandNearEnemy(ctx.controlled, ctx.enemy, landDist)
+    local landPos, blink, blinkId
+    if opts.landPos then
+        blink, blinkId = GetBlink(ctx.controlled)
+        if blink and blinkId then
+            if IsActionUsed(blinkId) or IsActionBlocked(blinkId, GetGameTime()) then
+                blink, blinkId, landPos = nil, nil, nil
+            else
+                local mana = SafeValue(NPC.GetMana, ctx.controlled) or 0
+                if not SafeValue(Ability.IsCastable, blink, mana) then
+                    blink, blinkId, landPos = nil, nil, nil
+                else
+                    landPos = opts.landPos
+                    local blinkRange = GetCastRange(ctx.controlled, blink)
+                    if blinkRange <= 0 then
+                        blinkRange = 1200
+                    end
+                    if Dist2D(myPos, landPos) > blinkRange then
+                        landPos = myPos:Extend2D(landPos, blinkRange - 25)
+                    end
+                    if Dist2D(myPos, landPos) <= 40 then
+                        landPos = nil
+                    end
+                end
+            end
+        end
+    else
+        landPos, blink, blinkId = FindBlinkLandNearEnemy(ctx.controlled, ctx.enemy, landDist)
+    end
     if not blink or not landPos or not blinkId then
         DbgVerbose("initiate_blink_skip",
             "initiate_blink | skip noLand dist=%.0f landWant=%.0f | %s",
@@ -2238,8 +2420,12 @@ local function TryAppendInitiateBlink(ctx, actions, opts)
         ability = blink,
         abilityId = blinkId,
         position = landPos,
-        positionTtl = 0.12,
+        -- Keep the precomputed land point. Default dynamicAoe re-resolve treats blink
+        -- like an AoE spell (no radius) and silently drops it from the queue.
+        positionAt = ctx.now,
+        positionTtl = 2.0,
         positionMaxRange = GetCastRange(ctx.controlled, blink),
+        positionPolicy = "fixed",
         priority = priority,
         tag = opts.tag or "initiate_blink",
     }
@@ -2252,6 +2438,114 @@ local function TryAppendInitiateBlink(ctx, actions, opts)
         FormatRangeContext(ctx)
     )
     return true
+end
+
+-- Mars: Arena/Spear/blink aligned so Spear pins on the ally-side Arena wall.
+-- Push dir = enemy → ally centroid (fallback LocalHero, then Mars).
+-- Defined after TryAppendInitiateBlink so the local is in scope.
+function Core.BuildMarsPlan(ctx, actions)
+    if not ctx or not ctx.controlled or not ctx.enemy or not actions then
+        return
+    end
+
+    local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
+    local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
+    if not myPos or not enemyPos then
+        return
+    end
+
+    local allyRadius = 1600
+    local pushTarget = Core.GetAllyCentroidNear(enemyPos, allyRadius, ctx.controlled)
+    if not pushTarget and ctx.localHero and ctx.localHero ~= ctx.controlled then
+        pushTarget = SafeValue(Entity.GetAbsOrigin, ctx.localHero)
+    end
+    if not pushTarget then
+        pushTarget = myPos
+    end
+
+    local dx = pushTarget.x - enemyPos.x
+    local dy = pushTarget.y - enemyPos.y
+    local len = math.sqrt(dx * dx + dy * dy)
+    if len < 32 then
+        dx = myPos.x - enemyPos.x
+        dy = myPos.y - enemyPos.y
+        len = math.sqrt(dx * dx + dy * dy)
+    end
+    if len < 1 then
+        dx, dy, len = 1, 0, 1
+    end
+    local ux, uy = dx / len, dy / len
+
+    local arenaBias = 220
+    local landDist = 200
+    local spearAimDist = 400
+    local arenaCenter = Vector(
+        enemyPos.x - ux * arenaBias,
+        enemyPos.y - uy * arenaBias,
+        enemyPos.z
+    )
+    local blinkLand = Vector(
+        enemyPos.x - ux * landDist,
+        enemyPos.y - uy * landDist,
+        enemyPos.z
+    )
+    local spearAim = Vector(
+        enemyPos.x + ux * spearAimDist,
+        enemyPos.y + uy * spearAimDist,
+        enemyPos.z
+    )
+
+    TryAppendInitiateBlink(ctx, actions, {
+        minDist = 450,
+        landDist = landDist,
+        landPos = blinkLand,
+        priority = 980,
+        tag = "mars_initiate_blink",
+    })
+
+    local function queueFixed(abilityId, position, priority)
+        if not IsAbilityEnabled(abilityId) or IsActionUsed(abilityId)
+            or IsActionBlocked(abilityId, ctx.now) then
+            return
+        end
+        local ability = FindAbilityEntry(ctx.controlled, abilityId)
+        if not ability or not SafeValue(Ability.IsCastable, ability, ctx.mana) then
+            return
+        end
+        actions[#actions + 1] = {
+            kind = "bestPosition",
+            ability = ability,
+            abilityId = abilityId,
+            position = position,
+            positionAt = ctx.now,
+            positionTtl = 2.0,
+            positionMaxRange = GetCastRange(ctx.controlled, ability),
+            positionPolicy = "fixed",
+            meta = Core.Catalog.AbilityMeta[abilityId],
+            allowSingle = true,
+            priority = priority,
+            tag = "mars_" .. abilityId,
+        }
+    end
+
+    queueFixed("mars_arena_of_blood", arenaCenter, 890)
+    queueFixed("mars_spear", spearAim, 870)
+
+    if IsAbilityEnabled("mars_gods_rebuke") and not IsActionUsed("mars_gods_rebuke")
+        and not IsActionBlocked("mars_gods_rebuke", ctx.now) then
+        local rebuke = FindAbilityEntry(ctx.controlled, "mars_gods_rebuke")
+        if rebuke and SafeValue(Ability.IsCastable, rebuke, ctx.mana) then
+            actions[#actions + 1] = {
+                kind = "bestPosition",
+                ability = rebuke,
+                abilityId = "mars_gods_rebuke",
+                meta = Core.Catalog.AbilityMeta.mars_gods_rebuke,
+                allowSingle = true,
+                priority = 740,
+                tag = "mars_gods_rebuke",
+            }
+        end
+    end
 end
 
 --#endregion
@@ -3069,11 +3363,12 @@ local function SyncAbilityItemWidgets(hero, force)
 
     if UI.Items and UI.Items.Update then
         local itemWidgets = {}
+        local heroName = Runtime.syncedHeroName
         for _, entry in ipairs(CollectHeroItems(hero)) do
             itemWidgets[#itemWidgets + 1] = {
                 entry.id,
                 GetAbilityIconPath(entry.id),
-                LoadConfigInt("itm_" .. entry.id, 1) == 1,
+                Core.Settings.LoadItemToggle(heroName, entry.id),
             }
         end
         local widgetSeen = {}
@@ -3085,7 +3380,7 @@ local function SyncAbilityItemWidgets(hero, force)
                 itemWidgets[#itemWidgets + 1] = {
                     ensureId,
                     GetAbilityIconPath(ensureId),
-                    LoadConfigInt("itm_" .. ensureId, 1) == 1,
+                    Core.Settings.LoadItemToggle(heroName, ensureId),
                 }
                 widgetSeen[ensureId] = true
             end
@@ -3438,7 +3733,11 @@ local function InferMorphSourceUnitName(controlled)
         return nil
     end
     local scores = {}
-    for unitName, kit in pairs(Core.Catalog.HeroKits) do
+    local kits = Core.Catalog.HeroKits
+    if type(kits) ~= "table" then
+        return nil
+    end
+    for unitName, kit in pairs(kits) do
         local steps = kit and kit.steps
         if type(steps) == "table" then
             for si = 1, #steps do
@@ -4172,7 +4471,8 @@ local function ApplyHeroKit(ctx, actions, kit)
 end
 
 -- Declarative combo recipes for simple/medium heroes (see ApplyHeroKit).
-Core.Catalog.HeroKits = {
+-- Hand overrides win over assets/data/hero_kits.lua (merged below).
+Core.Catalog.HeroKitsManual = {
     npc_dota_hero_axe = {
         initiate = { blink = true, landDist = 120, minDist = 400, priority = 980 },
         steps = {
@@ -4218,6 +4518,16 @@ Core.Catalog.HeroKits = {
             { id = "faceless_void_chronosphere", builder = "aoeUlt" },
         },
     },
+    npc_dota_hero_void_spirit = {
+        -- Prefer Astral Step for mid-range; blink only when farther than max travel.
+        initiate = { blink = true, landDist = 200, minDist = 950, priority = 980 },
+        steps = {
+            { id = "void_spirit_astral_step", builder = "bestPosition", priority = 900 },
+            { id = "void_spirit_dissimilate", builder = "aoeUlt" },
+            { id = "void_spirit_resonant_pulse", builder = "aoeUlt" },
+            { id = "void_spirit_aether_remnant", builder = "bestPosition", priority = 780 },
+        },
+    },
     npc_dota_hero_centaur = {
         initiate = { blink = true, landDist = 120, minDist = 400, priority = 980 },
         steps = {
@@ -4249,14 +4559,7 @@ Core.Catalog.HeroKits = {
             { id = "rattletrap_power_cogs", builder = "noTarget", priority = 760 },
         },
     },
-    npc_dota_hero_mars = {
-        initiate = { blink = true, landDist = 200, minDist = 450, priority = 980 },
-        steps = {
-            { id = "mars_spear", builder = "bestPosition", priority = 880 },
-            { id = "mars_arena_of_blood", builder = "aoeUlt" },
-            { id = "mars_gods_rebuke", builder = "bestPosition", priority = 740 },
-        },
-    },
+    -- Mars lives in HeroProfiles (Core.BuildMarsPlan) for ally-centroid wall pin.
     npc_dota_hero_legion_commander = {
         initiate = { blink = true, landDist = 100, minDist = 350, priority = 980 },
         steps = {
@@ -4403,8 +4706,28 @@ Core.Catalog.HeroKits = {
     },
 }
 
+-- Merge generated kits under hand overrides (locals live inside this function).
+Core.RebuildHeroKits = function()
+    local merged = {}
+    local generated = Core.Catalog.HeroKitsGenerated
+    if type(generated) == "table" then
+        for unitName, kit in pairs(generated) do
+            merged[unitName] = kit
+        end
+    end
+    local manual = Core.Catalog.HeroKitsManual
+    if type(manual) == "table" then
+        for unitName, kit in pairs(manual) do
+            merged[unitName] = kit
+        end
+    end
+    Core.Catalog.HeroKits = merged
+end
+Core.RebuildHeroKits()
+
 Core.Catalog.HeroProfiles = {
     -- Custom / heavy logic only; simple heroes live in HeroKits.
+    npc_dota_hero_mars = Core.BuildMarsPlan,
     npc_dota_hero_primal_beast = BuildPrimalBeastPlan,
     npc_dota_hero_morphling = BuildMorphlingPlan,
     npc_dota_hero_nevermore = Core.BuildNevermorePlan,
@@ -4879,7 +5202,10 @@ local function AppendGenericActions(ctx, actions)
                 goto continue_item
             end
             if Core.Catalog.SelfItems[entry.id] and not IsLinkBreakItem(entry.id) then
-                goto continue_item
+                -- Keep pure support items help-gated; still allow enemy-targeted SelfItems (Force/Pike).
+                if policy ~= "lockedEnemy" and policy ~= "bestPosition" and policy ~= "linkbreak" then
+                    goto continue_item
+                end
             end
             local behavior = SafeValue(Ability.GetBehavior, entry.item, true)
                 or SafeValue(Ability.GetBehavior, entry.item, false) or 0
@@ -4923,6 +5249,19 @@ local function AppendGenericActions(ctx, actions)
                             priority = 735,
                             tag = entry.id,
                         }
+                    elseif ctx.enemy
+                        and Core.Catalog.DisableModifiers[entry.id] == nil
+                        and not Core.Catalog.HexAbilities[entry.id]
+                        and SafeValue(Ability.IsCastable, entry.item, ctx.mana)
+                        and canCastOnEnemyNow(entry.item, "lockedEnemy") then
+                        -- Linkbreak catalog items that are not hard disables (eblade/nullifier/vessel).
+                        actions[#actions + 1] = {
+                            kind = "lockedEnemy",
+                            ability = entry.item,
+                            abilityId = entry.id,
+                            priority = 725,
+                            tag = entry.id,
+                        }
                     end
                 end
             elseif policy == "lockedEnemy" and ctx.enemy then
@@ -4930,17 +5269,35 @@ local function AppendGenericActions(ctx, actions)
                     goto continue_item
                 end
                 if SafeValue(Ability.IsCastable, entry.item, ctx.mana) then
-                    if ShouldCastDisable(ctx, ctx.enemy, entry.id, entry.item)
-                        and canCastOnEnemyNow(entry.item, policy) then
+                    local isDisable = Core.Catalog.DisableModifiers[entry.id] ~= nil
+                        or Core.Catalog.HexAbilities[entry.id] == true
+                    local should = false
+                    if isDisable then
+                        should = ShouldCastDisable(ctx, ctx.enemy, entry.id, entry.item)
+                    else
+                        -- Offensive target items (harpoon, force, vessel, …).
+                        should = true
+                    end
+                    if should and canCastOnEnemyNow(entry.item, policy) then
                         actions[#actions + 1] = {
                             kind = "lockedEnemy",
                             ability = entry.item,
                             abilityId = entry.id,
-                            priority = 740,
+                            priority = isDisable and 740 or 720,
                             tag = entry.id,
                         }
                     end
                 end
+            elseif policy == "localHero" and ctx.localHero
+                and LocalHeroNeedsHelp(ctx.localHero)
+                and SafeValue(Ability.IsCastable, entry.item, ctx.mana) then
+                actions[#actions + 1] = {
+                    kind = "localHero",
+                    ability = entry.item,
+                    abilityId = entry.id,
+                    priority = 910,
+                    tag = entry.id,
+                }
             elseif policy == "noTarget" and not Core.Catalog.SelfNoTargetItems[entry.id]
                 and SafeValue(Ability.IsCastable, entry.item, ctx.mana) then
                 actions[#actions + 1] = {
@@ -4954,12 +5311,14 @@ local function AppendGenericActions(ctx, actions)
                 and not entry.id:find("blink", 1, true)
                 and SafeValue(Ability.IsCastable, entry.item, ctx.mana)
                 and canCastOnEnemyNow(entry.item, policy) then
+                local landPrio = Core.Catalog.CombatLandItems
+                    and Core.Catalog.CombatLandItems[entry.id]
                 actions[#actions + 1] = {
                     kind = "bestPosition",
                     ability = entry.item,
                     abilityId = entry.id,
                     allowSingle = true,
-                    priority = 620,
+                    priority = type(landPrio) == "number" and landPrio or 620,
                     tag = entry.id,
                 }
             end
@@ -5300,6 +5659,25 @@ local function BuildActionPlan(ctx)
             AppendGenericActions(ctx, actions)
         end
         return actions
+    end
+
+    -- Heroes without a kit initiate still need blink gap-close (e.g. Alchemist + Harpoon).
+    do
+        local hasBlink = false
+        for i = 1, #actions do
+            local aid = actions[i] and actions[i].abilityId
+            if type(aid) == "string" and aid:find("blink", 1, true) then
+                hasBlink = true
+                break
+            end
+        end
+        if not hasBlink then
+            TryAppendInitiateBlink(ctx, actions, {
+                minDist = 550,
+                landDist = 160,
+                priority = 980,
+            })
+        end
     end
 
     AppendGenericActions(ctx, actions)
@@ -6155,7 +6533,7 @@ local function GetActionTargetPos(ctx, ref)
         or ((ref.kind == "lockedEnemy" or ref.kind == "linkbreak" or ref.kind == "iceWall")
             and "lockedEnemy")
         or "none"
-    if positionPolicy == "dynamicAoe" then
+    if positionPolicy == "dynamicAoe" or positionPolicy == "fixed" then
         return ref.position
     end
     if positionPolicy == "selfOrLocal" then
@@ -6237,6 +6615,26 @@ local function PrepareActionForExecution(ctx, action)
     local pos = ResolveActionPosition(ctx, action)
     if not pos then
         return false
+    end
+    -- Dash abilities with min travel (Astral Step): land through the target, never short of min.
+    do
+        local dashMeta = action.meta or Core.Catalog.AbilityMeta[action.abilityId]
+        if dashMeta and type(dashMeta.minTravel) == "number" and ctx.enemy then
+            local dashFrom = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
+            local dashTo = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
+            if dashFrom and dashTo and Dist2D(dashFrom, dashTo) >= 1 then
+                local maxTravel = GetCastRange(ctx.controlled, action.ability)
+                if type(maxTravel) ~= "number" or maxTravel <= 0 then
+                    maxTravel = dashMeta.minTravel
+                end
+                local overshoot = type(dashMeta.overshoot) == "number" and dashMeta.overshoot or 120
+                local travel = math.min(
+                    maxTravel,
+                    math.max(dashMeta.minTravel, Dist2D(dashFrom, dashTo) + overshoot)
+                )
+                pos = dashFrom:Extend2D(dashTo, travel)
+            end
+        end
     end
     action.position = pos
     action.positionAt = ctx.now
@@ -7090,9 +7488,33 @@ local function ProcessCombo(ctx)
             goto continue_queue
         end
         if not PrepareActionForExecution(ctx, action) then
+            -- Refresh initiate blink land instead of dropping when resolve fails.
+            if action.tag == "initiate_blink" and ctx.enemy then
+                local landWant = 160
+                local landPos, blink, blinkId = FindBlinkLandNearEnemy(
+                    ctx.controlled, ctx.enemy, landWant)
+                if landPos and blink and blinkId then
+                    action.ability = blink
+                    action.abilityId = blinkId
+                    action.position = landPos
+                    action.positionAt = ctx.now
+                    action.positionTtl = 2.0
+                    action.positionPolicy = "fixed"
+                    action.positionMaxRange = GetCastRange(ctx.controlled, blink)
+                    if PrepareActionForExecution(ctx, action) then
+                        goto continue_queue_after_prepare
+                    end
+                end
+            end
+            Core.DbgEvent(
+                "queue drop | prepareFail %s | %s",
+                Core.FormatActionPreview(action),
+                FormatRangeContext(ctx)
+            )
             table.remove(Runtime.actionQueue, 1)
             goto continue_queue
         end
+        ::continue_queue_after_prepare::
         if action.kind ~= "noTarget" and not IsWithinCastRange(ctx, action) then
             -- Blink in for Pulverize when still out of grab range.
             if action.abilityId == "primal_beast_pulverize"
@@ -7199,12 +7621,15 @@ local function ProcessCombo(ctx)
                 or Core.Catalog.HexAbilities[action.abilityId])
             and not ShouldCastDisable(ctx, ctx.enemy, action.abilityId, action.ability)
         then
-            DbgVerbose("event",
+            -- Do not park the whole queue on a disable that must wait for CC to fade;
+            -- later actions (e.g. Fallen Sky) would never cast until bind release.
+            Core.DbgEvent(
                 "skip_disable | %s | wait/extend active cc | %s",
                 action.abilityId or "?",
                 FormatRangeContext(ctx)
             )
-            break
+            table.remove(Runtime.actionQueue, 1)
+            goto continue_queue
         end
         if (action.kind == "lockedEnemy" or action.kind == "linkbreak")
             and not EnsureUnitIdleForCast(ctx)
@@ -7253,31 +7678,33 @@ end
 --#region Menu
 
 local function UpdateControlStates()
-    local enabled = UI.Enabled and UI.Enabled:Get()
+    local enabled = UI.Enabled and UI.Enabled:Get() == true
+    local debugOn = UI.Debug and UI.Debug:Get() == true
+
     local widgets = {
         UI.AllyHero,
         UI.Abilities,
         UI.Items,
+        UI.SettingsGear,
         UI.TargetMode,
         UI.MinClusterHits,
         UI.ManaThreshold,
         UI.ExtendDisables,
         UI.UseLinkBreak,
         UI.Debug,
-        UI.DebugVerbose,
         UI.DrawOverlay,
     }
 
     for i = 1, #widgets do
         local widget = widgets[i]
-        if widget and widget.Disabled then
-            widget:Disabled(not enabled)
+        if widget and widget.Visible then
+            widget:Visible(enabled)
         end
     end
 
-    if UI.DebugVerbose and UI.DebugVerbose.Disabled then
-        local debugOn = UI.Debug and UI.Debug:Get()
-        UI.DebugVerbose:Disabled(not enabled or not debugOn)
+    -- Nested under Debug: hide verbose unless Control Ally and Debug logs are both on.
+    if UI.DebugVerbose and UI.DebugVerbose.Visible then
+        UI.DebugVerbose:Visible(enabled and debugOn)
     end
 end
 
@@ -7318,8 +7745,8 @@ local function InitializeMenu()
     ui.Items = group:MultiSelect(L("Items", "Предметы"), {}, true)
     MenuIcon(ui.Items, Icons.items)
     ui.Items:ToolTip(L(
-        "Toggle which items the ally may use. Buffs/dispels go to your hero.",
-        "Какие предметы использовать. Бафы/развеивание — на вашего героя."
+        "Toggle which items this ally may use (saved per selected ally hero). Buffs/dispels go to your hero.",
+        "Какие предметы использовать у выбранного союзника (сохраняется отдельно на героя). Бафы/развеивание — на вашего героя."
     ))
 
     ui.Abilities:SetCallback(function()
@@ -7351,18 +7778,20 @@ local function InitializeMenu()
         if type(listed) ~= "table" then
             return
         end
+        local heroName = Runtime.syncedHeroName
         for i = 1, #listed do
             local id = listed[i]
             if id and id ~= "none" then
                 local val = SafeValue(widget.Get, widget, id)
                 if val ~= nil then
-                    SaveConfigInt("itm_" .. id, val == true and 1 or 0)
+                    Core.Settings.SaveItemToggle(heroName, id, val == true)
                 end
             end
         end
     end, false)
 
     local gear = ui.Enabled:Gear(L("Settings", "Настройки"), Icons.gear, true)
+    ui.SettingsGear = gear
 
     ui.TargetMode = gear:Combo(L("Target Mode", "Режим цели"), TARGET_MODE_ITEMS, LoadConfigInt("target_mode", 0))
     MenuIcon(ui.TargetMode, Icons.target)
