@@ -2,7 +2,7 @@
     Control Ally
     Hold your hero Combo Key to run a smart combo on a controllable ally
     (disconnect / shared unit control). Menu: Heroes > Settings > General > Units Controller.
-    Script by hanagumori
+    Script by 花曇り hanagumori
 --]]
 
 local Script = {}
