@@ -39,6 +39,7 @@ local DC = {
     GLIMPSE_HISTORY_INTERVAL = 0.10,
     GLIMPSE_HISTORY_MAX = 50,
     DRAW_GLIMPSE_MARKER = 18,
+    DRAW_GLIMPSE_ICON = 28,
     DRAW_CIRCLE_SEGMENTS = 64,
     DRAW_FENCE_ARC_DEG = 70,
     COMBO_STAGE_TIMEOUT = 8.0,
@@ -419,6 +420,51 @@ local MAGIC_IMMUNE_MODS = {
     "modifier_juggernaut_blade_fury",
 }
 
+---Without Aghanim mute: these states walk through Kinetic Field / shrug Static Storm.
+local FIELD_ESCAPE_MODS = {
+    "modifier_black_king_bar_immune",
+    "modifier_juggernaut_blade_fury",
+    "modifier_life_stealer_rage",
+    "modifier_omninight_martyr",
+    "modifier_omniknight_martyr",
+    "modifier_omninight_repel",
+    "modifier_omniknight_repel",
+    "modifier_legion_commander_press_the_attack",
+    "modifier_huskar_life_break_charge",
+    "modifier_phoenix_supernova_hiding",
+    "modifier_puck_phase_shift",
+    "modifier_obsidian_destroyer_astral_imprisonment",
+    "modifier_shadow_demon_disruption",
+    "modifier_eul_cyclone",
+    "modifier_wind_waker",
+    "modifier_brewmaster_storm_cyclone",
+    "modifier_invoker_tornado",
+    "modifier_bane_nightmare",
+    "modifier_winter_wyvern_winters_curse_aura",
+    "modifier_winter_wyvern_winters_curse",
+    "modifier_dazzle_shallow_grave",
+    "modifier_abaddon_borrowed_time",
+    "modifier_tusk_snowball_movement",
+    "modifier_morphling_waveform",
+    "modifier_storm_spirit_ball_lightning",
+    "modifier_ember_spirit_fire_remnant",
+    "modifier_slark_pounce",
+    "modifier_mirana_leap",
+    "modifier_spirit_breaker_charge_of_darkness",
+    "modifier_faceless_void_time_walk",
+    "modifier_antimage_blink",
+    "modifier_queenofpain_blink",
+    "modifier_phantom_assassin_phantom_strike",
+    "modifier_riki_blink_strike",
+}
+
+---Abilities that, when ready, will walk out of Field before Aghs mute matters.
+local FIELD_ESCAPE_READY_ABILITIES = {
+    "juggernaut_blade_fury",
+    "life_stealer_rage",
+    "phoenix_supernova",
+}
+
 -- Smart Usage: Nullifier only when the target has something worth strong-dispelling.
 local NULLIFIER_DISPEL_MODS = {
     "modifier_item_glimmer_cape_fade",
@@ -468,6 +514,8 @@ local UI = {}
 local Persistent = {
     ---@type Logger|nil
     logger = nil,
+    ---@type table<string, integer>
+    heroIcons = {},
 }
 
 local Runtime = {
@@ -520,6 +568,7 @@ local Runtime = {
     fieldCastAt = -math.huge,
     fieldEndsAt = -math.huge,
     stormCastAt = -math.huge,
+    stormEndsAt = -math.huge,
     secondCycleAt = -math.huge,
     secondCycleWaitReason = nil,
     trapCenter = nil,
@@ -538,8 +587,8 @@ local Runtime = {
     debugSkipAttackAt = -math.huge,
     ---@type table<integer, {t: number, x: number, y: number, z: number}[]>
     glimpseHistory = {},
-    ---@type {pos: Vector, current: Vector}|nil
-    glimpseDraw = nil,
+    ---@type {pos: Vector, current: Vector, unitName: string}[]|nil
+    glimpseDrawList = nil,
     ---Manual Glimpse Key: W on enemy → E on return position.
     ---@type {stage: string, enemy: userdata|nil, returnPos: Vector|nil, startedAt: number}|nil
     glimpseManual = nil,
@@ -619,12 +668,13 @@ local function ResetRuntime()
     Runtime.fieldCastAt = -math.huge
     Runtime.fieldEndsAt = -math.huge
     Runtime.stormCastAt = -math.huge
+    Runtime.stormEndsAt = -math.huge
     Runtime.secondCycleAt = -math.huge
     Runtime.secondCycleWaitReason = nil
     Runtime.trapCenter = nil
     Runtime.trapFieldRadius = nil
     Runtime.glimpseHistory = {}
-    Runtime.glimpseDraw = nil
+    Runtime.glimpseDrawList = nil
     Runtime.glimpseManual = nil
 end
 
@@ -1357,7 +1407,7 @@ local function InitializeUI()
         BuildMultiSelectItems(LINKBREAKER_ITEMS),
         false
     )
-    ui.LinkbreakerItems:ForceLocalization("Linkbreaker")
+    ui.LinkbreakerItems:ForceLocalization("Linkbreaker Items")
     MenuImage(ui.LinkbreakerItems, LINKENS_ICON)
     ui.LinkbreakerItems:ToolTip(
         "Cheapest ready pop for Linken's / Sphere: Thunder Strike, Glimpse, then items."
@@ -1365,6 +1415,9 @@ local function InitializeUI()
 
 
     ui.DrawGlimpse = glimpseGroup:Switch("Draw Glimpse Position", true, I.drawGlimpse)
+    ui.DrawGlimpse:ToolTip(
+        "Shows each enemy hero icon at their Glimpse return position (world + minimap)."
+    )
     ui.DrawTrajectory = glimpseGroup:Switch("Draw Trajectory Line", false, I.drawTrajectory)
     ui.GlimpseOnlyCastable = glimpseGroup:Switch("Only When Castable", true, I.onlyCastable)
     ui.GlimpseKey = glimpseGroup:Bind("Glimpse Key", Enum.ButtonCode.KEY_NONE, I.glimpse or I.comboKey)
@@ -2110,7 +2163,11 @@ function Script.Target.GetMarkColor(alpha)
             end
         end
     end
-    -- Snapfire ember default.
+    -- Chat / Menu theme primary.
+    local Ind = Script.Indicator
+    if Ind and Ind.themePr then
+        return Color(Ind.themePr, Ind.themePg, Ind.themePb, a)
+    end
     return Color(255, 148, 64, a)
 end
 
@@ -2630,6 +2687,14 @@ Script.Indicator = {
     colorOff = nil,
     ---@type Color|nil
     colorShadow = nil,
+    ---Chat / Menu.Style primary RGB (for Draw sync).
+    themePr = 255,
+    themePg = 148,
+    themePb = 64,
+    ---Chat / Menu.Style secondary RGB.
+    themeSr = 175,
+    themeSg = 178,
+    themeSb = 185,
     ---@type boolean|nil
     hudReady = nil,
     hudProbeAt = -math.huge,
@@ -2745,20 +2810,71 @@ end
 
 function Script.Indicator.RefreshTheme()
     local Ind = Script.Indicator
+    Ind.themePr, Ind.themePg, Ind.themePb = 255, 148, 64
+    Ind.themeSr, Ind.themeSg, Ind.themeSb = 175, 178, 185
     Ind.colorShadow = Color(0, 0, 0, 210)
-    Ind.colorOn = Color(255, 148, 64, 245)
-    Ind.colorOff = Color(175, 178, 185, 230)
+    Ind.colorOn = Color(Ind.themePr, Ind.themePg, Ind.themePb, 245)
+    Ind.colorOff = Color(Ind.themeSr, Ind.themeSg, Ind.themeSb, 230)
     if not Menu or not Menu.Style then
         return
     end
     local ok, primary = TryCall(Menu.Style, "primary")
     if ok and primary and type(primary.r) == "number" then
+        Ind.themePr = primary.r
+        Ind.themePg = primary.g
+        Ind.themePb = primary.b
         Ind.colorOn = Color(primary.r, primary.g, primary.b, 245)
     end
     local ok2, secondary = TryCall(Menu.Style, "secondary")
     if ok2 and secondary and type(secondary.r) == "number" then
+        Ind.themeSr = secondary.r
+        Ind.themeSg = secondary.g
+        Ind.themeSb = secondary.b
         Ind.colorOff = Color(secondary.r, secondary.g, secondary.b, 230)
     end
+end
+
+---Menu / chat theme primary as Color (alpha override).
+---@param alpha number|nil
+---@return Color
+function DC.ThemePrimary(alpha)
+    local Ind = Script.Indicator
+    if not Ind.colorOn then
+        Script.Indicator.RefreshTheme()
+    end
+    return Color(Ind.themePr or 255, Ind.themePg or 148, Ind.themePb or 64, alpha or 220)
+end
+
+---Menu / chat theme secondary as Color (alpha override).
+---@param alpha number|nil
+---@return Color
+function DC.ThemeSecondary(alpha)
+    local Ind = Script.Indicator
+    if not Ind.colorOn then
+        Script.Indicator.RefreshTheme()
+    end
+    return Color(Ind.themeSr or 175, Ind.themeSg or 178, Ind.themeSb or 185, alpha or 200)
+end
+
+---Lighter mix of primary toward white (crosshair / highlights).
+---@param alpha number|nil
+---@param mix number|nil 0..1 toward white
+---@return Color
+function DC.ThemePrimaryLite(alpha, mix)
+    local Ind = Script.Indicator
+    if not Ind.colorOn then
+        Script.Indicator.RefreshTheme()
+    end
+    mix = mix or 0.45
+    local r = Ind.themePr or 255
+    local g = Ind.themePg or 148
+    local b = Ind.themePb or 64
+    return Color(
+        math.floor(r + (255 - r) * mix),
+        math.floor(g + (255 - g) * mix),
+        math.floor(b + (255 - b) * mix),
+        alpha or 220
+    )
 end
 
 function Script.Indicator.ResetHudProbe()
@@ -4725,20 +4841,38 @@ local function ClearAbilityIssued(abilityName)
     Runtime.abilityIssuedCharges[abilityName] = nil
 end
 
----After Refresher/Shard lands: wait until Kinetic Field fully ends, then 2nd Q→E→R.
+---After Refresher/Shard lands: wait until Field and Storm fully end, then 2nd Q→E→R.
 ---@param me userdata|nil
 function Script.ReArmAfterRefresher(me)
     local now = SafeValue(GameRules.GetGameTime) or 0
     me = me or SafeValue(Heroes.GetLocal)
 
     local field = me and GetAbility(me, ABILITY.field) or nil
+    local storm = me and GetAbility(me, ABILITY.storm) or nil
     local formation, duration, total = DC.GetFieldLifetime(field)
-    local waitUntil = nil
+    local stormDur = DC.GetStormDuration(storm)
+
+    local fieldEnds = nil
     if type(Runtime.fieldEndsAt) == "number" and Runtime.fieldEndsAt > now then
-        waitUntil = Runtime.fieldEndsAt
+        fieldEnds = Runtime.fieldEndsAt
     elseif type(Runtime.fieldCastAt) == "number" and Runtime.fieldCastAt > 0 then
-        waitUntil = Runtime.fieldCastAt + total
-        Runtime.fieldEndsAt = waitUntil
+        fieldEnds = Runtime.fieldCastAt + total
+        Runtime.fieldEndsAt = fieldEnds
+    end
+
+    local stormEnds = nil
+    if type(Runtime.stormEndsAt) == "number" and Runtime.stormEndsAt > now then
+        stormEnds = Runtime.stormEndsAt
+    elseif type(Runtime.stormCastAt) == "number" and Runtime.stormCastAt > 0 then
+        stormEnds = Runtime.stormCastAt + stormDur
+        Runtime.stormEndsAt = stormEnds
+    end
+
+    local waitUntil = nil
+    if fieldEnds and stormEnds then
+        waitUntil = math.max(fieldEnds, stormEnds)
+    else
+        waitUntil = fieldEnds or stormEnds
     end
 
     ClearAbilityIssued(ABILITY.thunder)
@@ -4749,7 +4883,7 @@ function Script.ReArmAfterRefresher(me)
     Runtime.blinkUsed = false
     Runtime.abilityChainStarted = false
     Runtime.refresherUsed = true
-    -- Keep trapCenter / fieldEndsAt for wait; clear aim so 2nd cycle re-solves placement.
+    -- Keep trapCenter / fieldEndsAt / stormEndsAt for wait; clear aim so 2nd cycle re-solves placement.
     if Runtime.fieldPos then
         Runtime.trapCenter = Runtime.fieldPos
     end
@@ -4764,10 +4898,10 @@ function Script.ReArmAfterRefresher(me)
     Runtime.fenceDone = false
     Runtime.rDone = false
     Runtime.stageStartedAt = now
-    Runtime.secondCycleWaitReason = "field"
+    Runtime.secondCycleWaitReason = "field_storm"
 
     if waitUntil and waitUntil > now + 0.05 then
-        -- Open 2nd cycle slightly before the barrier drops so Q→E does not miss the window.
+        -- Open 2nd cycle slightly before the later of Field/Storm ends.
         local lead = DC.FIELD_SECOND_CYCLE_LEAD or 0.45
         Runtime.secondCycleAt = waitUntil - lead
         if Runtime.secondCycleAt < now then
@@ -4775,16 +4909,16 @@ function Script.ReArmAfterRefresher(me)
         end
         Runtime.comboStage = "wait_trap"
         Dbg(
-            "refresher: wait field end then 2nd cycle (in %.2fs, form=%.2f dur=%.2f lead=%.2f)",
+            "refresher: wait field/storm end then 2nd cycle (in %.2fs, field=%.2fs storm=%.2fs lead=%.2f)",
             Runtime.secondCycleAt - now,
-            formation,
-            duration,
+            fieldEnds and (fieldEnds - now) or -1,
+            stormEnds and (stormEnds - now) or -1,
             lead
         )
     else
         Runtime.secondCycleAt = now
         Runtime.comboStage = "idle"
-        Dbg("refresher: second disruptor cycle armed (field already ended)")
+        Dbg("refresher: second disruptor cycle armed (field/storm already ended)")
     end
 end
 
@@ -6396,6 +6530,58 @@ function DC.HasScepter(me)
     return me ~= nil and SafeValue(NPC.HasScepter, me) == true
 end
 
+---True when target can leave / ignore Field+Storm (no Aghs item-mute).
+---@param unit userdata|nil
+---@return boolean
+---@return string|nil reason
+function DC.TargetCanEscapeField(unit)
+    if not unit then
+        return false, nil
+    end
+    for i = 1, #FIELD_ESCAPE_MODS do
+        local mod = FIELD_ESCAPE_MODS[i]
+        if SafeValue(NPC.HasModifier, unit, mod) == true then
+            return true, mod
+        end
+    end
+    -- Ready BKB (will press into Field without Aghs mute).
+    local bkb = SafeValue(NPC.GetItem, unit, "item_black_king_bar", true)
+    if bkb and SafeValue(Ability.IsReady, bkb) == true then
+        local cd = SafeValue(Ability.GetCooldown, bkb) or 0
+        if cd <= 0.05 then
+            return true, "item_black_king_bar"
+        end
+    end
+    for i = 1, #FIELD_ESCAPE_READY_ABILITIES do
+        local name = FIELD_ESCAPE_READY_ABILITIES[i]
+        local ab = SafeValue(NPC.GetAbility, unit, name)
+        if ab and CanCastAbility(ab, unit) then
+            return true, name
+        end
+    end
+    return false, nil
+end
+
+---Without Aghanim: delay Field/Fence/Storm while target can walk out or shrug the ult.
+---@param me userdata
+---@param target userdata|nil
+---@return boolean
+function DC.ShouldDelayFieldStorm(me, target)
+    if DC.HasScepter(me) then
+        return false
+    end
+    local escape, reason = DC.TargetCanEscapeField(target)
+    if escape then
+        local now = SafeValue(GameRules.GetGameTime) or 0
+        if (now - (Runtime.debugWaitHeartbeatAt or -math.huge)) >= DEBUG_WAIT_HEARTBEAT then
+            Runtime.debugWaitHeartbeatAt = now
+            Dbg("delay field/storm: no aghs, escape=%s target=%s", tostring(reason), FmtUnit(target))
+        end
+        return true
+    end
+    return false
+end
+
 ---@param me userdata|nil
 ---@return boolean
 function DC.HasShard(me)
@@ -6743,8 +6929,16 @@ function DC.CollectComboEnemies(me, fieldAbility)
             and SafeValue(NPC.IsVisible, enemy) == true
             and not IsMagicImmune(enemy)
         then
+            -- Without Aghs mute, skip heroes who can walk out of Field / shrug Storm.
+            if not DC.HasScepter(me) then
+                local escape = DC.TargetCanEscapeField(enemy)
+                if escape then
+                    goto continue_enemy
+                end
+            end
             out[#out + 1] = enemy
         end
+        ::continue_enemy::
     end
     return out
 end
@@ -6784,6 +6978,7 @@ function DC.ResetDisruptorComboFlags()
     Runtime.fieldCastAt = -math.huge
     Runtime.fieldEndsAt = -math.huge
     Runtime.stormCastAt = -math.huge
+    Runtime.stormEndsAt = -math.huge
     Runtime.secondCycleAt = -math.huge
     Runtime.secondCycleWaitReason = nil
     Runtime.trapCenter = nil
@@ -6813,6 +7008,27 @@ end
 function DC.GetFieldFormationLead(fieldAbility)
     local formation = DC.GetFieldLifetime(fieldAbility)
     return formation + 0.12
+end
+
+---Static Storm duration (talent-aware via specials).
+---@param storm userdata|nil
+---@return number
+function DC.GetStormDuration(storm)
+    local duration = DC.ReadSpecial(storm, "duration", 5.0)
+    if type(duration) ~= "number" or duration < 1.0 then
+        duration = 5.0
+    end
+    return duration
+end
+
+---Record when Static Storm will fully drop.
+---@param storm userdata|nil
+---@param castAt number
+function DC.MarkStormTrap(storm, castAt)
+    local duration = DC.GetStormDuration(storm)
+    Runtime.stormCastAt = castAt
+    Runtime.stormEndsAt = castAt + duration
+    Dbg("storm ends in %.2fs (dur=%.2f)", duration, duration)
 end
 
 ---Record when the cast Kinetic Field will fully drop (formation + duration).
@@ -7023,6 +7239,17 @@ function DC.UpdateDisruptorAbilities(now, me, target, targetPos)
 
     fieldPos = Runtime.fieldPos or targetPos
 
+    -- Without Aghs mute: wait out BKB / Blade Fury / Repel / ready escapes before Field→Storm.
+    if (not Runtime.eDone or not Runtime.fenceDone or not Runtime.rDone)
+        and DC.ShouldDelayFieldStorm(me, target)
+    then
+        Runtime.stageStartedAt = now
+        if not Script.IsAttackBlocked(target) then
+            AttackEnemy(now, me, target)
+        end
+        return
+    end
+
     if not Runtime.eDone and IsAbilityEnabled(ABILITY.field) then
         if DC.AbilityStepDone(ABILITY.field, e, me) then
             Runtime.eDone = true
@@ -7087,16 +7314,19 @@ function DC.UpdateDisruptorAbilities(now, me, target, targetPos)
         if DC.AbilityStepDone(ABILITY.storm, r, me) then
             Runtime.rDone = true
             if type(Runtime.stormCastAt) ~= "number" or Runtime.stormCastAt <= 0 then
-                Runtime.stormCastAt = now
+                DC.MarkStormTrap(r, now)
             end
         elseif CanUseAbilityOnce(ABILITY.storm, r, me) then
-            -- Wait Kinetic Field formation (barrier up) before Storm; no UI.
-            local formation = select(1, DC.GetFieldLifetime(e))
-            if type(formation) ~= "number" or formation < 0.2 then
-                formation = 1.0
-            end
-            if Runtime.fieldCastAt > 0 and now - Runtime.fieldCastAt < formation then
-                return
+            -- 1st cycle: Storm ASAP (do not wait Field formation — enemies walk out).
+            -- After Refresher: wait Field formation so 2nd Field+Storm chain overlaps cleanly.
+            if Runtime.refresherUsed then
+                local formation = select(1, DC.GetFieldLifetime(e))
+                if type(formation) ~= "number" or formation < 0.2 then
+                    formation = 1.0
+                end
+                if Runtime.fieldCastAt > 0 and now - Runtime.fieldCastAt < formation then
+                    return
+                end
             end
             local rRange = DC.GetAbilityCastRange(me, r, DC.R_RANGE)
             local myPos = SafeValue(Entity.GetAbsOrigin, me)
@@ -7106,7 +7336,7 @@ function DC.UpdateDisruptorAbilities(now, me, target, targetPos)
             end
             if CastPosition(now, me, r, fieldPos, "static_storm") then
                 Runtime.abilityChainStarted = true
-                Runtime.stormCastAt = now
+                DC.MarkStormTrap(r, now)
             end
             return
         else
@@ -7143,7 +7373,11 @@ function DC.UpdateCombo(now, me, target)
         if rem > 0 then
             if (now - (Runtime.debugWaitHeartbeatAt or -math.huge)) >= DEBUG_WAIT_HEARTBEAT then
                 Runtime.debugWaitHeartbeatAt = now
-                Dbg("second cycle wait field rem=%.2f live=%s", rem, tostring(fieldLive))
+                Dbg(
+                    "second cycle wait field/storm rem=%.2f live=%s",
+                    rem,
+                    tostring(fieldLive)
+                )
             end
             if DC.TrySelfSave(now, me) then
                 return
@@ -7518,17 +7752,17 @@ function DC.DrawComboAimRadii()
 
     local fieldA = math.floor((locked and 230 or 160) + 40 * pulse)
     local stormA = math.floor((locked and 200 or 130) + 35 * pulse)
-    -- Storm: dashed violet outside; Field: solid cyan inside.
-    DC.DrawWorldCircle(center, stormR, Color(168, 92, 255, stormA), 2.5, true)
-    DC.DrawWorldCircle(center, fieldR, Color(64, 196, 255, fieldA), locked and 3 or 2.2, false)
+    -- Storm: dashed secondary; Field: solid primary (chat theme).
+    DC.DrawWorldCircle(center, stormR, DC.ThemeSecondary(stormA), 2.5, true)
+    DC.DrawWorldCircle(center, fieldR, DC.ThemePrimary(fieldA), locked and 3 or 2.2, false)
 
     local centerScreen, centerVis = Render.WorldToScreen(center)
     if centerVis and centerScreen then
         local coreA = math.floor(120 + 80 * pulse)
-        SafeValue(Render.FilledCircle, centerScreen, locked and 5 or 4, Color(64, 196, 255, math.floor(coreA * 0.45)))
-        SafeValue(Render.Circle, centerScreen, locked and 7 or 6, Color(220, 245, 255, coreA), 2)
+        SafeValue(Render.FilledCircle, centerScreen, locked and 5 or 4, DC.ThemePrimary(math.floor(coreA * 0.45)))
+        SafeValue(Render.Circle, centerScreen, locked and 7 or 6, DC.ThemePrimaryLite(coreA, 0.55), 2)
         local arm = locked and 11 or 9
-        local tick = Color(220, 245, 255, math.floor(coreA * 0.85))
+        local tick = DC.ThemePrimaryLite(math.floor(coreA * 0.85), 0.55)
         DC.DrawScreenLine(
             Vec2(centerScreen.x - arm, centerScreen.y),
             Vec2(centerScreen.x + arm, centerScreen.y),
@@ -7549,7 +7783,7 @@ function DC.DrawComboAimRadii()
                 local label = string.format("%dx", hits)
                 local labelPos = Vec2(centerScreen.x + 10, centerScreen.y - 16)
                 TryCall(Render.Text, font, 13, label, Vec2(labelPos.x + 1, labelPos.y + 1), Color(0, 0, 0, 180))
-                TryCall(Render.Text, font, 13, label, labelPos, Color(180, 230, 255, 240))
+                TryCall(Render.Text, font, 13, label, labelPos, DC.ThemePrimaryLite(240, 0.35))
             end
         end
     end
@@ -7567,8 +7801,8 @@ function DC.DrawComboAimRadii()
         local half = (DC.DRAW_FENCE_ARC_DEG * math.pi / 180) * 0.5
         local rim = math.max(80, fieldR - DC.FENCE_RIM_MARGIN)
         local arcRuns = DC.CollectWorldRingRuns(center, rim, 28, ang - half, half * 2)
-        local fenceGlow = Color(255, 190, 70, math.floor(70 + 50 * pulse))
-        local fenceCol = Color(255, 210, 90, math.floor(200 + 40 * pulse))
+        local fenceGlow = DC.ThemeSecondary(math.floor(70 + 50 * pulse))
+        local fenceCol = DC.ThemePrimaryLite(math.floor(200 + 40 * pulse), 0.25)
         DC.StrokeRingRuns(arcRuns, fenceGlow, 7)
         DC.StrokeRingRuns(arcRuns, fenceCol, 3.5)
 
@@ -7578,12 +7812,12 @@ function DC.DrawComboAimRadii()
                 DC.DrawScreenLine(
                     centerScreen,
                     fenceScreen,
-                    Color(255, 200, 80, math.floor(90 + 40 * pulse)),
+                    DC.ThemePrimary(math.floor(90 + 40 * pulse)),
                     1.5
                 )
             end
-            SafeValue(Render.FilledCircle, fenceScreen, 5, Color(255, 200, 80, 100))
-            SafeValue(Render.Circle, fenceScreen, 7, Color(255, 220, 120, 230), 2)
+            SafeValue(Render.FilledCircle, fenceScreen, 5, DC.ThemePrimary(100))
+            SafeValue(Render.Circle, fenceScreen, 7, DC.ThemePrimaryLite(230, 0.3), 2)
         end
     end
 end
@@ -7626,7 +7860,7 @@ function DC.UpdateGlimpseHistory(me, now)
 end
 
 function DC.UpdateGlimpseDrawState(me, now)
-    Runtime.glimpseDraw = nil
+    Runtime.glimpseDrawList = nil
     if not UI.DrawGlimpse or not UI.DrawGlimpse:Get() then
         return
     end
@@ -7642,14 +7876,131 @@ function DC.UpdateGlimpseDrawState(me, now)
         return
     end
     local team = SafeValue(Entity.GetTeamNum, me)
-    local enemy = SafeValue(Input.GetNearestHeroToCursor, team, Enum.TeamType.TEAM_ENEMY)
-    if not IsValidEnemyHero(enemy) then
+    local myPos = SafeValue(Entity.GetAbsOrigin, me)
+    if team == nil or not myPos then
         return
     end
-    local returnPos = DC.GetGlimpseReturnPos(enemy, now)
-    local current = SafeValue(Entity.GetAbsOrigin, enemy)
-    if returnPos and current then
-        Runtime.glimpseDraw = { pos = returnPos, current = current }
+    local wRange = DC.GetAbilityCastRange(me, glimpse, DC.W_RANGE)
+    local scan = wRange + 400
+    local heroes = SafeValue(Heroes.InRadius, myPos, scan, team, Enum.TeamType.TEAM_ENEMY, true, true) or {}
+    local list = {}
+    for i = 1, #heroes do
+        local enemy = heroes[i]
+        if IsValidEnemyHero(enemy) then
+            local unitName = SafeValue(NPC.GetUnitName, enemy)
+            local returnPos = DC.GetGlimpseReturnPos(enemy, now)
+            local current = SafeValue(Entity.GetAbsOrigin, enemy)
+            if unitName and returnPos and current then
+                list[#list + 1] = {
+                    pos = returnPos,
+                    current = current,
+                    unitName = unitName,
+                }
+            end
+        end
+    end
+    if #list > 0 then
+        Runtime.glimpseDrawList = list
+    end
+end
+
+---Panorama hero icon path (per-unit, for Glimpse return markers).
+---@param unitName string|nil
+---@return string|nil
+function DC.HeroIconPath(unitName)
+    if not unitName or unitName == "" then
+        return nil
+    end
+    return "panorama/images/heroes/icons/" .. unitName .. "_png.vtex_c"
+end
+
+---Cached Render.LoadImage handle for a hero unit name.
+---@param unitName string|nil
+---@return integer|nil
+function DC.GetHeroIconHandle(unitName)
+    if not unitName or unitName == "" then
+        return nil
+    end
+    Persistent.heroIcons = Persistent.heroIcons or {}
+    local cached = Persistent.heroIcons[unitName]
+    if cached ~= nil then
+        if cached == 0 then
+            return nil
+        end
+        return cached
+    end
+    local path = DC.HeroIconPath(unitName)
+    if not path or not Render or not Render.LoadImage then
+        Persistent.heroIcons[unitName] = 0
+        return nil
+    end
+    local handle = SafeValue(Render.LoadImage, path)
+    if type(handle) == "number" and handle ~= 0 then
+        Persistent.heroIcons[unitName] = handle
+        return handle
+    end
+    Persistent.heroIcons[unitName] = 0
+    return nil
+end
+
+---Draw Glimpse return markers: one hero icon per enemy.
+function DC.DrawGlimpseMarkers()
+    local list = Runtime.glimpseDrawList
+    if not list or #list == 0 then
+        return
+    end
+    if Menu and Menu.VisualsIsEnabled and SafeValue(Menu.VisualsIsEnabled) == false then
+        return
+    end
+    local drawTraj = UI.DrawTrajectory and UI.DrawTrajectory:Get() == true
+    local iconSize = DC.DRAW_GLIMPSE_ICON
+    local half = iconSize * 0.5
+    local tint = Color(255, 255, 255, 235)
+    local ring = DC.ThemePrimary(200)
+    local ringFill = DC.ThemePrimary(55)
+    local lineCol = DC.ThemePrimary(150)
+    local Ind = Script.Indicator
+    local mr, mg, mb = Ind.themePr or 120, Ind.themePg or 200, Ind.themePb or 255
+
+    for i = 1, #list do
+        local entry = list[i]
+        local screen, visible = Render.WorldToScreen(entry.pos)
+        if visible and screen then
+            SafeValue(Render.FilledCircle, screen, half + 3, ringFill)
+            SafeValue(Render.Circle, screen, half + 3, ring, 2)
+            local handle = DC.GetHeroIconHandle(entry.unitName)
+            if handle and Render.ImageCentered then
+                SafeValue(
+                    Render.ImageCentered,
+                    handle,
+                    screen,
+                    Vec2(iconSize, iconSize),
+                    tint,
+                    4
+                )
+            elseif handle and Render.Image then
+                SafeValue(
+                    Render.Image,
+                    handle,
+                    Vec2(screen.x - half, screen.y - half),
+                    Vec2(iconSize, iconSize),
+                    tint,
+                    4
+                )
+            else
+                SafeValue(Render.FilledCircle, screen, DC.DRAW_GLIMPSE_MARKER, ringFill)
+                SafeValue(Render.Circle, screen, DC.DRAW_GLIMPSE_MARKER, ring, 2)
+            end
+            if drawTraj and entry.current then
+                local from, fromVisible = Render.WorldToScreen(entry.current)
+                if fromVisible and from then
+                    SafeValue(Render.Line, from, screen, lineCol, 2)
+                end
+            end
+        end
+        if MiniMap and MiniMap.DrawHeroIcon and entry.unitName and entry.pos then
+            SafeValue(MiniMap.DrawHeroIcon, entry.unitName, entry.pos, mr, mg, mb, 220, 600)
+        end
     end
 end
 
@@ -7896,28 +8247,7 @@ function Script.OnDraw()
     Script.Target.DrawMark()
     Script.Indicator.Draw()
     DC.DrawComboAimRadii()
-
-    local draw = Runtime.glimpseDraw
-    if not draw or not draw.pos then
-        return
-    end
-    if Menu and Menu.VisualsIsEnabled and SafeValue(Menu.VisualsIsEnabled) == false then
-        return
-    end
-    local screen, visible = Render.WorldToScreen(draw.pos)
-    if not visible or not screen then
-        return
-    end
-    local markerColor = Color(120, 200, 255, 220)
-    local fillColor = Color(120, 200, 255, 70)
-    SafeValue(Render.FilledCircle, screen, DC.DRAW_GLIMPSE_MARKER, fillColor)
-    SafeValue(Render.Circle, screen, DC.DRAW_GLIMPSE_MARKER, markerColor, 2)
-    if UI.DrawTrajectory and UI.DrawTrajectory:Get() and draw.current then
-        local from, fromVisible = Render.WorldToScreen(draw.current)
-        if fromVisible and from then
-            SafeValue(Render.Line, from, screen, Color(120, 200, 255, 160), 2)
-        end
-    end
+    DC.DrawGlimpseMarkers()
 end
 
 ---@param data table
