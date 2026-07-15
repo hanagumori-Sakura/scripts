@@ -1,52 +1,68 @@
-local script = {}
-
 --------------------------------------------------------------------------------
 -- Skill LastHit
--- Smart spell last hit for creeps.
--- Automatically finds the best nuke for a secure last hit.
--- author: Euphoria
+-- Hold-key spell last-hit for lane/neutral creeps.
+-- Thin CS engine: live damage (SV + amp + resist) + ability geometry + face-before-cast.
+-- No DPS prediction / AoE greed / charge math — secure kill = HP <= dmg - buffer.
+-- Abilities MultiSelect always mirrors the local hero (no bind required).
+-- Ability on/off prefs persist in Config (SkillLastHit / ability.*).
+-- author: by 花曇り hanagumori
+--------------------------------------------------------------------------------
+
+local Script = {}
+
+--------------------------------------------------------------------------------
+-- STATE
 --------------------------------------------------------------------------------
 
 local UI = {}
 local menuGroup = nil
 local currentHeroName = nil
 local currentHeroAbilitySignature = nil
+local abilitiesUiReady = false
+local abilitiesCallbackBound = false
+-- Explicit user on/off per ability id. nil = never set → default ON.
+-- Survives reload/game via Config; in-memory cache avoids repeated ReadInt.
+local abilitiesPrefs = {}
+local CONFIG_SECTION = "SkillLastHit"
+local ABILITY_PREF_PREFIX = "ability."
+
 local lastCastTime = 0
-local CAST_INTERVAL = 0.25
 local lastCastLockDuration = 0
+local CAST_INTERVAL = 0.20
+
 local lastTargetEntity = nil
 local lastTargetTime = 0
 local lastTargetLockDuration = 0
-local TARGET_COOLDOWN_MIN = 0.15
-local TARGET_COOLDOWN_MAX = 1.25
-local AUTO_ATTACK_RANGE_EPSILON = 50
+
+local AUTO_ATTACK_RANGE_EPSILON = 48
+local SAFETY_BUFFER_FLAT = 10
+local SAFETY_BUFFER_PER_CASTPOINT = 25
+local ABILITY_SLOT_SCAN = 32
+local ORDER_ID = "ability_lasthit"
 local DEBUG_PREFIX = "[SkillLH] "
 local lastDebugTime = 0
 local DEBUG_INTERVAL = 1.0
-local DEBUG_REPEAT_INTERVAL = 8.0
 local lastDebugByKey = {}
 local resolvedAbilityInfoCache = {}
-local ABILITY_BEHAVIOR_CACHE = {}
+
 local CONDITION_ITEMS = {
-    smart = "Не воровать у тычки",
-    predict = "Предикт HP",
-    aoe = "AoE на пачку",
+    smart = "smart",
 }
 local CREEP_FILTER_ITEMS = {
-    melee = "Ближний бой",
-    ranged = "Дальний бой",
-    neutral = "Нейтралы",
-    siege = "Катапульты",
+    melee = "melee",
+    ranged = "ranged",
+    neutral = "neutral",
+    siege = "siege",
 }
 
---- HP-трекер крипов (предсказание урона союзников)
-CONDITION_ITEMS.smart = "smart"
-CONDITION_ITEMS.predict = "predict"
-CONDITION_ITEMS.aoe = "aoe"
-CREEP_FILTER_ITEMS.melee = "melee"
-CREEP_FILTER_ITEMS.ranged = "ranged"
-CREEP_FILTER_ITEMS.neutral = "neutral"
-CREEP_FILTER_ITEMS.siege = "siege"
+local Icons = {
+    enable     = "\u{f00c}", -- check (Switch ctor = no plate)
+    abilities  = "\u{f890}", -- sparkles
+    conditions = "\u{f05b}", -- crosshair
+    creeps     = "\u{f21b}",
+    mana       = "\u{f72e}",
+    debug      = "\u{f188}",
+}
 
 local MENU_LANG = "ru"
 local languageWidget = nil
@@ -54,26 +70,18 @@ local I18N = {
     ru = {
         settings = "Настройки",
         enable = "Включить",
-        enable_tip = "Автодобив спеллами. Работает, пока держишь хоткей.",
-        hotkey = "Хоткей",
-        hotkey_tip = "Зажми кнопку, когда хочешь отдать крипа нюком.",
+        enable_tip = "Автодобив спеллами, пока держишь хоткей Last Hit Helper.",
         conditions = "Условия",
-        conditions_tip = "Что учитывать при выборе каста.",
+        conditions_tip = "Доп. правила выбора каста.",
         creeps = "Крипы",
-        creeps_tip = "Какие типы крипов можно добивать спеллом.",
-        search_range = "Радиус",
-        search_range_tip = "На каком расстоянии искать крипов под spell CS.",
+        creeps_tip = "Какие типы крипов можно добивать.",
         min_mana = "Мана %",
-        min_mana_tip = "Ниже этого процента скрипт перестанет тратить ману на фарм.",
-        buffer = "Запас HP",
-        buffer_tip = "Сколько HP можно накинуть сверху, чтобы нюк не мисснул добив.",
+        min_mana_tip = "Ниже порога скрипт не тратит ману на фарм.",
         debug = "Лог",
-        debug_tip = "Писать в лог расчеты урона, предикт HP и выбранный каст.",
-        spells = "Спеллы",
-        spells_tip = "Какие нюки можно тратить на добив. Список обновляется под текущего героя.",
+        debug_tip = "Писать расчёты и выбранный каст в лог.",
+        abilities = "Abilities",
+        abilities_tip = "Нюки текущего героя. Список всегда актуален.",
         cond_smart = "Не воровать у тычки",
-        cond_predict = "Предикт HP",
-        cond_aoe = "AoE на пачку",
         creep_melee = "Ближний бой",
         creep_ranged = "Дальний бой",
         creep_neutral = "Нейтралы",
@@ -82,26 +90,18 @@ local I18N = {
     en = {
         settings = "Settings",
         enable = "Enable",
-        enable_tip = "Automatic spell last hit while the hotkey is held.",
-        hotkey = "Hotkey",
-        hotkey_tip = "Hold the key when you want to secure a creep with a spell.",
+        enable_tip = "Spell last-hit while the Last Hit Helper hotkey is held.",
         conditions = "Conditions",
-        conditions_tip = "What to consider before casting.",
+        conditions_tip = "Extra cast rules.",
         creeps = "Creeps",
-        creeps_tip = "Which creep types can be secured with spells.",
-        search_range = "Range",
-        search_range_tip = "How far to search for creeps for spell CS.",
+        creeps_tip = "Which creep types can be secured.",
         min_mana = "Mana %",
         min_mana_tip = "Stop spending mana for farm below this threshold.",
-        buffer = "HP Buffer",
-        buffer_tip = "Extra HP margin so the nuke does not miss the last hit.",
         debug = "Log",
-        debug_tip = "Write damage checks, HP prediction and chosen casts to the log.",
-        spells = "Spells",
-        spells_tip = "Which nukes can be used for last hits. Updates for the current hero.",
+        debug_tip = "Write damage checks and chosen casts to the log.",
+        abilities = "Abilities",
+        abilities_tip = "Current hero nukes. Always kept in sync.",
         cond_smart = "Respect attack",
-        cond_predict = "HP prediction",
-        cond_aoe = "AOE greed",
         creep_melee = "Melee",
         creep_ranged = "Ranged",
         creep_neutral = "Neutrals",
@@ -110,26 +110,18 @@ local I18N = {
     cn = {
         settings = "设置",
         enable = "启用",
-        enable_tip = "按住热键时自动用技能补刀。",
-        hotkey = "热键",
-        hotkey_tip = "想用技能收兵时按住这个键。",
+        enable_tip = "按住 Last Hit Helper 热键时自动用技能补刀。",
         conditions = "条件",
-        conditions_tip = "选择施法前要检查的条件。",
+        conditions_tip = "施法额外规则。",
         creeps = "小兵",
-        creeps_tip = "选择允许用技能补刀的小兵类型。",
-        search_range = "范围",
-        search_range_tip = "技能补刀时搜索小兵的距离。",
+        creeps_tip = "允许补刀的小兵类型。",
         min_mana = "法力%",
-        min_mana_tip = "低于这个法力百分比后不再用技能刷兵。",
-        buffer = "血量余量",
-        buffer_tip = "给补刀多留一点血量余量，避免伤害差一点。",
+        min_mana_tip = "低于此法力百分比后不再用技能刷兵。",
         debug = "日志",
-        debug_tip = "在日志里输出伤害判断、血量预测和施法结果。",
-        spells = "技能",
-        spells_tip = "当前英雄可用于补刀的技能列表。",
+        debug_tip = "输出伤害判断与施法结果。",
+        abilities = "Abilities",
+        abilities_tip = "当前英雄技能列表，始终同步。",
         cond_smart = "不抢普攻",
-        cond_predict = "血量预测",
-        cond_aoe = "优先AOE",
         creep_melee = "近战",
         creep_ranged = "远程",
         creep_neutral = "野怪",
@@ -137,17 +129,362 @@ local I18N = {
     },
 }
 
-local creepHPTracker = {}  -- [entityIndex] = { hp=N, time=T, dps=N, samples=N }
-local TRACKER_CLEANUP_INTERVAL = 5.0
-local lastTrackerCleanup = 0
-local HP_PREDICT_MIN_SAMPLE_DT = 0.08
-local HP_PREDICT_WINDOW_GRACE = 0.07
-local HP_PREDICT_CONFIDENCE_BASE = 0.58
-local HP_PREDICT_CONFIDENCE_STEP = 0.07
-local HP_PREDICT_CONFIDENCE_MAX = 0.82
-local HP_PREDICT_BASE_RESERVE = 8
-local HP_PREDICT_SAMPLE_RESERVE = 4
-local HP_PREDICT_RESERVE_MAX = 28
+--------------------------------------------------------------------------------
+-- PROFILES (generated)
+--------------------------------------------------------------------------------
+
+-- <<LASTHIT_PROFILES_BEGIN>>
+-- Auto-generated by gen_lasthit_profiles.py — do not hand-edit.
+-- Regenerate:
+-- python .cursor/skills/umbrella-script-authoring/scripts/gen_lasthit_profiles.py
+local LASTHIT_PROFILES = {
+    ["abaddon_death_coil"] = { beh = "target", dmgKey = "target_damage", castRange = 625, projSpeed = 1300, selfDamageKeys = { "self_damage_enemy_target", "self_damage" }, selfHpBuffer = 40 },
+    ["abyssal_underlord_firestorm"] = { beh = "point", dmgKey = "wave_damage", radiusKey = "radius", castRange = 675 },
+    ["abyssal_underlord_pit_of_malice"] = { beh = "point", dmgKey = "pit_damage", radiusKey = "radius", castRange = 675 },
+    ["alchemist_acid_spray"] = { beh = "point", dmgKey = "damage", dmgTypeOverride = "physical", radiusKey = "radius", castRange = 900 },
+    ["alchemist_unstable_concoction"] = { beh = "no_target", dmgKey = "max_damage", dmgTypeOverride = "physical", radiusKey = "radius", castRange = 775 },
+    ["alchemist_unstable_concoction_throw"] = { beh = "target", dmgKey = "max_damage", radiusKey = "midair_explosion_radius", castRange = 775 },
+    ["ancient_apparition_chilling_touch"] = { beh = "target", dmgKey = "damage" },
+    ["ancient_apparition_cold_feet"] = { beh = "target", dmgKey = "damage_per_second", castRange = 700 },
+    ["ancient_apparition_ice_age"] = { beh = "point", dmgKey = "damage", radiusKey = "radius", castRange = 800 },
+    ["ancient_apparition_ice_vortex"] = { beh = "point", dmgKey = "damage_per_second", radiusKey = "radius", castRange = 1200 },
+    ["antimage_counterspell"] = { beh = "no_target", dmgKey = "incoming_damage" },
+    ["antimage_mana_overload"] = { beh = "point", dmgKey = "incoming_damage" },
+    ["arc_warden_flux"] = { beh = "target", dmgKey = "damage_per_second", radiusKey = "search_radius" },
+    ["arc_warden_spark_wraith"] = { beh = "point", dmgKey = "spark_damage_base", radiusKey = "radius", castRange = 2000 },
+    ["axe_battle_hunger"] = { beh = "target", dmgKey = "damage_per_second", dmgTypeOverride = "pure", castRange = 700 },
+    ["bane_brain_sap"] = { beh = "target", dmgKey = "brain_sap_damage", dmgTypeOverride = "pure" },
+    ["bane_enfeeble"] = { beh = "target", dmgKey = "enfeeble_tick_damage", dmgTypeOverride = "pure", castRange = 700 },
+    ["batrider_firefly"] = { beh = "no_target", dmgKey = "damage_per_second", radiusKey = "radius" },
+    ["batrider_flamebreak"] = { beh = "point", dmgKey = "damage_impact", radiusKey = "explosion_radius", castRange = 1300 },
+    ["batrider_sticky_napalm"] = { beh = "point", dmgKey = "damage", radiusKey = "radius" },
+    ["beastmaster_summon_raptor"] = { beh = "no_target", dmgKey = "dive_damage", radiusKey = "attack_radius" },
+    ["beastmaster_summon_raptor_attack"] = { beh = "target", dmgKey = "burn_damage", radiusKey = "impact_radius", castRange = 1200 },
+    ["beastmaster_summon_razorback"] = { beh = "no_target", dmgKey = "boar_base_damage", dmgTypeOverride = "physical" },
+    ["beastmaster_wild_axes"] = { beh = "point", dmgKey = "axe_damage", radiusKey = "radius", castRange = 1500 },
+    ["black_dragon_fireball"] = { beh = "point", dmgKey = "damage", radiusKey = "radius", castRange = 1000 },
+    ["bloodseeker_blood_bath"] = { beh = "point", dmgKey = "damage", dmgTypeOverride = "pure", radiusKey = "radius", castRange = 1500 },
+    ["bloodseeker_bloodrage"] = { beh = "no_target", dmgKey = "damage_pct", dmgTypeOverride = "pure" },
+    ["bounty_hunter_jinada"] = { beh = "target", dmgKey = "bonus_damage", dmgTypeOverride = "physical", castRange = 150 },
+    ["bounty_hunter_shuriken_toss"] = { beh = "target", dmgKey = "bonus_damage", radiusKey = "bounce_aoe", projSpeed = 1000 },
+    ["brewmaster_cinder_brew"] = { beh = "point", dmgKey = "total_ignite_damage" },
+    ["brewmaster_earth_hurl_boulder"] = { beh = "target", dmgKey = "damage", castRange = 800 },
+    ["brewmaster_primal_companion"] = { beh = "no_target", dmgKey = "cooldown_on_take_damage" },
+    ["brewmaster_storm_cyclone"] = { beh = "target", dmgKey = "landing_damage", castRange = 600 },
+    ["brewmaster_storm_dispel_magic"] = { beh = "point", dmgKey = "damage", radiusKey = "radius", castRange = 500 },
+    ["brewmaster_storm_wind_walk"] = { beh = "no_target", dmgKey = "bonus_damage" },
+    ["brewmaster_thunder_clap"] = { beh = "no_target", dmgKey = "damage", radiusKey = "radius" },
+    ["bristleback_quill_spray"] = { beh = "no_target", dmgKey = "quill_base_damage", dmgTypeOverride = "physical", radius = 700, radiusKey = "radius", needFace = true },
+    ["broodmother_insatiable_hunger"] = { beh = "no_target", dmgKey = "bonus_damage", dmgTypeOverride = "physical", radiusKey = "aura_radius" },
+    ["broodmother_silken_bola"] = { beh = "target", dmgKey = "impact_damage", castRange = 750 },
+    ["centaur_double_edge"] = { beh = "target", dmgKey = "edge_damage", radiusKey = "radius", castRange = 175 },
+    ["centaur_hoof_stomp"] = { beh = "no_target", dmgKey = "stomp_damage", radiusKey = "radius" },
+    ["chaos_knight_chaos_bolt"] = { beh = "target", dmgKey = "damage_min", projSpeed = 700 },
+    ["chen_holy_persuasion"] = { beh = "target", dmgKey = "damage_bonus", castRange = 600 },
+    ["chen_penitence"] = { beh = "target", dmgKey = "damage", dmgTypeOverride = "pure", castRange = 800 },
+    ["chen_test_of_faith"] = { beh = "target", dmgKey = "damage_min", dmgTypeOverride = "pure", castRange = 600 },
+    ["clinkz_searing_arrows"] = { beh = "target", dmgKey = "damage_bonus", dmgTypeOverride = "physical" },
+    ["clinkz_tar_bomb"] = { beh = "target", dmgKey = "impact_damage", dmgTypeOverride = "magical", radius = 325, radiusKey = "radius", castRange = 1000, projSpeed = 2000 },
+    ["crystal_maiden_crystal_nova"] = { beh = "point", dmgKey = "nova_damage", radius = 425, radiusKey = "radius" },
+    ["crystal_maiden_frostbite"] = { beh = "target", dmgKey = "damage_per_second" },
+    ["dark_seer_ion_shell"] = { beh = "target", dmgKey = "damage_per_second", radiusKey = "radius", castRange = 800 },
+    ["dark_seer_vacuum"] = { beh = "point", dmgKey = "damage", radius = 400, radiusKey = "radius", castRange = 450 },
+    ["dark_troll_warlord_raise_dead"] = { beh = "no_target", dmgKey = "skeletons_damage" },
+    ["dark_willow_bramble_maze"] = { beh = "point", dmgKey = "damage_per_tick", castRange = 1000 },
+    ["dark_willow_shadow_realm"] = { beh = "no_target", dmgKey = "damage" },
+    ["dawnbreaker_celestial_hammer"] = { beh = "point", dmgKey = "burn_damage", radiusKey = "projectile_radius" },
+    ["dawnbreaker_fire_wreath"] = { beh = "no_target", dmgKey = "swipe_damage", dmgTypeOverride = "physical", radius = 300, radiusKey = "swipe_radius", needFace = true },
+    ["dazzle_poison_touch"] = { beh = "target", dmgKey = "damage", dmgTypeOverride = "physical", radiusKey = "start_radius", castRange = 500 },
+    ["dazzle_rain_of_vermin"] = { beh = "point", dmgKey = "damage", dmgTypeOverride = "physical", radiusKey = "radius", castRange = 800 },
+    ["death_prophet_carrion_swarm"] = { beh = "point", dmgKey = "damage", radiusKey = "start_radius", castRange = 900, lineProjectile = true, lineRadius = 300 },
+    ["death_prophet_spirit_siphon"] = { beh = "target", dmgKey = "damage", castRange = 500 },
+    ["disruptor_glimpse"] = { beh = "target", dmgKey = "min_damage", castRange = 600 },
+    ["disruptor_thunder_strike"] = { beh = "target", dmgKey = "strike_damage", radiusKey = "radius" },
+    ["doom_bringer_infernal_blade"] = { beh = "target", dmgKey = "burn_damage", castRange = 200 },
+    ["doom_bringer_scorched_earth"] = { beh = "no_target", dmgKey = "damage_per_second", radiusKey = "radius", castRange = 666 },
+    ["dragon_knight_breathe_fire"] = { beh = "point", dmgKey = "damage", radiusKey = "start_radius", lineProjectile = true, lineRadius = 200, projSpeed = 1050 },
+    ["dragon_knight_dragon_tail"] = { beh = "target", dmgKey = "damage", radiusKey = "aoe", castRange = 150 },
+    ["dragon_knight_fireball"] = { beh = "point", dmgKey = "damage", radiusKey = "radius", castRange = 600 },
+    ["drow_ranger_frost_arrows"] = { beh = "target", dmgKey = "damage", dmgTypeOverride = "physical", castRange = 625 },
+    ["drow_ranger_glacier"] = { beh = "no_target", dmgKey = "damage_bonus", radiusKey = "ramp_radius", castRange = 400 },
+    ["earth_spirit_boulder_smash"] = { beh = "point", dmgKey = "rock_damage", radiusKey = "radius", castRange = 150 },
+    ["earth_spirit_geomagnetic_grip"] = { beh = "point", dmgKey = "rock_damage", radiusKey = "radius", castRange = 1000 },
+    ["earth_spirit_petrify"] = { beh = "target", dmgKey = "damage", radiusKey = "aoe", castRange = 175 },
+    ["earth_spirit_rolling_boulder"] = { beh = "point", dmgKey = "damage", radiusKey = "radius", castRange = 3000 },
+    ["earth_spirit_stone_caller"] = { beh = "point", dmgKey = "attack_damage_per_stone", castRange = 1100 },
+    ["earthshaker_enchant_totem"] = { beh = "no_target", dmgKey = "totem_damage_percentage" },
+    ["earthshaker_fissure"] = { beh = "point", dmgKey = "fissure_damage", radiusKey = "fissure_radius", lineProjectile = true, lineRadius = 150 },
+    ["elder_titan_ancestral_spirit"] = { beh = "point", dmgKey = "pass_damage", radiusKey = "radius" },
+    ["ember_spirit_activate_fire_remnant"] = { beh = "point", dmgKey = "damage", radiusKey = "radius", castRange = 99999 },
+    ["ember_spirit_flame_guard"] = { beh = "no_target", dmgKey = "damage_per_second", radiusKey = "radius", castRange = 400 },
+    ["ember_spirit_searing_chains"] = { beh = "no_target", dmgKey = "damage_per_second", radiusKey = "radius", castRange = 400 },
+    ["ember_spirit_sleight_of_fist"] = { beh = "point", dmgKey = "bonus_hero_damage", dmgTypeOverride = "physical", radius = 250, radiusKey = "radius", castRange = 650 },
+    ["enchantress_enchant"] = { beh = "target", dmgKey = "enchant_damage", castRange = 500 },
+    ["enchantress_impetus"] = { beh = "target", dmgKey = "distance_damage_pct", dmgTypeOverride = "pure", castRange = 575 },
+    ["enigma_demonic_conversion"] = { beh = "point", dmgKey = "eidelon_base_damage", dmgTypeOverride = "physical", castRange = 400 },
+    ["enigma_malefice"] = { beh = "target", dmgKey = "damage", castRange = 450 },
+    ["enigma_midnight_pulse"] = { beh = "point", dmgKey = "base_damage", radiusKey = "radius", castRange = 700 },
+    ["frogmen_arm_of_the_deep"] = { beh = "point", dmgKey = "damage", castRange = 275 },
+    ["frogmen_congregation_of_the_deep"] = { beh = "no_target", dmgKey = "damage" },
+    ["frogmen_tendrils_of_the_deep"] = { beh = "point", dmgKey = "damage", castRange = 300 },
+    ["furion_curse_of_the_forest"] = { beh = "no_target", dmgKey = "damage_per_tree", radiusKey = "radius" },
+    ["furion_force_of_nature"] = { beh = "point", dmgKey = "treant_damage", radiusKey = "area_of_effect", castRange = 750 },
+    ["furion_hedgerow"] = { beh = "point", dmgKey = "damage_per_tick" },
+    ["furion_sprout"] = { beh = "point", dmgKey = "sprout_damage", radiusKey = "sprout_damage_radius", castRange = 625 },
+    ["furion_summon_fey"] = { beh = "target", dmgKey = "attack_damage", radiusKey = "attack_radius", castRange = 600 },
+    ["giant_wolf_intimidate"] = { beh = "no_target", dmgKey = "damage_reduction", radiusKey = "radius" },
+    ["greevil_blade_fury"] = { beh = "no_target", dmgKey = "customval_damage", radiusKey = "blade_fury_radius" },
+    ["greevil_cold_snap"] = { beh = "target", dmgKey = "customval_damage", castRange = 1000 },
+    ["greevil_diabolic_edict"] = { beh = "no_target", dmgKey = "customval_damage", dmgTypeOverride = "physical", radiusKey = "radius" },
+    ["greevil_hook"] = { beh = "point", dmgKey = "customval_damage", dmgTypeOverride = "pure", radiusKey = "vision_radius", castRange = 700 },
+    ["greevil_ice_wall"] = { beh = "no_target", dmgKey = "customval_damage_per_second", radiusKey = "wall_element_radius" },
+    ["greevil_leech_seed"] = { beh = "target", dmgKey = "customval_leech_damage", radiusKey = "radius", castRange = 350 },
+    ["greevil_magic_missile"] = { beh = "target", dmgKey = "customval_damage", castRange = 500 },
+    ["greevil_maledict"] = { beh = "point", dmgKey = "customval_bonus_damage", radiusKey = "radius", castRange = 400 },
+    ["greevil_miniboss_blue_cold_feet"] = { beh = "target", dmgKey = "damage", castRange = 700 },
+    ["greevil_miniboss_purple_plague_ward"] = { beh = "point", dmgKey = "ward_damage_tooltip", dmgTypeOverride = "physical", castRange = 450 },
+    ["greevil_miniboss_purple_venomous_gale"] = { beh = "point", dmgKey = "tick_damage", radiusKey = "radius", castRange = 600 },
+    ["greevil_miniboss_yellow_ion_shell"] = { beh = "target", dmgKey = "damage_per_second", radiusKey = "radius", castRange = 600 },
+    ["greevil_shadow_strike"] = { beh = "target", dmgKey = "customval_strike_damage", castRange = 400 },
+    ["grimstroke_dark_artistry"] = { beh = "point", dmgKey = "damage", radiusKey = "start_radius", lineProjectile = true, lineRadius = 200 },
+    ["grimstroke_dark_portrait"] = { beh = "target", dmgKey = "images_do_damage_percent", castRange = 1200 },
+    ["grimstroke_ink_creature"] = { beh = "target", dmgKey = "pop_damage", radiusKey = "infection_search_radius", castRange = 900 },
+    ["grimstroke_ink_over"] = { beh = "target", dmgKey = "total_damage", castRange = 950 },
+    ["gyrocopter_homing_missile"] = { beh = "target", dmgKey = "hit_damage", castRange = 1050 },
+    ["gyrocopter_rocket_barrage"] = { beh = "no_target", dmgKey = "rocket_damage", radiusKey = "radius" },
+    ["harpy_storm_chain_lightning"] = { beh = "target", dmgKey = "initial_damage", castRange = 900 },
+    ["hoodwink_acorn_shot"] = { beh = "point", dmgKey = "acorn_shot_damage", dmgTypeOverride = "physical", castRange = 675, projSpeed = 2200, attackPctKey = "base_damage_pct", noSpellAmp = true },
+    ["hoodwink_bushwhack"] = { beh = "point", dmgKey = "total_damage", radiusKey = "trap_radius", castRange = 1100 },
+    ["huskar_burning_spear"] = { beh = "target", dmgKey = "burn_damage", castRange = 450 },
+    ["huskar_inner_fire"] = { beh = "no_target", dmgKey = "damage", radiusKey = "radius", castRange = 500 },
+    ["ice_shaman_incendiary_bomb"] = { beh = "target", dmgKey = "burn_damage", castRange = 700 },
+    ["invoker_chaos_meteor"] = { beh = "target", dmgKey = "main_damage", radius = 275, delayedAoE = true },
+    ["invoker_chaos_meteor_ad"] = { beh = "point", dmgKey = "main_damage", radiusKey = "area_of_effect", castRange = 700 },
+    ["invoker_cold_snap"] = { beh = "target", dmgKey = "damage" },
+    ["invoker_cold_snap_ad"] = { beh = "target", dmgKey = "freeze_damage", castRange = 1000 },
+    ["invoker_deafening_blast"] = { beh = "target", dmgKey = "damage", radius = 175, lineProjectile = true, lineRadius = 175 },
+    ["invoker_deafening_blast_ad"] = { beh = "point", dmgKey = "damage", radiusKey = "radius_start", castRange = 1000 },
+    ["invoker_emp_ad"] = { beh = "point", dmgKey = "damage_per_mana_pct", radiusKey = "area_of_effect", castRange = 950 },
+    ["invoker_exort"] = { beh = "no_target", dmgKey = "bonus_damage_per_instance" },
+    ["invoker_forge_spirit_ad"] = { beh = "no_target", dmgKey = "spirit_damage" },
+    ["invoker_ice_wall_ad"] = { beh = "no_target", dmgKey = "damage_per_second" },
+    ["invoker_sun_strike"] = { beh = "target", dmgKey = "damage", dmgTypeOverride = "pure", radius = 175, delayedAoE = true },
+    ["invoker_sun_strike_ad"] = { beh = "point", dmgKey = "damage", dmgTypeOverride = "pure", radiusKey = "area_of_effect" },
+    ["invoker_tornado"] = { beh = "target", dmgKey = "base_damage", radius = 200, lineProjectile = true, lineRadius = 200 },
+    ["invoker_tornado_ad"] = { beh = "point", dmgKey = "base_damage", radiusKey = "area_of_effect", castRange = 2000 },
+    ["jakiro_dual_breath"] = { beh = "point", dmgKey = "burn_damage", radiusKey = "start_radius", lineProjectile = true, lineRadius = 250 },
+    ["jakiro_ice_path"] = { beh = "point", dmgKey = "damage", radiusKey = "path_radius", castRange = 1100 },
+    ["jakiro_liquid_fire"] = { beh = "target", dmgKey = "damage", radiusKey = "radius", castRange = 600 },
+    ["jakiro_liquid_ice"] = { beh = "target", dmgKey = "damage", castRange = 600 },
+    ["juggernaut_blade_fury"] = { beh = "no_target", dmgKey = "blade_fury_damage", radiusKey = "blade_fury_radius" },
+    ["juggernaut_trinity"] = { beh = "no_target", dmgKey = "damage_pct", dmgTypeOverride = "physical", radiusKey = "jump_attack_radius", castRange = 475 },
+    ["keeper_of_the_light_blinding_light"] = { beh = "point", dmgKey = "damage", radiusKey = "radius", castRange = 500 },
+    ["keeper_of_the_light_will_o_wisp"] = { beh = "point", dmgKey = "wisp_damage", radiusKey = "radius", castRange = 800 },
+    ["kez_echo_slash"] = { beh = "no_target", dmgKey = "katana_echo_damage", dmgTypeOverride = "physical", radiusKey = "katana_radius", slashLength = 800, slashLengthKey = "katana_distance", needFace = true, lineRadius = 200, noSpellAmp = true },
+    ["kez_falcon_rush"] = { beh = "no_target", dmgKey = "base_echo_damage" },
+    ["kez_kazurai_katana"] = { beh = "target", dmgKey = "katana_bleed_attack_damage_pct", dmgTypeOverride = "physical", castRange = 200 },
+    ["kez_switch_weapons"] = { beh = "no_target", dmgKey = "katana_swap_bonus_damage" },
+    ["kez_talon_toss"] = { beh = "target", dmgKey = "damage", dmgTypeOverride = "physical", castRange = 650 },
+    ["kunkka_tidal_wave"] = { beh = "point", dmgKey = "damage", radiusKey = "radius", castRange = 1050 },
+    ["kunkka_tidebringer"] = { beh = "target", dmgKey = "cleave_damage", dmgTypeOverride = "physical", castRange = 150 },
+    ["kunkka_torrent"] = { beh = "point", dmgKey = "torrent_damage", radius = 250, radiusKey = "radius", castRange = 1300, delayedAoE = true, impactDelayKey = "delay" },
+    ["largo_catchy_lick"] = { beh = "target", dmgKey = "damage" },
+    ["largo_frogstomp"] = { beh = "point", dmgKey = "damage_per_stomp", radiusKey = "radius" },
+    ["legion_commander_overwhelming_odds"] = { beh = "no_target", dmgKey = "damage", radius = 330, radiusKey = "radius" },
+    ["leshrac_diabolic_edict"] = { beh = "no_target", dmgKey = "damage", dmgTypeOverride = "pure", radiusKey = "radius" },
+    ["leshrac_lightning_storm"] = { beh = "target", dmgKey = "damage", radiusKey = "radius", castRange = 600 },
+    ["leshrac_split_earth"] = { beh = "point", radiusKey = "radius", castRange = 650, delayedAoE = true, impactDelayKey = "delay" },
+    ["lich_frost_nova"] = { beh = "target", dmgKey = "blast_damage", radiusKey = "radius", castRange = 575 },
+    ["lina_dragon_slave"] = { beh = "point", dmgKey = "dragon_slave_damage", castRange = 1075, lineProjectile = true, lineRadius = 275 },
+    ["lina_light_strike_array"] = { beh = "point", dmgKey = "light_strike_array_damage", radiusKey = "light_strike_array_aoe", castRange = 700, delayedAoE = true, impactDelayKey = "light_strike_array_delay_time" },
+    ["lion_impale"] = { beh = "point", dmgKey = "damage", radiusKey = "width", lineProjectile = true, lineRadius = 150 },
+    ["lone_druid_entangle"] = { beh = "point", dmgKey = "damage", radiusKey = "active_radius", castRange = 700 },
+    ["lone_druid_spirit_bear"] = { beh = "no_target", dmgKey = "backlash_damage" },
+    ["lone_druid_spirit_bear_fetch"] = { beh = "target", dmgKey = "damage", castRange = 200 },
+    ["luna_lucent_beam"] = { beh = "target", dmgKey = "beam_damage", castRange = 800 },
+    ["luna_lunar_orbit"] = { beh = "no_target", dmgKey = "rotating_glaives_collision_damage", dmgTypeOverride = "physical", radiusKey = "rotating_glaives_movement_radius" },
+    ["lycan_howl"] = { beh = "no_target", dmgKey = "attack_damage_reduction", radiusKey = "radius" },
+    ["lycan_summon_wolves"] = { beh = "no_target", dmgKey = "wolf_damage" },
+    ["lycan_summon_wolves_hamstring"] = { beh = "target", dmgKey = "damage_boost", dmgTypeOverride = "physical", castRange = 150 },
+    ["magnataur_horn_toss"] = { beh = "no_target", dmgKey = "damage", radiusKey = "radius" },
+    ["magnataur_shockwave"] = { beh = "point", dmgKey = "shock_damage", lineProjectile = true, lineRadius = 200, projSpeed = 1200 },
+    ["magnataur_skewer"] = { beh = "point", dmgKey = "skewer_damage", radiusKey = "skewer_radius" },
+    ["marci_grapple"] = { beh = "target", dmgKey = "impact_damage", radiusKey = "landing_radius", castRange = 175 },
+    ["mars_bulwark"] = { beh = "point", dmgKey = "physical_damage_reduction" },
+    ["mars_gods_rebuke"] = { beh = "no_target", dmgKey = "bonus_damage_vs_heroes", dmgTypeOverride = "physical", radius = 500, radiusKey = "radius", needFace = true, critPctKey = "crit_mult", noSpellAmp = true },
+    ["mars_spear"] = { beh = "point", dmgKey = "damage", lineProjectile = true, lineRadius = 125, projSpeed = 1400 },
+    ["medusa_gorgon_grasp"] = { beh = "point", dmgKey = "damage", dmgTypeOverride = "physical", radiusKey = "radius", castRange = 625 },
+    ["medusa_mystic_snake"] = { beh = "target", dmgKey = "snake_damage", radiusKey = "radius" },
+    ["meepo_megameepo"] = { beh = "no_target", dmgKey = "poof_damage_factor", radiusKey = "radius" },
+    ["meepo_poof"] = { beh = "point", dmgKey = "poof_damage", radiusKey = "radius" },
+    ["mirana_arrow"] = { beh = "point", dmgKey = "arrow_bonus_damage", castRange = 3000 },
+    ["mirana_starfall"] = { beh = "no_target", dmgKey = "damage", radius = 650, radiusKey = "starfall_radius", needFace = true },
+    ["monkey_king_boundless_strike"] = { beh = "point", dmgTypeOverride = "physical", radiusKey = "strike_radius", lineProjectile = true, lineRadius = 150, lineLength = 1100, critPctKey = "strike_crit_mult", flatDamageKey = "strike_flat_damage", noSpellAmp = true },
+    ["monkey_king_tree_dance"] = { beh = "target", dmgKey = "jump_damage_cooldown", castRange = 900 },
+    ["morphling_adaptive_strike_agi"] = { beh = "target", dmgKey = "damage_min", dmgTypeOverride = "physical", castRange = 600, projSpeed = 1150 },
+    ["mud_golem_hurl_boulder"] = { beh = "target", dmgKey = "damage", castRange = 800 },
+    ["muerta_spectral_slug"] = { beh = "target", dmgKey = "damage", castRange = 500 },
+    ["muerta_the_calling"] = { beh = "point", dmgKey = "damage", radiusKey = "hit_radius", castRange = 600 },
+    ["naga_siren_deluge"] = { beh = "no_target", dmgKey = "damage", radiusKey = "radius" },
+    ["naga_siren_mirror_image"] = { beh = "no_target", dmgKey = "incoming_damage" },
+    ["necrolyte_death_pulse"] = { beh = "no_target", radius = 500, radiusKey = "area_of_effect", needFace = true },
+    ["necronomicon_archer_mana_burn"] = { beh = "target", dmgKey = "burn_as_damage_tooltip", castRange = 600 },
+    ["nevermore_shadowraze1"] = { beh = "no_target", dmgKey = "shadowraze_damage", radiusKey = "shadowraze_radius", fixedRangeKey = "shadowraze_range", needFace = true },
+    ["nevermore_shadowraze2"] = { beh = "no_target", dmgKey = "shadowraze_damage", radiusKey = "shadowraze_radius", fixedRangeKey = "shadowraze_range", needFace = true },
+    ["nevermore_shadowraze3"] = { beh = "no_target", dmgKey = "shadowraze_damage", radiusKey = "shadowraze_radius", fixedRangeKey = "shadowraze_range", needFace = true },
+    ["night_stalker_void"] = { beh = "target", dmgKey = "damage", castRange = 525 },
+    ["nyx_assassin_burrow"] = { beh = "no_target", dmgKey = "damage_reduction", radiusKey = "carapace_radius" },
+    ["nyx_assassin_impale"] = { beh = "point", dmgKey = "impale_damage", radiusKey = "width", castRange = 750, lineProjectile = true, lineRadius = 200 },
+    ["nyx_assassin_jolt"] = { beh = "target", dmgKey = "damage_echo_pct", castRange = 800 },
+    ["nyx_assassin_spiked_carapace"] = { beh = "no_target", dmgKey = "damage_reflect_pct" },
+    ["obsidian_destroyer_arcane_orb"] = { beh = "target", dmgKey = "mana_pool_damage_pct", dmgTypeOverride = "pure", castRange = 450 },
+    ["obsidian_destroyer_astral_imprisonment"] = { beh = "target", dmgKey = "damage" },
+    ["ogre_bruiser_ogre_smash"] = { beh = "point", dmgKey = "damage", radiusKey = "radius" },
+    ["ogre_magi_fireblast"] = { beh = "target", dmgKey = "fireblast_damage", castRange = 525 },
+    ["ogre_magi_ignite"] = { beh = "target", dmgKey = "burn_damage", radiusKey = "ignite_multicast_aoe", castRange = 700 },
+    ["ogre_magi_unrefined_fireblast"] = { beh = "target", dmgKey = "base_damage", castRange = 525 },
+    ["omniknight_hammer_of_purity"] = { beh = "target", dmgKey = "base_damage", dmgTypeOverride = "pure", castRange = 150 },
+    ["oracle_fates_edict"] = { beh = "target", dmgKey = "magic_damage_resistance_pct_tooltip", castRange = 700 },
+    ["oracle_purifying_flames"] = { beh = "target", dmgKey = "damage", castRange = 850 },
+    ["oracle_rain_of_destiny"] = { beh = "point", dmgKey = "damage", radiusKey = "radius", castRange = 650 },
+    ["pangolier_shield_crash"] = { beh = "no_target", dmgKey = "damage", dmgTypeOverride = "physical", radiusKey = "radius" },
+    ["pangolier_swashbuckle"] = { beh = "target", dmgTypeOverride = "physical", radius = 200 },
+    ["phantom_assassin_fan_of_knives"] = { beh = "no_target", dmgKey = "pct_health_damage", dmgTypeOverride = "physical", radiusKey = "radius" },
+    ["phantom_assassin_stifling_dagger"] = { beh = "target", dmgTypeOverride = "physical", castRange = 700, projSpeed = 1200, attackPctKey = "attack_factor_tooltip", flatDamageKey = "base_damage", noSpellAmp = true },
+    ["phantom_lancer_spirit_lance"] = { beh = "target", dmgKey = "lance_damage", castRange = 600 },
+    ["phoenix_fire_spirits"] = { beh = "no_target", dmgKey = "damage_per_second", radiusKey = "radius", castRange = 1400 },
+    ["phoenix_icarus_dive"] = { beh = "point", dmgKey = "damage_per_second", radiusKey = "hit_radius" },
+    ["phoenix_launch_fire_spirit"] = { beh = "point", dmgKey = "damage_per_second", radiusKey = "radius", castRange = 1400 },
+    ["phoenix_sun_ray"] = { beh = "point", dmgKey = "base_damage", radiusKey = "radius", castRange = 1200 },
+    ["primal_beast_onslaught"] = { beh = "point", dmgKey = "knockback_damage", dmgTypeOverride = "physical", radiusKey = "knockback_radius" },
+    ["primal_beast_rock_throw"] = { beh = "point", dmgKey = "base_damage", dmgTypeOverride = "physical", radiusKey = "impact_radius", castRange = 1800 },
+    ["primal_beast_trample"] = { beh = "no_target", dmgKey = "base_damage", radiusKey = "effect_radius" },
+    ["primal_beast_uproar"] = { beh = "no_target", dmgKey = "damage_min", radiusKey = "radius" },
+    ["puck_illusory_orb"] = { beh = "point", dmgKey = "damage", radiusKey = "radius", castRange = 1950, lineProjectile = true, lineRadius = 225, projSpeed = 550 },
+    ["puck_waning_rift"] = { beh = "point", dmgKey = "damage", radius = 400, radiusKey = "radius" },
+    ["pudge_flesh_heap"] = { beh = "no_target", dmgKey = "damage_block" },
+    ["pudge_meat_hook"] = { beh = "point", dmgKey = "damage", dmgTypeOverride = "pure", radiusKey = "vision_radius" },
+    ["pugna_nether_blast"] = { beh = "point", dmgKey = "blast_damage", radius = 400, radiusKey = "radius", castRange = 600, delayedAoE = true, impactDelayKey = "delay" },
+    ["pugna_nether_ward"] = { beh = "point", dmgKey = "base_damage", radiusKey = "radius" },
+    ["queenofpain_scream_of_pain"] = { beh = "no_target", dmgKey = "damage", radius = 550, radiusKey = "area_of_effect", needFace = true },
+    ["queenofpain_shadow_strike"] = { beh = "target", dmgKey = "strike_damage", castRange = 450 },
+    ["rattletrap_battery_assault"] = { beh = "no_target", dmgKey = "damage", radiusKey = "radius" },
+    ["rattletrap_overclocking"] = { beh = "no_target", dmgKey = "rocket_flare_damage_pct", radiusKey = "battery_assault_radius" },
+    ["rattletrap_power_cogs"] = { beh = "no_target", dmgKey = "damage", radiusKey = "cogs_radius" },
+    ["rattletrap_rocket_flare"] = { beh = "point", dmgKey = "damage", radius = 600, radiusKey = "radius", projSpeed = 2250 },
+    ["razor_plasma_field"] = { beh = "no_target", dmgKey = "damage_min", radius = 700, radiusKey = "radius", needFace = true },
+    ["riki_blink_strike"] = { beh = "target", dmgKey = "bonus_damage", dmgTypeOverride = "physical" },
+    ["riki_poison_dart"] = { beh = "target", dmgKey = "damage", castRange = 600 },
+    ["ringmaster_impalement"] = { beh = "point", dmgKey = "damage_impact", castRange = 2400 },
+    ["rubick_fade_bolt"] = { beh = "target", dmgKey = "damage", radiusKey = "radius", castRange = 800 },
+    ["rubick_null_field"] = { beh = "no_target", dmgKey = "magic_damage_reduction_pct", radiusKey = "radius" },
+    ["sand_king_burrowstrike"] = { beh = "target", lineProjectile = true, lineRadius = 150 },
+    ["sandking_sand_storm"] = { beh = "no_target", dmgKey = "sand_storm_damage", radiusKey = "sand_storm_radius" },
+    ["sandking_scorpion_strike"] = { beh = "point", dmgKey = "attack_damage", dmgTypeOverride = "physical", radiusKey = "radius", castRange = 200 },
+    ["satyr_trickster_purge"] = { beh = "target", dmgKey = "summon_damage", castRange = 350 },
+    ["shadow_demon_disseminate"] = { beh = "target", dmgKey = "damage_reflection_pct", radiusKey = "radius", castRange = 700 },
+    ["shadow_demon_shadow_poison"] = { beh = "point", dmgKey = "hit_damage", radiusKey = "radius", castRange = 1500, lineProjectile = true, lineRadius = 200, projSpeed = 1500 },
+    ["shadow_shaman_ether_shock"] = { beh = "target", dmgKey = "damage", radiusKey = "start_radius", castRange = 600 },
+    ["shadow_shaman_urnaconda"] = { beh = "point", dmgKey = "impact_damage", radiusKey = "impact_radius", castRange = 650 },
+    ["shredder_chakram_2"] = { beh = "point", dmgKey = "pass_damage", dmgTypeOverride = "pure", radiusKey = "radius", castRange = 1200 },
+    ["shredder_flamethrower"] = { beh = "no_target", dmgKey = "damage_per_second", radiusKey = "width" },
+    ["shredder_timber_chain"] = { beh = "point", dmgKey = "damage", dmgTypeOverride = "pure", radiusKey = "radius" },
+    ["shredder_twisted_chakram"] = { beh = "point", dmgKey = "damage", dmgTypeOverride = "pure", radiusKey = "radius", castRange = 1200 },
+    ["shredder_whirling_death"] = { beh = "no_target", dmgKey = "whirling_damage", dmgTypeOverride = "pure", radiusKey = "whirling_radius" },
+    ["silencer_curse_of_the_silent"] = { beh = "point", dmgKey = "damage", radiusKey = "radius", castRange = 850 },
+    ["silencer_glaives_of_wisdom"] = { beh = "target", dmgKey = "intellect_damage_pct", castRange = 600 },
+    ["silencer_last_word"] = { beh = "target", dmgKey = "damage", castRange = 900 },
+    ["skeleton_king_bone_guard"] = { beh = "no_target", dmgKey = "talent_skeleton_damage", dmgTypeOverride = "physical" },
+    ["skeleton_king_hellfire_blast"] = { beh = "target", dmgKey = "damage", castRange = 525 },
+    ["skywrath_mage_arcane_bolt"] = { beh = "target", dmgKey = "bolt_damage", radiusKey = "extra_bolt_search_radius", projSpeed = 500 },
+    ["skywrath_mage_concussive_shot"] = { beh = "no_target", dmgKey = "damage", radiusKey = "launch_radius", castRange = 1600 },
+    ["slardar_slithereen_crush"] = { beh = "no_target", dmgKey = "crush_damage", dmgTypeOverride = "physical", radius = 350, radiusKey = "crush_radius", needFace = true },
+    ["slark_dark_pact"] = { beh = "no_target", dmgKey = "total_damage", radiusKey = "radius" },
+    ["snapfire_lil_shredder"] = { beh = "no_target", dmgKey = "damage", dmgTypeOverride = "physical", castRange = 800 },
+    ["snapfire_scatterblast"] = { beh = "point", dmgKey = "damage", lineProjectile = true, lineRadius = 225 },
+    ["snapfire_spit_creep"] = { beh = "point", dmgKey = "burn_damage", radiusKey = "impact_radius", castRange = 3000 },
+    ["sniper_concussive_grenade"] = { beh = "point", dmgKey = "damage", radiusKey = "radius" },
+    ["sniper_shrapnel"] = { beh = "point", dmgKey = "shrapnel_damage", radiusKey = "radius", castRange = 1800 },
+    ["spawnlord_master_freeze"] = { beh = "target", dmgKey = "damage", dmgTypeOverride = "physical", castRange = 150 },
+    ["spawnlord_master_stomp"] = { beh = "no_target", dmgKey = "damage", dmgTypeOverride = "physical", radiusKey = "radius" },
+    ["spectre_spectral_dagger"] = { beh = "point", dmgKey = "damage", radiusKey = "dagger_radius", castRange = 1800 },
+    ["storm_spirit_static_remnant"] = { beh = "no_target", dmgKey = "static_remnant_damage", radiusKey = "static_remnant_radius" },
+    ["sven_storm_bolt"] = { beh = "target", dmgKey = "scepter_bonus_damage", radius = 250, radiusKey = "bolt_aoe", projSpeed = 1000 },
+    ["techies_snare_trap"] = { beh = "point", dmgKey = "damage", radiusKey = "activation_radius", castRange = 150 },
+    ["techies_sticky_bomb"] = { beh = "point", dmgKey = "damage", radiusKey = "radius", castRange = 1000 },
+    ["techies_suicide"] = { beh = "point", dmgKey = "damage", radiusKey = "radius", castRange = 1000 },
+    ["templar_assassin_meld"] = { beh = "no_target", dmgKey = "bonus_damage", dmgTypeOverride = "physical" },
+    ["templar_assassin_refraction"] = { beh = "no_target", dmgKey = "bonus_damage", dmgTypeOverride = "physical" },
+    ["terrorblade_metamorphosis"] = { beh = "no_target", dmgKey = "bonus_damage", dmgTypeOverride = "physical" },
+    ["terrorblade_terror_wave"] = { beh = "no_target", dmgKey = "damage", radiusKey = "scepter_radius" },
+    ["tidehunter_anchor_smash"] = { beh = "no_target", dmgKey = "attack_damage", dmgTypeOverride = "physical", radius = 375, needFace = true },
+    ["tidehunter_arm_of_the_deep"] = { beh = "point", dmgKey = "damage_pct" },
+    ["tidehunter_gush"] = { beh = "target", dmgKey = "gush_damage", castRange = 700 },
+    ["tidehunter_kraken_shell"] = { beh = "no_target", dmgKey = "damage_cleanse" },
+    ["tinker_deploy_turrets"] = { beh = "point", dmgKey = "drop_damage", radiusKey = "drop_aoe_radius", castRange = 600 },
+    ["tinker_laser"] = { beh = "target", dmgKey = "laser_damage", dmgTypeOverride = "pure", castRange = 600 },
+    ["tinker_march_of_the_machines"] = { beh = "point", dmgKey = "damage", radiusKey = "radius", castRange = 300 },
+    ["tinker_warp_grenade"] = { beh = "target", dmgKey = "damage", castRange = 700 },
+    ["tiny_avalanche"] = { beh = "point", dmgKey = "avalanche_damage", radiusKey = "radius" },
+    ["tiny_toss"] = { beh = "target", dmgKey = "toss_damage", radiusKey = "radius", castRange = 800 },
+    ["tiny_toss_tree"] = { beh = "point", dmgKey = "bonus_damage", dmgTypeOverride = "physical", radiusKey = "splash_radius", castRange = 1200 },
+    ["tiny_tree_grab"] = { beh = "target", dmgKey = "bonus_damage", dmgTypeOverride = "physical", castRange = 200 },
+    ["treant_leech_seed"] = { beh = "target", dmgKey = "leech_damage", radiusKey = "radius", castRange = 150 },
+    ["treant_living_armor"] = { beh = "point", dmgKey = "damage_block_base" },
+    ["treant_natures_grasp"] = { beh = "point", dmgKey = "damage_per_second", castRange = 1500 },
+    ["troll_warlord_whirling_axes_melee"] = { beh = "no_target", dmgKey = "damage", radiusKey = "hit_radius" },
+    ["troll_warlord_whirling_axes_ranged"] = { beh = "point", dmgKey = "axe_damage", castRange = 950 },
+    ["tusk_ice_shards"] = { beh = "point", dmgKey = "shard_damage", castRange = 1400, lineProjectile = true, lineRadius = 200, projSpeed = 1200 },
+    ["tusk_snowball"] = { beh = "target", dmgKey = "snowball_damage", radiusKey = "snowball_windup_radius", castRange = 1150 },
+    ["tusk_tag_team"] = { beh = "no_target", dmgKey = "bonus_damage", dmgTypeOverride = "physical", radiusKey = "radius" },
+    ["undying_decay"] = { beh = "point", dmgKey = "decay_damage", radius = 325, radiusKey = "radius", castRange = 650 },
+    ["undying_soul_rip"] = { beh = "target", dmgKey = "damage_per_unit", radiusKey = "radius", castRange = 750 },
+    ["undying_tombstone"] = { beh = "point", dmgKey = "zombie_damage_tooltip", dmgTypeOverride = "physical", radiusKey = "radius", castRange = 500 },
+    ["ursa_earthshock"] = { beh = "no_target", radius = 385, radiusKey = "shock_radius", needFace = true },
+    ["vengefulspirit_magic_missile"] = { beh = "target", dmgKey = "magic_missile_damage" },
+    ["vengefulspirit_wave_of_terror"] = { beh = "point", dmgKey = "damage", dmgTypeOverride = "magical", radiusKey = "vision_aoe", castRange = 1400, lineProjectile = true, lineRadius = 325, projSpeed = 2000 },
+    ["venomancer_latent_poison"] = { beh = "target", dmgKey = "duration_damage", castRange = 800 },
+    ["venomancer_plague_ward"] = { beh = "point", dmgKey = "ward_damage_tooltip", dmgTypeOverride = "physical", castRange = 850 },
+    ["venomancer_snakebite"] = { beh = "target", dmgKey = "base_damage", castRange = 600 },
+    ["venomancer_venomous_gale"] = { beh = "point", dmgKey = "tick_damage", radiusKey = "radius", lineProjectile = true, lineRadius = 125 },
+    ["viper_nethertoxin"] = { beh = "point", dmgKey = "min_damage", radiusKey = "radius", castRange = 900 },
+    ["viper_poison_attack"] = { beh = "target", dmgKey = "damage", castRange = 600 },
+    ["visage_silent_as_the_grave"] = { beh = "no_target", dmgKey = "bonus_damage" },
+    ["visage_soul_assumption"] = { beh = "target", dmgKey = "soul_base_damage", radiusKey = "radius", castRange = 1000, projSpeed = 1000 },
+    ["visage_stone_form_self_cast"] = { beh = "no_target", dmgKey = "stun_damage", radiusKey = "stun_radius" },
+    ["visage_summon_familiars_stone_form"] = { beh = "no_target", dmgKey = "stun_damage", radiusKey = "stun_radius", castRange = 50 },
+    ["void_spirit_aether_remnant"] = { beh = "target", radius = 300 },
+    ["void_spirit_dissimilate"] = { beh = "no_target", dmgKey = "damage_radius", radiusKey = "destination_fx_radius" },
+    ["void_spirit_resonant_pulse"] = { beh = "no_target", dmgKey = "damage", radius = 500, radiusKey = "radius", needFace = true },
+    ["warlock_fatal_bonds"] = { beh = "target", dmgKey = "damage_share_percentage", radiusKey = "search_aoe", castRange = 1000 },
+    ["warlock_shadow_word"] = { beh = "target", dmgKey = "damage", radiusKey = "spell_aoe", castRange = 650 },
+    ["warpine_raider_seed_shot"] = { beh = "target", dmgKey = "damage", castRange = 575 },
+    ["weaver_geminate_attack"] = { beh = "target", dmgKey = "bonus_damage", dmgTypeOverride = "physical", castRange = 425 },
+    ["weaver_shukuchi"] = { beh = "no_target", dmgKey = "damage", radiusKey = "radius" },
+    ["weaver_the_swarm"] = { beh = "point", dmgKey = "damage", dmgTypeOverride = "physical", radiusKey = "radius", castRange = 3000 },
+    ["windrunner_powershot"] = { beh = "target", lineProjectile = true, lineRadius = 125 },
+    ["winter_wyvern_arctic_burn"] = { beh = "no_target", dmgKey = "percent_damage", radiusKey = "tree_destruction_radius" },
+    ["winter_wyvern_splinter_blast"] = { beh = "target", dmgKey = "damage", radius = 500, radiusKey = "split_radius", castRange = 1150, projSpeed = 1200, excludePrimaryTarget = true, allowAoEOnly = true },
+    ["wisp_spirits"] = { beh = "no_target", dmgKey = "hero_damage", radiusKey = "hero_hit_radius" },
+    ["witch_doctor_maledict"] = { beh = "point", dmgKey = "bonus_damage", radiusKey = "radius", castRange = 600 },
+    ["witch_doctor_paralyzing_cask"] = { beh = "target", dmgKey = "base_damage", castRange = 600 },
+    ["zuus_arc_lightning"] = { beh = "target", dmgKey = "arc_damage", radiusKey = "radius", castRange = 800, projSpeed = 1100 },
+    ["zuus_heavenly_jump"] = { beh = "no_target", dmgKey = "damage", radiusKey = "vision_radius" },
+    ["zuus_lightning_bolt"] = { beh = "point", dmgKey = "damage", radiusKey = "true_sight_radius", castRange = 700 },
+}
+-- <<LASTHIT_PROFILES_END>>
+
+
+--------------------------------------------------------------------------------
+-- SMALL HELPERS
+--------------------------------------------------------------------------------
+
+local function TryCall(fn, ...)
+    if type(fn) ~= "function" then
+        return false
+    end
+    return pcall(fn, ...)
+end
 
 local function dbg(msg)
     if UI.Debug and UI.Debug:Get() then
@@ -172,48 +509,13 @@ local function dbgThrottleKey(key, msg, interval)
     end
     if key then
         lastDebugByKey[key] = now
-    else
-        lastDebugTime = now
     end
     Log.Write(DEBUG_PREFIX .. tostring(msg))
 end
 
 local function t(key)
     local langTable = I18N[MENU_LANG] or I18N.ru or I18N.en or {}
-    return langTable[key] or (I18N.en and I18N.en[key]) or (I18N.ru and I18N.ru[key]) or tostring(key)
-end
-
-local function getMenuLanguageWidget()
-    if languageWidget then
-        return languageWidget
-    end
-
-    local ok, widget = pcall(Menu.Find, "SettingsHidden", "", "", "", "Main", "Language")
-    if ok and widget then
-        languageWidget = widget
-    end
-
-    return languageWidget
-end
-
-local function detectMenuLanguage()
-    local widget = getMenuLanguageWidget()
-    if not widget then
-        return MENU_LANG
-    end
-
-    local ok, value = pcall(function() return widget:Get() end)
-    if not ok or value == nil then
-        return MENU_LANG
-    end
-
-    if value == 1 then
-        return "ru"
-    elseif value == 2 then
-        return "cn"
-    end
-
-    return "en"
+    return langTable[key] or (I18N.en and I18N.en[key]) or tostring(key)
 end
 
 local function conditionLabel(itemKey)
@@ -224,428 +526,82 @@ local function creepFilterLabel(itemKey)
     return t("creep_" .. tostring(itemKey))
 end
 
-local function getAbilityByName(hero, abilityName)
-    if not hero or not abilityName then return nil end
-
-    if NPC.GetAbilityByName then
-        local ok, ability = pcall(NPC.GetAbilityByName, hero, abilityName)
-        if ok and ability then return ability end
-    end
-
-    do
-        local ok, ability = pcall(function() return hero:GetAbilityByName(abilityName) end)
-        if ok and ability then return ability end
-    end
-
-    if NPC.GetAbility then
-        local ok, ability = pcall(NPC.GetAbility, hero, abilityName)
-        if ok and ability then return ability end
-    end
-
-    return nil
-end
-
-local function isLaneCreepUnit(npc)
-    if NPC.IsLaneCreep then
-        local ok, value = pcall(NPC.IsLaneCreep, npc)
-        if ok and value ~= nil then return value end
-    end
-
-    local ok, value = pcall(function() return npc:IsLaneCreep() end)
-    return ok and value or false
-end
-
-local function isRangedUnit(npc)
-    if NPC.IsRanged then
-        local ok, value = pcall(NPC.IsRanged, npc)
-        if ok and value ~= nil then return value end
-    end
-
-    local ok, value = pcall(function() return npc:IsRanged() end)
-    return ok and value or false
-end
-
-local function isNeutralUnit(npc)
-    if NPC.IsNeutral then
-        local ok, value = pcall(NPC.IsNeutral, npc)
-        if ok and value ~= nil then return value end
-    end
-
-    local ok, value = pcall(function() return npc:IsNeutral() end)
-    return ok and value or false
-end
-
-local function isCreepUnit(npc)
-    if NPC.IsCreep then
-        local ok, value = pcall(NPC.IsCreep, npc)
-        if ok and value ~= nil then return value end
-    end
-
-    local ok, value = pcall(function() return npc:IsCreep() end)
-    return ok and value or false
-end
-
---------------------------------------------------------------------------------
--- HERO-ABILITY DATABASE (70+ heroes)
--- beh:            "target" | "point" | "no_target"
--- radius:         AoE-радиус (для point/no_target)
--- fixedRange:     дистанция приземления (SF razes)
--- dmgKey:         ключ AbilitySpecial
--- dmgTypeOverride: "pure"/"physical"/"magical"
--- fixedDmg:       {lvl1, lvl2, lvl3, lvl4} жёсткий fallback
--- projSpeed:      скорость снаряда (для HP-предсказания), 0 = мгновенно
---------------------------------------------------------------------------------
-local HERO_ABILITIES = {
-    ------------- UNIT TARGET --------------------------------------------------
-    npc_dota_hero_zuus = {
-        { name = "zuus_arc_lightning",          beh = "target", dmgKey = "arc_damage", projSpeed = 1100 },
-    },
-    npc_dota_hero_shadow_shaman = {
-        { name = "shadow_shaman_ether_shock",   beh = "target", dmgKey = "damage" },
-    },
-    npc_dota_hero_tinker = {
-        { name = "tinker_laser",                beh = "target", dmgKey = "laser_damage", dmgTypeOverride = "pure" },
-    },
-    npc_dota_hero_rubick = {
-        { name = "rubick_fade_bolt",            beh = "target", dmgKey = "damage", projSpeed = 1200 },
-    },
-    npc_dota_hero_skywrath_mage = {
-        { name = "skywrath_mage_arcane_bolt",   beh = "target", dmgKey = "bolt_damage", projSpeed = 500 },
-    },
-    npc_dota_hero_ogre_magi = {
-        { name = "ogre_magi_fireblast",         beh = "target", dmgKey = "fireblast_damage" },
-    },
-    npc_dota_hero_hoodwink = {
-        { name = "hoodwink_acorn_shot",         beh = "target", dmgKey = "acorn_shot_damage", attackPctKey = "base_damage_pct", dmgTypeOverride = "physical", projSpeed = 2200, noSpellAmp = true },
-    },
-    npc_dota_hero_muerta = {
-        { name = "muerta_dead_shot",            beh = "target", dmgKey = "damage", projSpeed = 2000 },
-    },
-    npc_dota_hero_witch_doctor = {
-        { name = "witch_doctor_paralyzing_cask", beh = "target", dmgKey = "base_damage", projSpeed = 1000 },
-    },
-    npc_dota_hero_bane = {
-        { name = "bane_brain_sap",              beh = "target", dmgKey = "brain_sap_damage", dmgTypeOverride = "pure" },
-    },
-    npc_dota_hero_lich = {
-        { name = "lich_frost_nova",             beh = "target", dmgKey = "blast_damage" },
-    },
-    npc_dota_hero_clinkz = {
-        { name = "clinkz_tar_bomb",             beh = "target", dmgKey = "impact_damage", radius = 325, projSpeed = 2000, dmgTypeOverride = "magical" },
-    },
-    npc_dota_hero_luna = {
-        { name = "luna_lucent_beam",            beh = "target", dmgKey = "beam_damage" },
-    },
-    npc_dota_hero_sven = {
-        { name = "sven_storm_bolt",             beh = "target", radius = 250, projSpeed = 1000, fixedDmg = {80, 160, 240, 320} },
-    },
-    npc_dota_hero_vengefulspirit = {
-        { name = "vengefulspirit_magic_missile", beh = "target", dmgKey = "magic_missile_damage", projSpeed = 1350 },
-        { name = "vengefulspirit_wave_of_terror", beh = "point", radius = 325, dmgKey = "damage", dmgTypeOverride = "magical", projSpeed = 2000 },
-    },
-    npc_dota_hero_chaos_knight = {
-        { name = "chaos_knight_chaos_bolt",     beh = "target", dmgKey = "damage_min", projSpeed = 700 },
-    },
-    npc_dota_hero_skeleton_king = {  -- Wraith King
-        { name = "skeleton_king_hellfire_blast", beh = "target", dmgKey = "damage", projSpeed = 1200 },
-    },
-    npc_dota_hero_phantom_lancer = {
-        { name = "phantom_lancer_spirit_lance", beh = "target", dmgKey = "lance_damage", projSpeed = 1000 },
-    },
-    npc_dota_hero_medusa = {
-        { name = "medusa_mystic_snake",         beh = "target", dmgKey = "snake_damage", projSpeed = 800 },
-    },
-    npc_dota_hero_visage = {
-        { name = "visage_soul_assumption",      beh = "target", dmgKey = "soul_base_damage", projSpeed = 1000 },
-    },
-    npc_dota_hero_winter_wyvern = {
-        { name = "winter_wyvern_splinter_blast", beh = "target", radius = 500, dmgKey = "damage", projSpeed = 1200, excludePrimaryTarget = true, allowAoEOnly = true },
-    },
-    npc_dota_hero_night_stalker = {
-        { name = "night_stalker_void",          beh = "target", dmgKey = "damage" },
-    },
-    npc_dota_hero_centaur = {
-        { name = "centaur_double_edge",         beh = "target", dmgKey = "edge_damage" },
-    },
-    npc_dota_hero_oracle = {
-        { name = "oracle_purifying_flames",     beh = "target", dmgKey = "damage" },
-    },
-    npc_dota_hero_bounty_hunter = {
-        { name = "bounty_hunter_shuriken_toss", beh = "target", dmgKey = "bonus_damage", projSpeed = 1000 },
-    },
-    npc_dota_hero_phantom_assassin = {
-        { name = "phantom_assassin_stifling_dagger", beh = "target", attackPctKey = "attack_factor_tooltip", flatDamageKey = "base_damage", dmgTypeOverride = "physical", projSpeed = 1200, noSpellAmp = true },
-    },
-    npc_dota_hero_abaddon = {
-        { name = "abaddon_death_coil",          beh = "target", dmgKey = "target_damage", projSpeed = 1300, selfDamageKeys = {"self_damage_enemy_target", "self_damage"}, selfHpBuffer = 40 },
-    },
-    npc_dota_hero_leshrac = {
-        { name = "leshrac_lightning_storm",     beh = "target", dmgKey = "damage", projSpeed = 1100 },
-        { name = "leshrac_split_earth",         beh = "point", radius = 150 },
-    },
-    npc_dota_hero_morphling = {
-        { name = "morphling_adaptive_strike_agi", beh = "target", dmgTypeOverride = "physical", projSpeed = 1150 },
-        { name = "morphling_waveform",          beh = "point", radius = 200 },
-    },
-    npc_dota_hero_dragon_knight = {
-        { name = "dragon_knight_breathe_fire",  beh = "point", radius = 200, dmgKey = "damage", projSpeed = 1050 },
-    },
-
-    ------------- NO TARGET (AoE вокруг героя) --------------------------------
-    npc_dota_hero_queenofpain = {
-        { name = "queenofpain_scream_of_pain",  beh = "no_target", radius = 550 },
-    },
-    npc_dota_hero_bristleback = {
-        { name = "bristleback_quill_spray",     beh = "no_target", radius = 700, dmgKey = "quill_base_damage", dmgTypeOverride = "physical" },
-    },
-    npc_dota_hero_tidehunter = {
-        { name = "tidehunter_anchor_smash",     beh = "no_target", radius = 375, dmgTypeOverride = "physical" },
-    },
-    npc_dota_hero_slardar = {
-        { name = "slardar_slithereen_crush",    beh = "no_target", radius = 350, dmgTypeOverride = "physical" },
-    },
-    npc_dota_hero_mirana = {
-        { name = "mirana_starfall",             beh = "no_target", radius = 650 },
-    },
-    npc_dota_hero_necrolyte = {  -- Necrophos
-        { name = "necrolyte_death_pulse",       beh = "no_target", radius = 500 },
-    },
-    npc_dota_hero_ursa = {
-        { name = "ursa_earthshock",             beh = "no_target", radius = 385 },
-    },
-    npc_dota_hero_dawnbreaker = {
-        { name = "dawnbreaker_fire_wreath",     beh = "no_target", radius = 300, dmgTypeOverride = "physical" },
-    },
-    npc_dota_hero_razor = {
-        { name = "razor_plasma_field",          beh = "no_target", radius = 700 },
-    },
-    npc_dota_hero_mars = {
-        { name = "mars_gods_rebuke",            beh = "no_target", radius = 500, critPctKey = "crit_mult", dmgTypeOverride = "physical", noSpellAmp = true },
-        { name = "mars_spear",                  beh = "point", radius = 125, dmgKey = "damage", projSpeed = 1400 },
-    },
-
-    ------------- POINT (направл. / AoE по точке) -----------------------------
-    npc_dota_hero_lina = {
-        { name = "lina_dragon_slave",           beh = "point", radius = 275, dmgKey = "dragon_slave_damage" },
-    },
-    npc_dota_hero_death_prophet = {
-        { name = "death_prophet_carrion_swarm", beh = "point", radius = 300, dmgKey = "damage" },
-    },
-    npc_dota_hero_pugna = {
-        { name = "pugna_nether_blast",          beh = "point", radius = 400 },
-    },
-    npc_dota_hero_crystal_maiden = {
-        { name = "crystal_maiden_crystal_nova", beh = "point", radius = 425, dmgKey = "nova_damage" },
-    },
-    npc_dota_hero_lion = {
-        { name = "lion_impale",                 beh = "point", radius = 150 },
-    },
-    npc_dota_hero_snapfire = {
-        { name = "snapfire_scatterblast",       beh = "point", radius = 225 },
-    },
-    npc_dota_hero_jakiro = {
-        { name = "jakiro_dual_breath",          beh = "point", radius = 250 },
-    },
-    npc_dota_hero_sand_king = {
-        { name = "sand_king_burrowstrike",      beh = "point", radius = 150 },
-    },
-    npc_dota_hero_earthshaker = {
-        { name = "earthshaker_fissure",         beh = "point", radius = 150 },
-    },
-    npc_dota_hero_puck = {
-        { name = "puck_illusory_orb",           beh = "point", radius = 225, dmgKey = "damage", projSpeed = 550 },
-        { name = "puck_waning_rift",            beh = "point", radius = 400 },
-    },
-    npc_dota_hero_windrunner = {
-        { name = "windrunner_powershot",        beh = "point", radius = 125 },
-    },
-    npc_dota_hero_venomancer = {
-        { name = "venomancer_venomous_gale",    beh = "point", radius = 125 },
-    },
-    npc_dota_hero_dark_seer = {
-        { name = "dark_seer_vacuum",            beh = "point", radius = 400 },
-    },
-    npc_dota_hero_kunkka = {
-        { name = "kunkka_torrent",              beh = "point", radius = 225 },
-    },
-    npc_dota_hero_shadow_demon = {
-        { name = "shadow_demon_shadow_poison",  beh = "point", radius = 200, projSpeed = 1500 },
-    },
-    npc_dota_hero_legion_commander = {
-        { name = "legion_commander_overwhelming_odds", beh = "point", radius = 330 },
-    },
-    npc_dota_hero_undying = {
-        { name = "undying_decay",               beh = "point", radius = 325 },
-    },
-    npc_dota_hero_ember_spirit = {
-        { name = "ember_spirit_sleight_of_fist", beh = "point", radius = 250, dmgTypeOverride = "physical" },
-    },
-    npc_dota_hero_monkey_king = {
-        { name = "monkey_king_boundless_strike", beh = "point", radius = 150, critPctKey = "strike_crit_mult", flatDamageKey = "strike_flat_damage", dmgTypeOverride = "physical", noSpellAmp = true },
-    },
-    npc_dota_hero_nyx_assassin = {
-        { name = "nyx_assassin_impale",         beh = "point", radius = 200 },
-    },
-    npc_dota_hero_grimstroke = {
-        { name = "grimstroke_dark_artistry",    beh = "point", radius = 200 },
-    },
-    npc_dota_hero_tusk = {
-        { name = "tusk_ice_shards",             beh = "point", radius = 200, dmgKey = "shard_damage", projSpeed = 1200 },
-    },
-    npc_dota_hero_rattletrap = {
-        { name = "rattletrap_rocket_flare",     beh = "point", radius = 600, projSpeed = 2250 },
-    },
-    npc_dota_hero_void_spirit = {
-        { name = "void_spirit_resonant_pulse",  beh = "no_target", radius = 500 },
-        { name = "void_spirit_aether_remnant",  beh = "point", radius = 300 },
-    },
-    npc_dota_hero_pangolier = {
-        { name = "pangolier_swashbuckle",       beh = "point", radius = 200, dmgTypeOverride = "physical" },
-    },
-    npc_dota_hero_magnataur = {
-        { name = "magnataur_shockwave",         beh = "point", radius = 200, dmgKey = "shock_damage", projSpeed = 1200 },
-    },
-
-    ------------- SF (фиксир. дальность razes) ---------------------------------
-    npc_dota_hero_nevermore = {
-        { name = "nevermore_shadowraze1", beh = "no_target", radius = 250, fixedRange = 200,  dmgKey = "shadowraze_damage", fixedDmg = {90, 160, 230, 300} },
-        { name = "nevermore_shadowraze2", beh = "no_target", radius = 250, fixedRange = 450,  dmgKey = "shadowraze_damage", fixedDmg = {90, 160, 230, 300} },
-        { name = "nevermore_shadowraze3", beh = "no_target", radius = 250, fixedRange = 700,  dmgKey = "shadowraze_damage", fixedDmg = {90, 160, 230, 300} },
-    },
-
-    ------------- INVOKER (инвокированные заклинания) --------------------------
-    npc_dota_hero_invoker = {
-        { name = "invoker_cold_snap",           beh = "target", dmgKey = "damage" },
-        { name = "invoker_tornado",             beh = "point",  radius = 200, dmgKey = "base_damage" },
-        { name = "invoker_chaos_meteor",        beh = "point",  radius = 275, dmgKey = "main_damage" },
-        { name = "invoker_deafening_blast",     beh = "point",  radius = 175, dmgKey = "damage" },
-        { name = "invoker_sun_strike",          beh = "point",  radius = 175, dmgTypeOverride = "pure", dmgKey = "damage" },
-    },
-}
-
-local ABILITY_PROFILE_OVERRIDES = {
-    kunkka_torrent = {
-        delayedAoE = true,
-        dmgKey = "torrent_damage",
-        impactDelayKey = "delay",
-        radius = 250,
-    },
-    leshrac_split_earth = {
-        delayedAoE = true,
-        impactDelayKey = "delay",
-    },
-    lina_light_strike_array = {
-        delayedAoE = true,
-        dmgKey = "light_strike_array_damage",
-        impactDelayKey = "light_strike_array_delay_time",
-        radiusKey = "light_strike_array_aoe",
-    },
-    pugna_nether_blast = {
-        delayedAoE = true,
-        dmgKey = "blast_damage",
-        impactDelayKey = "delay",
-        radius = 400,
-    },
-    monkey_king_boundless_strike = {
-        attackScaled = true,
-        lineProjectile = true,
-        lineRadius = 150,
-        lineLength = 1100,
-    },
-    magnataur_shockwave = {
-        lineProjectile = true,
-        lineRadius = 200,
-        projSpeed = 1200,
-    },
-    mars_spear = {
-        lineProjectile = true,
-        lineRadius = 125,
-        projSpeed = 1400,
-    },
-    dragon_knight_breathe_fire = {
-        lineProjectile = true,
-        lineRadius = 200,
-        projSpeed = 1050,
-    },
-    death_prophet_carrion_swarm = {
-        lineProjectile = true,
-        lineRadius = 300,
-    },
-    windrunner_powershot = {
-        lineProjectile = true,
-        lineRadius = 125,
-    },
-    shadow_demon_shadow_poison = {
-        lineProjectile = true,
-        lineRadius = 200,
-        projSpeed = 1500,
-    },
-    puck_illusory_orb = {
-        lineProjectile = true,
-        lineRadius = 225,
-        projSpeed = 550,
-    },
-    tusk_ice_shards = {
-        lineProjectile = true,
-        lineRadius = 200,
-        projSpeed = 1200,
-    },
-    winter_wyvern_splinter_blast = {
-        excludePrimaryTarget = true,
-        allowAoEOnly = true,
-        radius = 500,
-        projSpeed = 1200,
-    },
-}
-
---------------------------------------------------------------------------------
--- SAFE SPECIAL VALUE (pattern from Armlet Abuse V2)
---------------------------------------------------------------------------------
-local function SV(ability, key)
-    if not ability then return nil end
-    if Ability.GetLevelSpecialValueFor then
-        local ok, v = pcall(Ability.GetLevelSpecialValueFor, ability, key)
-        if ok and v ~= nil then return v end
-    end
-    if Ability.GetLevelSpecialValue then
-        local lvl = 1
-        if Ability.GetLevel then
-            local okLvl, value = pcall(Ability.GetLevel, ability)
-            if okLvl and value and value > 0 then lvl = value end
+local function detectMenuLanguage()
+    if not languageWidget then
+        local ok, widget = TryCall(Menu.Find, "SettingsHidden", "", "", "", "Main", "Language")
+        if ok and widget then
+            languageWidget = widget
         end
-        local ok, v = pcall(Ability.GetLevelSpecialValue, ability, key, lvl)
-        if ok and v ~= nil then return v end
     end
-    if Ability.GetSpecialValue then
-        local ok, v = pcall(Ability.GetSpecialValue, ability, key)
-        if ok and v ~= nil then return v end
+    if not languageWidget then
+        return MENU_LANG
     end
-    do
-        local ok, v = pcall(function() return ability:GetSpecialValue(key) end)
-        if ok and v ~= nil then return v end
+    local ok, value = TryCall(function() return languageWidget:Get() end)
+    if not ok or value == nil then
+        return MENU_LANG
+    end
+    if value == 1 then return "ru" end
+    if value == 2 then return "cn" end
+    return "en"
+end
+
+local function BitAnd(a, b)
+    a = math.floor(tonumber(a) or 0)
+    b = math.floor(tonumber(b) or 0)
+    local out = 0
+    local bitValue = 1
+    while a > 0 and b > 0 do
+        if (a % 2) == 1 and (b % 2) == 1 then
+            out = out + bitValue
+        end
+        a = math.floor(a / 2)
+        b = math.floor(b / 2)
+        bitValue = bitValue * 2
+    end
+    return out
+end
+
+local function HasBehavior(ability, flag)
+    if not ability or not flag then
+        return false
+    end
+    local ok, mask = TryCall(Ability.GetBehavior, ability, false)
+    if not ok or not mask then
+        return false
+    end
+    return BitAnd(mask, flag) ~= 0
+end
+
+local function SV(ability, key)
+    if not ability or not key then
+        return nil
+    end
+    local level = 1
+    local okLvl, lvl = TryCall(Ability.GetLevel, ability)
+    if okLvl and type(lvl) == "number" and lvl > 0 then
+        level = lvl
+    end
+    local ok, value = TryCall(Ability.GetLevelSpecialValueFor, ability, key, level)
+    if ok and type(value) == "number" then
+        return value
     end
     return nil
 end
 
-local function SVAny(ability, keys, default)
-    for _, k in ipairs(keys) do
-        local v = SV(ability, k)
-        if v and v > 0 then return v end
+local function SVAny(ability, keys)
+    for i = 1, #keys do
+        local value = SV(ability, keys[i])
+        if value and value > 0 then
+            return value, keys[i]
+        end
     end
-    return default or 0
+    return 0, nil
 end
 
-local function appendUnique(list, seen, value)
-    if not value or value == "" or seen[value] then return end
-    seen[value] = true
-    list[#list + 1] = value
-end
-
-local function cloneTableShallow(source)
+local function cloneInfo(source)
     if type(source) ~= "table" then
-        return source
+        return {}
     end
-
     local copy = {}
     for key, value in pairs(source) do
         if type(value) == "table" then
@@ -661,1775 +617,777 @@ local function cloneTableShallow(source)
     return copy
 end
 
-local function mergeAbilityInfo(baseInfo, extraInfo)
-    local merged = cloneTableShallow(baseInfo or {})
-    if type(extraInfo) ~= "table" then
-        merged._damageKeys = nil
+local function mergeInfo(base, extra)
+    local merged = cloneInfo(base)
+    if type(extra) ~= "table" then
         return merged
     end
-
-    for key, value in pairs(extraInfo) do
-        if key ~= "_damageKeys" then
-            if type(value) == "table" then
-                local nested = {}
-                for nestedKey, nestedValue in pairs(value) do
-                    nested[nestedKey] = nestedValue
-                end
-                merged[key] = nested
-            else
-                merged[key] = value
+    for key, value in pairs(extra) do
+        if type(value) == "table" then
+            local nested = {}
+            for nestedKey, nestedValue in pairs(value) do
+                nested[nestedKey] = nestedValue
             end
+            merged[key] = nested
+        else
+            merged[key] = value
         end
     end
-
-    merged._damageKeys = nil
     return merged
 end
 
-local function BitAnd(a, b)
-    a = math.floor(tonumber(a) or 0)
-    b = math.floor(tonumber(b) or 0)
+--------------------------------------------------------------------------------
+-- ABILITY ACCESS
+--------------------------------------------------------------------------------
 
-    if bit32 and bit32.band then
-        return bit32.band(a, b)
-    end
-
-    if bit and bit.band then
-        return bit.band(a, b)
-    end
-
-    local out = 0
-    local bitValue = 1
-    while a > 0 and b > 0 do
-        local aa = a % 2
-        local bb = b % 2
-        if aa == 1 and bb == 1 then
-            out = out + bitValue
-        end
-
-        a = math.floor(a / 2)
-        b = math.floor(b / 2)
-        bitValue = bitValue * 2
-    end
-
-    return out
-end
-
-local function GetAbilityBehaviorFlag(name)
-    if ABILITY_BEHAVIOR_CACHE[name] ~= nil then
-        return ABILITY_BEHAVIOR_CACHE[name]
-    end
-
-    local behavior = Enum and Enum.AbilityBehavior
-    if not behavior then
-        ABILITY_BEHAVIOR_CACHE[name] = false
+local function getAbilityName(ability)
+    if not ability then
         return nil
     end
-
-    local value = behavior[name]
-        or behavior["DOTA_ABILITY_BEHAVIOR_" .. name]
-        or behavior["ABILITY_BEHAVIOR_" .. name]
-
-    ABILITY_BEHAVIOR_CACHE[name] = value or false
-    return value
-end
-
-local function getAbilityBehaviorMask(ability)
-    if not ability then return 0 end
-
-    if Ability.GetBehavior then
-        local ok, value = pcall(Ability.GetBehavior, ability)
-        if ok and value then return value end
+    local ok, name = TryCall(Ability.GetName, ability)
+    if ok and type(name) == "string" and name ~= "" then
+        return name
     end
-
-    local ok, value = pcall(function() return ability:GetBehavior() end)
-    return (ok and value) or 0
-end
-
-local function HasAbilityBehavior(ability, names)
-    local behaviorMask = getAbilityBehaviorMask(ability)
-    if not behaviorMask or behaviorMask == 0 then
-        return false
-    end
-
-    for i = 1, #names do
-        local flag = GetAbilityBehaviorFlag(names[i])
-        if flag and flag ~= 0 and BitAnd(behaviorMask, flag) ~= 0 then
-            return true
-        end
-    end
-
-    return false
-end
-
-local function getAbilityNameFromObject(ability)
-    if not ability then return nil end
-
-    local ok, value = pcall(function() return ability:GetName() end)
-    if ok and type(value) == "string" and value ~= "" then
-        return value
-    end
-
     return nil
 end
 
-local function getAbilityEntityIndex(ability)
-    if not ability then return nil end
-
-    if Entity.GetIndex then
-        local ok, value = pcall(Entity.GetIndex, ability)
-        if ok and value ~= nil then return value end
+local function getAbilityByName(hero, abilityName)
+    if not hero or not abilityName then
+        return nil
     end
-
-    local ok, value = pcall(function() return ability:GetIndex() end)
-    if ok and value ~= nil then return value end
-
+    local ok, ability = TryCall(NPC.GetAbility, hero, abilityName)
+    if ok and ability then
+        return ability
+    end
     return nil
-end
-
-local function getAbilityByIndex(hero, index)
-    if not hero or index == nil then return nil end
-
-    if NPC.GetAbilityByIndex then
-        local ok, ability = pcall(NPC.GetAbilityByIndex, hero, index)
-        if ok and ability then return ability end
-    end
-
-    local ok, ability = pcall(function() return hero:GetAbilityByIndex(index) end)
-    if ok and ability then return ability end
-
-    if NPC.GetAbility then
-        local okAlt, altAbility = pcall(NPC.GetAbility, hero, index)
-        if okAlt and altAbility then return altAbility end
-    end
-
-    local okAlt, altAbility = pcall(function() return hero:GetAbility(index) end)
-    if okAlt and altAbility then return altAbility end
-
-    return nil
-end
-
-local function getHeroAbilityCount(hero)
-    if not hero then return 0 end
-
-    if NPC.GetAbilityCount then
-        local ok, value = pcall(NPC.GetAbilityCount, hero)
-        if ok and value and value > 0 then return value end
-    end
-
-    local ok, value = pcall(function() return hero:GetAbilityCount() end)
-    if ok and value and value > 0 then return value end
-
-    return 0
 end
 
 local function enumerateHeroAbilities(hero)
-    local count = getHeroAbilityCount(hero)
-    if count <= 0 then
-        return {}
-    end
-
     local list = {}
     local seen = {}
-
-    local function pushAbility(ability)
-        if not ability then return end
-        local identity = getAbilityEntityIndex(ability) or getAbilityNameFromObject(ability)
-        if not identity or seen[identity] then return end
-        seen[identity] = true
-        list[#list + 1] = ability
+    for index = 0, ABILITY_SLOT_SCAN - 1 do
+        local ok, ability = TryCall(NPC.GetAbilityByIndex, hero, index)
+        if ok and ability then
+            local name = getAbilityName(ability)
+            local identity = name or tostring(ability)
+            if not seen[identity] then
+                seen[identity] = true
+                list[#list + 1] = ability
+            end
+        end
     end
-
-    for index = 0, count - 1 do
-        pushAbility(getAbilityByIndex(hero, index))
-    end
-
-    for index = 1, count do
-        pushAbility(getAbilityByIndex(hero, index))
-    end
-
     return list
-end
-
---------------------------------------------------------------------------------
--- DAMAGE CALCULATION
---------------------------------------------------------------------------------
-
-local NUKE_DMG_KEYS = {
-    "damage", "base_damage", "damage_min", "damage_max",
-    "initial_damage", "impact_damage", "damage_impact",
-    "blast_damage", "bolt_damage", "wave_damage", "ability_damage",
-    "spell_damage", "hit_damage", "bonus_damage", "nova_damage",
-    "projectile_damage", "explode_damage", "explosion_damage",
-    "contact_damage", "spark_damage", "target_damage",
-    "arc_damage", "beam_damage", "snake_damage", "lance_damage",
-    "quill_base_damage", "static_remnant_damage",
-    "tooltip_damage", "main_damage",
-    "shock_damage", "light_strike_array_damage",
-    -- hero-specific
-    "laser_damage", "fade_bolt_damage", "fireblast_damage",
-    "brain_sap_damage", "dragon_slave_damage",
-    "scream_damage", "strike_damage", "gale_damage",
-    "fissure_damage", "impale_damage", "burrowstrike_damage",
-    "powershot_damage", "orb_damage", "waning_rift_damage",
-    "nether_blast_damage", "carrion_swarm_damage",
-    "acorn_shot_damage", "dead_shot_damage",
-    "cask_damage", "tar_bomb_damage",
-    "total_damage", "AbilityDamage",
-    -- extended
-    "shadowraze_damage", "raze_damage",
-    "double_edge_damage", "rocket_flare_damage",
-    "rebuke_damage", "spear_damage",
-    "shuriken_toss_damage", "dagger_damage",
-    "death_coil_damage", "decay_damage",
-    "purifying_flames_damage", "sticky_bomb_damage",
-    "resonant_pulse_damage", "dark_artistry_damage",
-    "ice_shards_damage",
-    -- batch 2
-    "lucent_beam_damage", "storm_bolt_damage",
-    "magic_missile_damage", "wave_of_terror_damage",
-    "chaos_bolt_damage", "hellfire_blast_damage",
-    "spirit_lance_damage", "mystic_snake_damage",
-    "thunder_strike_damage", "flux_damage",
-    "spark_wraith_damage", "soul_assumption_damage",
-    "soul_base_damage", "rock_damage",
-    "splinter_blast_damage", "cold_feet_damage",
-    "poison_touch_damage", "purification_damage",
-    "void_damage", "anchor_smash_damage",
-    "slithereen_crush_damage", "starfall_damage",
-    "death_pulse_damage", "dark_pact_damage",
-    "inner_fire_damage", "earthshock_damage",
-    "plasma_field_damage", "breathe_fire_damage",
-    "split_earth_damage", "lightning_storm_damage",
-    "waveform_damage", "adaptive_strike_damage",
-    "torrent_damage", "shrapnel_damage",
-    "shadow_poison_damage", "overwhelming_odds_damage",
-    "swashbuckle_damage", "rocket_barrage_damage",
-    "sticky_napalm_damage", "trample_damage",
-    "cold_snap_damage", "tornado_damage",
-    "meteor_damage", "deafening_blast_damage",
-    "sun_strike_damage",
-}
-
-local function getAbilityDamageKeyCandidates(info)
-    if not info then
-        return NUKE_DMG_KEYS
-    end
-
-    if info._damageKeys then
-        return info._damageKeys
-    end
-
-    local keys = {}
-    local seen = {}
-
-    appendUnique(keys, seen, info.dmgKey)
-    appendUnique(keys, seen, info.attackPctKey)
-    appendUnique(keys, seen, info.critPctKey)
-    appendUnique(keys, seen, info.flatDamageKey)
-    for _, key in ipairs(NUKE_DMG_KEYS) do
-        appendUnique(keys, seen, key)
-    end
-
-    if info.name then
-        local parts = {}
-        for part in string.gmatch(info.name, "[^_]+") do
-            parts[#parts + 1] = part
-        end
-
-        local count = #parts
-        if count >= 1 then
-            local tail = parts[count]
-            appendUnique(keys, seen, tail .. "_damage")
-            appendUnique(keys, seen, "base_" .. tail .. "_damage")
-            appendUnique(keys, seen, tail .. "_base_damage")
-        end
-
-        if count >= 2 then
-            appendUnique(keys, seen, parts[count - 1] .. "_" .. parts[count] .. "_damage")
-        end
-
-        if count >= 3 then
-            appendUnique(keys, seen, parts[count - 2] .. "_" .. parts[count - 1] .. "_" .. parts[count] .. "_damage")
-        end
-    end
-
-    info._damageKeys = keys
-    return keys
-end
-
---- Полный spell amp героя (проценты → множитель)
-local function getSpellAmp(hero)
-    if NPC.GetSpellAmplification then
-        local ok, v = pcall(NPC.GetSpellAmplification, hero)
-        if ok and v and v ~= 0 then
-            if v > 1 then v = v / 100 end
-            return v
-        end
-    end
-    if NPC.GetBaseSpellAmp then
-        local ok, v = pcall(NPC.GetBaseSpellAmp, hero)
-        if ok and v and v ~= 0 then
-            if v > 1 then v = v / 100 end
-            return v
-        end
-    end
-    do
-        local ok, v = pcall(function() return hero:GetSpellAmplification() end)
-        if ok and v and v ~= 0 then
-            if v > 1 then v = v / 100 end
-            return v
-        end
-    end
-    return 0
-end
-
---- Базовый урон способности + spell amp
-local function getAttackScaledAbilityDamage(hero, ability, info)
-    if not info then return 0 end
-
-    local attackDamage = 0
-    if NPC.GetMinDamage then
-        local ok, value = pcall(NPC.GetMinDamage, hero)
-        if ok and value and value > 0 then attackDamage = value end
-    end
-    if attackDamage == 0 then
-        if NPC.GetTotalDamage then
-            local ok, value = pcall(NPC.GetTotalDamage, hero)
-            if ok and value and value > 0 then attackDamage = value end
-        end
-    end
-    if attackDamage == 0 then
-        local ok, value = pcall(function() return hero:GetTotalDamage() end)
-        if ok and value and value > 0 then attackDamage = value end
-    end
-    if attackDamage <= 0 then return 0 end
-
-    local dmg = 0
-
-    if info.attackPctKey then
-        local pct = SV(ability, info.attackPctKey) or 0
-        if pct ~= 0 then
-            dmg = dmg + attackDamage * (pct / 100)
-        end
-    end
-
-    if info.critPctKey then
-        local pct = SV(ability, info.critPctKey) or 0
-        if pct ~= 0 then
-            dmg = dmg + attackDamage * (pct / 100)
-        end
-    end
-
-    if info.flatDamageKey then
-        dmg = dmg + (SV(ability, info.flatDamageKey) or 0)
-    end
-
-    if info.flatDamage then
-        dmg = dmg + info.flatDamage
-    end
-
-    return math.max(0, dmg)
-end
-
-local function getAbilityDamage(hero, ability, info)
-    local dmg = 0
-
-    -- 1) GetAbilityDamage (static + OOP)
-    if Ability.GetAbilityDamage then
-        local ok, v = pcall(Ability.GetAbilityDamage, ability)
-        if ok and v and v > 0 then dmg = v end
-    end
-    if dmg == 0 then
-        local ok, v = pcall(function() return ability:GetAbilityDamage() end)
-        if ok and v and v > 0 then dmg = v end
-    end
-
-    -- 2) Явный dmgKey → SV
-    if dmg == 0 and info.dmgKey then
-        dmg = SV(ability, info.dmgKey) or 0
-    end
-
-    -- 3) Перебор типичных ключей
-    if dmg == 0 then
-        dmg = SVAny(ability, getAbilityDamageKeyCandidates(info), 0)
-    end
-    local attackScaledDamage = getAttackScaledAbilityDamage(hero, ability, info)
-    if attackScaledDamage > 0 then
-        dmg = dmg + attackScaledDamage
-    end
-
-    -- 4) Hardcoded fallback (fixedDmg по уровням)
-    if dmg == 0 and info.fixedDmg then
-        local lvl = 1
-        if Ability.GetLevel then
-            local okLvl, value = pcall(Ability.GetLevel, ability)
-            if okLvl and value and value > 0 then lvl = value end
-        end
-        dmg = info.fixedDmg[lvl] or info.fixedDmg[#info.fixedDmg] or 0
-    end
-
-    if dmg == 0 then return 0 end
-
-    -- Spell amplification
-    if not (info and info.noSpellAmp) then
-        local spellAmp = getSpellAmp(hero)
-        dmg = dmg * (1 + spellAmp)
-    end
-
-    return dmg
-end
-
---- Сопротивления цели по типу урона
-local function applyResistance(dmg, ability, info, target)
-    local damageType = info.dmgTypeOverride
-
-    if not damageType then
-        local dt = 0
-        if Ability.GetDamageType then
-            local ok, v = pcall(Ability.GetDamageType, ability)
-            if ok and v then dt = v end
-        end
-        if dt == 0 then
-            local ok, v = pcall(function() return ability:GetDamageType() end)
-            if ok and v then dt = v end
-        end
-
-        if Enum.DamageTypes then
-            if dt == Enum.DamageTypes.PHYSICAL then
-                damageType = "physical"
-            elseif dt == Enum.DamageTypes.PURE then
-                damageType = "pure"
-            else
-                damageType = "magical"
-            end
-        elseif Enum.DamageType then
-            if dt == Enum.DamageType.PHYSICAL then
-                damageType = "physical"
-            elseif dt == Enum.DamageType.PURE then
-                damageType = "pure"
-            else
-                damageType = "magical"
-            end
-        else
-            damageType = "magical"
-        end
-    end
-
-    if damageType == "magical" then
-        local mult = (NPC.GetMagicalArmorDamageMultiplier and NPC.GetMagicalArmorDamageMultiplier(target)) or 1
-        return dmg * mult
-    elseif damageType == "physical" then
-        local mult = (NPC.GetArmorDamageMultiplier and NPC.GetArmorDamageMultiplier(target)) or 1
-        return dmg * mult
-    end
-
-    return dmg  -- pure
-end
-
-local function getAbilityCastPoint(ability, info)
-    local castPoint = 0
-
-    if Ability.GetCastPoint then
-        local ok, value = pcall(Ability.GetCastPoint, ability)
-        if ok and value and value > 0 then castPoint = value end
-    end
-
-    if castPoint == 0 then
-        local ok, value = pcall(function() return ability:GetCastPoint() end)
-        if ok and value and value > 0 then castPoint = value end
-    end
-
-    if castPoint == 0 and info and info.castPoint and info.castPoint > 0 then
-        castPoint = info.castPoint
-    end
-
-    if castPoint == 0 then
-        castPoint = 0.25
-    end
-
-    return castPoint
-end
-
-local function getAbilityCooldownLength(ability)
-    if Ability.GetCooldownLength then
-        local ok, value = pcall(Ability.GetCooldownLength, ability)
-        if ok and value and value > 0 then return value end
-    end
-
-    local ok, value = pcall(function() return ability:GetCooldownLength() end)
-    if ok and value and value > 0 then return value end
-
-    return 0
-end
-
-local function isAbilityInPhase(ability)
-    if Ability.IsInAbilityPhase then
-        local ok, value = pcall(Ability.IsInAbilityPhase, ability)
-        if ok and value then return true end
-    end
-
-    local ok, value = pcall(function() return ability:IsInAbilityPhase() end)
-    return ok and value or false
-end
-
-local function getAbilityHealthCost(ability)
-    if Ability.GetHealthCost then
-        local ok, value = pcall(Ability.GetHealthCost, ability)
-        if ok and value and value > 0 then return value end
-    end
-
-    local ok, value = pcall(function() return ability:GetHealthCost() end)
-    if ok and value and value > 0 then return value end
-
-    return 0
-end
-
-local function getAbilitySelfDamage(ability, info)
-    local selfDamage = getAbilityHealthCost(ability)
-
-    if info and info.selfDamageKeys then
-        for _, key in ipairs(info.selfDamageKeys) do
-            local value = SV(ability, key)
-            if value and value > selfDamage then
-                selfDamage = value
-            end
-        end
-    end
-
-    if info and info.selfDamageFlat and info.selfDamageFlat > selfDamage then
-        selfDamage = info.selfDamageFlat
-    end
-
-    return selfDamage
-end
-
-local function canAffordAbilityCast(hero, ability, info)
-    local selfDamage = getAbilitySelfDamage(ability, info)
-    if selfDamage <= 0 then
-        return true
-    end
-
-    local hp = Entity.GetHealth(hero) or 0
-    local buffer = (info and info.selfHpBuffer) or 1
-    return hp > selfDamage + buffer
-end
-
-local COMMON_RADIUS_KEYS = {
-    "radius",
-    "aoe",
-    "area_of_effect",
-    "split_radius",
-    "light_strike_array_aoe",
-    "shock_width",
-    "width",
-    "start_radius",
-    "end_radius",
-}
-
-local COMMON_LINE_WIDTH_KEYS = {
-    "shock_width",
-    "width",
-    "start_radius",
-    "end_radius",
-    "radius",
-}
-
-local COMMON_DELAY_KEYS = {
-    "delay",
-    "impact_delay",
-    "explode_delay",
-    "blast_delay",
-    "light_strike_array_delay_time",
-}
-
-local COMMON_PROJECTILE_SPEED_KEYS = {
-    "projectile_speed",
-    "proj_speed",
-    "shock_speed",
-    "wave_speed",
-    "orb_speed",
-    "bolt_speed",
-    "arrow_speed",
-    "travel_speed",
-    "velocity",
-}
-
-local getAbilityProjectileSpeedValue
-
-local function getAbilityCastRangeValue(ability)
-    if not ability then return 0 end
-
-    if Ability.GetEffectiveCastRange then
-        local ok, value = pcall(Ability.GetEffectiveCastRange, ability)
-        if ok and value and value > 0 then return value end
-    end
-
-    local okEffective, effective = pcall(function() return ability:GetEffectiveCastRange() end)
-    if okEffective and effective and effective > 0 then return effective end
-
-    if Ability.GetCastRange then
-        local ok, value = pcall(Ability.GetCastRange, ability)
-        if ok and value and value > 0 then return value end
-    end
-
-    local okRange, castRange = pcall(function() return ability:GetCastRange() end)
-    if okRange and castRange and castRange > 0 then return castRange end
-
-    return 0
-end
-
-local function getAbilityAOERadiusValue(ability, info)
-    local radius = (info and info.radius) or 0
-    if radius and radius > 0 then
-        return radius
-    end
-
-    if ability then
-        if Ability.GetAOERadius then
-            local ok, value = pcall(Ability.GetAOERadius, ability)
-            if ok and value and value > 0 then radius = value end
-        end
-
-        if (not radius or radius <= 0) then
-            local ok, value = pcall(function() return ability:GetAOERadius() end)
-            if ok and value and value > 0 then radius = value end
-        end
-
-        if (not radius or radius <= 0) and info and info.radiusKey then
-            radius = SV(ability, info.radiusKey) or 0
-        end
-
-        if not radius or radius <= 0 then
-            radius = SVAny(ability, COMMON_RADIUS_KEYS, 0)
-        end
-    end
-
-    return radius or 0
-end
-
-local function getAbilityLineRadiusValue(ability, info)
-    local radius = (info and info.lineRadius) or 0
-    if radius and radius > 0 then
-        return radius
-    end
-
-    if ability then
-        radius = SVAny(ability, COMMON_LINE_WIDTH_KEYS, 0)
-    end
-
-    if not radius or radius <= 0 then
-        radius = getAbilityAOERadiusValue(ability, info)
-    end
-
-    if not radius or radius <= 0 then
-        radius = 150
-    end
-
-    return radius
-end
-
-local function getAbilityImpactDelay(ability, info)
-    if info and info.impactDelay and info.impactDelay > 0 then
-        return info.impactDelay
-    end
-
-    if not ability then
-        return 0
-    end
-
-    if info and info.impactDelayKey then
-        local value = SV(ability, info.impactDelayKey)
-        if value and value > 0 then
-            return value
-        end
-    end
-
-    if info and info.impactDelayKeys then
-        for _, key in ipairs(info.impactDelayKeys) do
-            local value = SV(ability, key)
-            if value and value > 0 then
-                return value
-            end
-        end
-    end
-
-    local autoProbeDelay = info and info.delayedAoE
-    if not autoProbeDelay and info and info.beh == "point" then
-        autoProbeDelay = getAbilityAOERadiusValue(ability, info) > 0 and getAbilityProjectileSpeedValue(ability, info) <= 0
-    end
-
-    if autoProbeDelay then
-        return SVAny(ability, COMMON_DELAY_KEYS, 0)
-    end
-
-    return 0
-end
-
-getAbilityProjectileSpeedValue = function(ability, info)
-    local speed = (info and info.projSpeed) or 0
-    if speed and speed > 0 then
-        return speed
-    end
-
-    if not ability then
-        return 0
-    end
-
-    if info and info.projSpeedKey then
-        speed = SV(ability, info.projSpeedKey) or 0
-    end
-
-    if not speed or speed <= 0 then
-        speed = SVAny(ability, COMMON_PROJECTILE_SPEED_KEYS, 0)
-    end
-
-    return speed or 0
-end
-
-local function findPositiveSpecialValueKey(ability, keys)
-    if not ability or not keys then
-        return nil, 0
-    end
-
-    for _, key in ipairs(keys) do
-        local value = SV(ability, key)
-        if value and value > 0 then
-            return key, value
-        end
-    end
-
-    return nil, 0
-end
-
-local function isAbilityPassiveState(ability)
-    if Ability.IsPassive then
-        local ok, value = pcall(Ability.IsPassive, ability)
-        if ok and value ~= nil then return value end
-    end
-
-    local ok, value = pcall(function() return ability:IsPassive() end)
-    return ok and value or false
-end
-
-local function isAbilityHiddenState(ability)
-    if Ability.IsHidden then
-        local ok, value = pcall(Ability.IsHidden, ability)
-        if ok and value ~= nil then return value end
-    end
-
-    local ok, value = pcall(function() return ability:IsHidden() end)
-    return ok and value or false
-end
-
-local function isAbilityToggleState(ability)
-    if Ability.IsToggle then
-        local ok, value = pcall(Ability.IsToggle, ability)
-        if ok and value ~= nil then return value end
-    end
-
-    local ok, value = pcall(function() return ability:IsToggle() end)
-    return ok and value or false
-end
-
-local function isAbilityChannelState(ability)
-    if Ability.IsChannelling then
-        local ok, value = pcall(Ability.IsChannelling, ability)
-        if ok and value ~= nil then return value end
-    end
-
-    local ok, value = pcall(function() return ability:IsChannelling() end)
-    return ok and value or false
-end
-
-local function isAbilityUltimateState(ability)
-    if Ability.IsUltimate then
-        local ok, value = pcall(Ability.IsUltimate, ability)
-        if ok and value ~= nil then return value end
-    end
-
-    local ok, value = pcall(function() return ability:IsUltimate() end)
-    return ok and value or false
-end
-
-local function getAbilityTargetTeamValue(ability)
-    if not ability then return 0 end
-
-    if Ability.GetTargetTeam then
-        local ok, value = pcall(Ability.GetTargetTeam, ability)
-        if ok and value ~= nil then return value end
-    end
-
-    local ok, value = pcall(function() return ability:GetTargetTeam() end)
-    return (ok and value) or 0
-end
-
-local function getAbilityTargetTypeValue(ability)
-    if not ability then return 0 end
-
-    if Ability.GetTargetType then
-        local ok, value = pcall(Ability.GetTargetType, ability)
-        if ok and value ~= nil then return value end
-    end
-
-    local ok, value = pcall(function() return ability:GetTargetType() end)
-    return (ok and value) or 0
-end
-
-local function hasTargetType(mask, names)
-    if not mask or mask == 0 or not names or not Enum or not Enum.TargetType then
-        return mask == 0
-    end
-
-    for _, name in ipairs(names) do
-        local value = Enum.TargetType[name]
-        if value and (mask == value or BitAnd(mask, value) ~= 0) then
-            return true
-        end
-    end
-
-    return false
-end
-
-local function isEnemyTargetTeam(team)
-    if not Enum or not Enum.TargetTeam or team == nil then
-        return true
-    end
-
-    return team == 0
-        or team == Enum.TargetTeam.ENEMY
-        or team == Enum.TargetTeam.BOTH
-end
-
-local function resolveAbilityBehaviorKind(ability)
-    if HasAbilityBehavior(ability, { "UNIT_TARGET", "OPTIONAL_UNIT_TARGET" }) then
-        return "target"
-    end
-
-    if HasAbilityBehavior(ability, { "POINT", "OPTIONAL_POINT" }) then
-        return "point"
-    end
-
-    if HasAbilityBehavior(ability, { "NO_TARGET" }) then
-        return "no_target"
-    end
-
-    local targetType = getAbilityTargetTypeValue(ability)
-    if targetType ~= 0 then
-        return "target"
-    end
-
-    local castRange = getAbilityCastRangeValue(ability)
-    local aoeRadius = getAbilityAOERadiusValue(ability, nil)
-    if castRange > 0 or aoeRadius > 0 then
-        return "point"
-    end
-
-    return nil
-end
-
-local function getAbilityChargeState(ability)
-    if not ability then
-        return { current = 0, max = 0, restore = 0, hasCharges = false }
-    end
-
-    local current = 0
-    if Ability.GetCurrentCharges then
-        local ok, value = pcall(Ability.GetCurrentCharges, ability)
-        if ok and value and value > 0 then current = value end
-    end
-    if current <= 0 then
-        local ok, value = pcall(function() return ability:GetCurrentCharges() end)
-        if ok and value and value > 0 then current = value end
-    end
-
-    local max = 0
-    if Ability.GetMaxCharges then
-        local ok, value = pcall(Ability.GetMaxCharges, ability)
-        if ok and value and value > 0 then max = value end
-    end
-    if max <= 0 then
-        local ok, value = pcall(function() return ability:GetMaxCharges() end)
-        if ok and value and value > 0 then max = value end
-    end
-
-    local restore = 0
-    if Ability.GetChargeRestoreTime then
-        local ok, value = pcall(Ability.GetChargeRestoreTime, ability)
-        if ok and value and value > 0 then restore = value end
-    end
-    if restore <= 0 then
-        local ok, value = pcall(function() return ability:GetChargeRestoreTime() end)
-        if ok and value and value > 0 then restore = value end
-    end
-
-    return {
-        current = current,
-        max = max,
-        restore = restore,
-        hasCharges = max > 0,
-    }
 end
 
 local function buildHeroAbilitySignature(hero)
     local heroName = NPC.GetUnitName(hero) or "?"
     local parts = { heroName }
-
     for _, ability in ipairs(enumerateHeroAbilities(hero)) do
-        local name = getAbilityNameFromObject(ability)
-        if name and name ~= "" then
+        local name = getAbilityName(ability)
+        if name then
             local level = 0
-            if Ability.GetLevel then
-                local ok, value = pcall(Ability.GetLevel, ability)
-                if ok and value and value > 0 then
-                    level = value
-                end
+            local ok, value = TryCall(Ability.GetLevel, ability)
+            if ok and type(value) == "number" then
+                level = value
             end
-            parts[#parts + 1] = name .. ":" .. tostring(level or 0)
+            parts[#parts + 1] = name .. ":" .. tostring(level)
         end
     end
-
     return table.concat(parts, "|")
 end
 
-local function enrichAbilityInfoFromAbility(ability, info)
-    local merged = mergeAbilityInfo(info, ABILITY_PROFILE_OVERRIDES[info and info.name or ""])
+local function isAbilityExcluded(ability, allowHidden)
     if not ability then
-        return merged
+        return true
     end
-
-    if not merged.beh then
-        merged.beh = resolveAbilityBehaviorKind(ability)
+    if Ability.IsPassive(ability) or Ability.IsUltimate(ability) then
+        return true
     end
-
-    if not merged.radius or merged.radius <= 0 then
-        merged.radius = getAbilityAOERadiusValue(ability, merged)
+    if HasBehavior(ability, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_PASSIVE)
+        or HasBehavior(ability, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_TOGGLE)
+        or HasBehavior(ability, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_CHANNELLED)
+        or HasBehavior(ability, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_AUTOCAST)
+        or HasBehavior(ability, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_ATTACK)
+        or HasBehavior(ability, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_VECTOR_TARGETING)
+        or HasBehavior(ability, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_DIRECTIONAL) then
+        return true
     end
-
-    if merged.lineProjectile and (not merged.lineRadius or merged.lineRadius <= 0) then
-        merged.lineRadius = getAbilityLineRadiusValue(ability, merged)
+    if not allowHidden and Ability.IsHidden(ability) then
+        return true
     end
+    return false
+end
 
-    if not merged.projSpeed or merged.projSpeed <= 0 then
-        merged.projSpeed = getAbilityProjectileSpeedValue(ability, merged)
+local function resolveBehaviorKind(ability, profile)
+    if profile and profile.beh then
+        return profile.beh
     end
-
-    if not merged.impactDelay or merged.impactDelay <= 0 then
-        merged.impactDelay = getAbilityImpactDelay(ability, merged)
+    if HasBehavior(ability, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_UNIT_TARGET)
+        or HasBehavior(ability, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_OPTIONAL_UNIT_TARGET) then
+        return "target"
     end
-
-    if merged.impactDelay and merged.impactDelay > 0 then
-        merged.delayedAoE = true
+    if HasBehavior(ability, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_POINT)
+        or HasBehavior(ability, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_OPTIONAL_POINT)
+        or HasBehavior(ability, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_AOE) then
+        return "point"
     end
+    if HasBehavior(ability, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_NO_TARGET)
+        or HasBehavior(ability, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_OPTIONAL_NO_TARGET) then
+        return "no_target"
+    end
+    return nil
+end
 
-    if not merged.dmgKey
-        and not merged.attackPctKey
-        and not merged.critPctKey
-        and not merged.flatDamageKey then
-        local damageKey = findPositiveSpecialValueKey(ability, getAbilityDamageKeyCandidates(merged))
-        if damageKey then
-            merged.dmgKey = damageKey
+local function getFixedRange(ability, info)
+    if info.fixedRange and info.fixedRange > 0 then
+        return info.fixedRange
+    end
+    if info.fixedRangeKey then
+        local value = SV(ability, info.fixedRangeKey)
+        if value and value > 0 then
+            return value
+        end
+    end
+    return 0
+end
+
+--- Forward slash length (Kez Echo Slash katana_distance, etc.).
+local function getSlashLength(ability, info)
+    if info.slashLength and info.slashLength > 0 then
+        return info.slashLength
+    end
+    if info.slashLengthKey then
+        local value = SV(ability, info.slashLengthKey)
+        if value and value > 0 then
+            return value
+        end
+    end
+    if info.lineLength and info.lineLength > 0 and info.beh == "no_target" then
+        return info.lineLength
+    end
+    return 0
+end
+
+local function getAoeRadius(ability, info)
+    if info.radius and info.radius > 0 then
+        return info.radius
+    end
+    if info.radiusKey then
+        local value = SV(ability, info.radiusKey)
+        if value and value > 0 then
+            return value
+        end
+    end
+    local value = SVAny(ability, { "radius", "aoe", "area_of_effect", "width", "start_radius" })
+    return value or 0
+end
+
+local function getCastRange(ability, info)
+    local ok, value = TryCall(Ability.GetCastRange, ability)
+    if ok and type(value) == "number" and value > 0 then
+        return value
+    end
+    if info and info.castRange and info.castRange > 0 then
+        return info.castRange
+    end
+    return 0
+end
+
+local function getCastPoint(ability)
+    local ok, value = TryCall(Ability.GetCastPoint, ability, true)
+    if ok and type(value) == "number" and value > 0 then
+        return value
+    end
+    return 0.25
+end
+
+local function getImpactDelay(ability, info)
+    if info.impactDelay and info.impactDelay > 0 then
+        return info.impactDelay
+    end
+    if info.impactDelayKey then
+        local value = SV(ability, info.impactDelayKey)
+        if value and value > 0 then
+            return value
+        end
+    end
+    if info.delayedAoE then
+        return SVAny(ability, { "delay", "impact_delay", "explode_delay", "light_strike_array_delay_time" }) or 0
+    end
+    return 0
+end
+
+local function getProjectileSpeed(ability, info)
+    if info.projSpeed and info.projSpeed > 0 then
+        -- Prefer live special value when the profile only baked a fallback.
+        local live = SVAny(ability, {
+            "dagger_speed", "projectile_speed", "proj_speed", "missile_speed",
+            "shock_speed", "wave_speed", "orb_speed", "bolt_speed",
+            "arrow_speed", "travel_speed", "spear_speed", "shard_speed",
+        })
+        if live and live > 0 then
+            return live
+        end
+        return info.projSpeed
+    end
+    return SVAny(ability, {
+        "dagger_speed", "projectile_speed", "proj_speed", "missile_speed",
+        "shock_speed", "wave_speed", "orb_speed", "bolt_speed",
+        "arrow_speed", "travel_speed", "spear_speed", "shard_speed",
+    }) or 0
+end
+
+local function enrichAbility(ability, abilityName, profile)
+    local info = mergeInfo(profile, { name = abilityName })
+    info.beh = resolveBehaviorKind(ability, info)
+    local fixed = getFixedRange(ability, info)
+    if fixed > 0 then
+        info.fixedRange = fixed
+        if info.needFace == nil then
+            info.needFace = true
+        end
+    end
+    if not info.radius or info.radius <= 0 then
+        info.radius = getAoeRadius(ability, info)
+    end
+    if not info.projSpeed or info.projSpeed <= 0 then
+        info.projSpeed = getProjectileSpeed(ability, info)
+    end
+    info.impactDelay = getImpactDelay(ability, info)
+    if info.impactDelay > 0 then
+        info.delayedAoE = true
+    end
+    if not info.dmgKey and not info.attackPctKey and not info.critPctKey and not info.flatDamageKey then
+        local _, key = SVAny(ability, {
+            "damage", "base_damage", "AbilityDamage", "main_damage", "impact_damage",
+            "blast_damage", "bolt_damage", "arc_damage", "beam_damage", "target_damage",
+        })
+        if key then
+            info.dmgKey = key
+        end
+    end
+    return info
+end
+
+--------------------------------------------------------------------------------
+-- DAMAGE
+--------------------------------------------------------------------------------
+
+local FALLBACK_DMG_KEYS = {
+    "damage", "base_damage", "damage_min", "AbilityDamage",
+    "tooltip_damage", "main_damage", "impact_damage", "blast_damage",
+    "bolt_damage", "wave_damage", "nova_damage", "arc_damage",
+    "beam_damage", "bonus_damage", "target_damage",
+}
+
+local function getSpellAmp(hero)
+    local ok, value = TryCall(NPC.GetBaseSpellAmp, hero)
+    if ok and type(value) == "number" and value ~= 0 then
+        if value > 1 then
+            value = value / 100
+        end
+        return value
+    end
+    return 0
+end
+
+local function getAttackDamage(hero)
+    -- Average of true min/max ≈ expected attack roll used by %attack spells.
+    local okMin, dMin = TryCall(NPC.GetTrueDamage, hero)
+    local okMax, dMax = TryCall(NPC.GetTrueMaximumDamage, hero)
+    if okMin and type(dMin) == "number" and dMin > 0 then
+        if okMax and type(dMax) == "number" and dMax >= dMin then
+            return (dMin + dMax) * 0.5
+        end
+        return dMin
+    end
+    local minOk, minDmg = TryCall(NPC.GetMinDamage, hero)
+    local bonusOk, bonusDmg = TryCall(NPC.GetBonusDamage, hero)
+    local total = 0
+    if minOk and type(minDmg) == "number" then
+        total = total + minDmg
+    end
+    if bonusOk and type(bonusDmg) == "number" then
+        total = total + bonusDmg
+    end
+    return math.max(0, total)
+end
+
+local function getAttackScaledDamage(hero, ability, info)
+    local attackDamage = getAttackDamage(hero)
+    if attackDamage <= 0 and not info.flatDamageKey and not info.flatDamage then
+        return 0
+    end
+    local dmg = 0
+    if info.attackPctKey then
+        local pct = SV(ability, info.attackPctKey) or 0
+        dmg = dmg + attackDamage * (pct / 100)
+    end
+    if info.critPctKey then
+        local pct = SV(ability, info.critPctKey) or 0
+        dmg = dmg + attackDamage * (pct / 100)
+    end
+    if info.flatDamageKey then
+        dmg = dmg + (SV(ability, info.flatDamageKey) or 0)
+    end
+    if info.flatDamage then
+        dmg = dmg + info.flatDamage
+    end
+    return math.max(0, dmg)
+end
+
+local function getAbilityDamage(hero, ability, info)
+    local dmg = 0
+    local hasAttackScale = info.attackPctKey or info.critPctKey or info.flatDamageKey or info.flatDamage
+
+    if hasAttackScale then
+        -- Profile owns the attack-scaled formula (PA dagger, MK strike, Mars rebuke, …).
+        -- Do NOT also add Ability.GetDamage / dmgKey when it duplicates flatDamageKey.
+        dmg = getAttackScaledDamage(hero, ability, info)
+        if info.dmgKey and info.dmgKey ~= info.flatDamageKey then
+            dmg = dmg + (SV(ability, info.dmgKey) or 0)
+        end
+    else
+        local ok, value = TryCall(Ability.GetDamage, ability)
+        if ok and type(value) == "number" and value > 0 then
+            dmg = value
+        end
+        if dmg <= 0 and info.dmgKey then
+            dmg = SV(ability, info.dmgKey) or 0
+        end
+        if dmg <= 0 then
+            dmg = SVAny(ability, FALLBACK_DMG_KEYS) or 0
         end
     end
 
-    local chargeState = getAbilityChargeState(ability)
-    if chargeState.hasCharges then
-        merged.chargeBased = true
+    if dmg <= 0 then
+        return 0
     end
-
-    return merged
+    if not info.noSpellAmp then
+        dmg = dmg * (1 + getSpellAmp(hero))
+    end
+    return dmg
 end
 
-local function inferFallbackAbilityInfo(hero, ability)
-    if not hero or not ability then return nil end
+local function applyResistance(dmg, ability, info, target)
+    local damageType = info.dmgTypeOverride
+    if not damageType then
+        local ok, dt = TryCall(Ability.GetDamageType, ability)
+        if ok and dt == Enum.DamageTypes.DAMAGE_TYPE_PHYSICAL then
+            damageType = "physical"
+        elseif ok and dt == Enum.DamageTypes.DAMAGE_TYPE_PURE then
+            damageType = "pure"
+        else
+            damageType = "magical"
+        end
+    end
+    if damageType == "magical" then
+        local ok, mult = TryCall(NPC.GetMagicalArmorDamageMultiplier, target)
+        return dmg * ((ok and mult) or 1)
+    end
+    if damageType == "physical" then
+        local ok, mult = TryCall(NPC.GetArmorDamageMultiplier, target)
+        return dmg * ((ok and mult) or 1)
+    end
+    return dmg
+end
 
-    local abilityName = getAbilityNameFromObject(ability)
-    if not abilityName or abilityName == "" then return nil end
+local function getSelfDamage(ability, info)
+    local selfDamage = 0
+    if info.selfDamageKeys then
+        for _, key in ipairs(info.selfDamageKeys) do
+            local value = SV(ability, key)
+            if type(value) == "number" and value > selfDamage then
+                selfDamage = value
+            end
+        end
+    end
+    if info.selfDamageFlat and info.selfDamageFlat > selfDamage then
+        selfDamage = info.selfDamageFlat
+    end
+    return selfDamage
+end
 
-    if isAbilityPassiveState(ability)
-        or isAbilityHiddenState(ability)
-        or isAbilityToggleState(ability)
-        or isAbilityChannelState(ability)
-        or isAbilityUltimateState(ability) then
-        return nil
+local function canAffordSelfDamage(hero, ability, info)
+    local selfDamage = getSelfDamage(ability, info)
+    if selfDamage <= 0 then
+        return true
+    end
+    local hp = Entity.GetHealth(hero) or 0
+    local buffer = info.selfHpBuffer or 1
+    return hp > selfDamage + buffer
+end
+
+local function getHitDelay(hero, ability, creep, info)
+    local delay = getCastPoint(ability) + (info.impactDelay or 0)
+    local speed = getProjectileSpeed(ability, info)
+    if speed > 0 and creep then
+        local dist = (Entity.GetAbsOrigin(hero) - Entity.GetAbsOrigin(creep)):Length2D()
+        delay = delay + dist / speed
+    elseif info.lineProjectile and creep then
+        local dist = (Entity.GetAbsOrigin(hero) - Entity.GetAbsOrigin(creep)):Length2D()
+        delay = delay + dist / 900
+    end
+    return delay
+end
+
+local function getSafetyBuffer(ability, info, hitDelay)
+    local buffer = SAFETY_BUFFER_FLAT + getCastPoint(ability) * SAFETY_BUFFER_PER_CASTPOINT
+    if info.delayedAoE then
+        buffer = buffer + 8
     end
 
-    if HasAbilityBehavior(ability, {
-        "PASSIVE",
-        "TOGGLE",
-        "CHANNELLED",
-        "AUTOCAST",
-        "ATTACK",
-        "VECTOR_TARGETING",
-        "DIRECTIONAL",
-        "ROOT_DISABLES",
-    }) then
+    local speed = getProjectileSpeed(ability, info)
+    local isProjectile = (speed and speed > 0) or info.lineProjectile
+    if isProjectile then
+        -- Travel time: creep HP falls while the missile flies. Inflating buffer here
+        -- forces a late cast and allies steal the CS. Keep a small variance pad only.
+        buffer = math.max(SAFETY_BUFFER_FLAT, buffer * 0.65)
+    elseif hitDelay and hitDelay > 0.35 then
+        buffer = buffer + (hitDelay - 0.35) * 15
+    end
+    return buffer
+end
+
+local function canSecureKill(effectiveDmg, creepHP, buffer)
+    return effectiveDmg >= (creepHP + buffer)
+end
+
+--------------------------------------------------------------------------------
+-- RESOLVE POOL
+--------------------------------------------------------------------------------
+
+local function resolveProfileAbility(hero, ability, abilityName)
+    if isAbilityExcluded(ability, true) then
         return nil
     end
-
-    local beh = resolveAbilityBehaviorKind(ability)
-    if beh ~= "target" and beh ~= "point" then
+    local profile = LASTHIT_PROFILES and LASTHIT_PROFILES[abilityName]
+    if not profile then
         return nil
     end
-
-    local targetTeam = getAbilityTargetTeamValue(ability)
-    if not isEnemyTargetTeam(targetTeam) then
+    local info = enrichAbility(ability, abilityName, profile)
+    if not info.beh then
         return nil
     end
+    return info
+end
 
-    local targetType = getAbilityTargetTypeValue(ability)
-    if beh == "target" and targetType ~= 0 and not hasTargetType(targetType, { "BASIC", "CREEP", "ALL" }) then
+local function resolveFallbackAbility(hero, ability, abilityName)
+    if isAbilityExcluded(ability, false) then
         return nil
     end
-
-    local info = enrichAbilityInfoFromAbility(ability, {
+    local info = enrichAbility(ability, abilityName, {
         name = abilityName,
-        beh = beh,
         autoDetected = true,
     })
-
-    local damage = getAbilityDamage(hero, ability, info)
-    if damage <= 0 then
+    if not info.beh then
         return nil
     end
-
+    if getAbilityDamage(hero, ability, info) <= 0 then
+        return nil
+    end
     return info
+end
+
+local function getHeroAbilityPrefix(heroName)
+    return string.match(heroName or "", "^npc_dota_hero_(.+)$")
 end
 
 local function getResolvedHeroAbilityInfos(hero)
     local heroName = NPC.GetUnitName(hero)
     if not heroName or heroName == "" then
-        return {}, nil, false
+        return {}, nil
     end
 
     local signature = buildHeroAbilitySignature(hero)
     local cached = resolvedAbilityInfoCache[signature]
     if cached then
-        return cached.abilities, signature, cached.usedFallback
+        return cached.abilities, signature
     end
 
     local resolved = {}
-    local seenNames = {}
-    local usedFallback = false
-    local manualInfos = HERO_ABILITIES[heroName] or {}
+    local seen = {}
 
-    for _, rawInfo in ipairs(manualInfos) do
-        local ability = getAbilityByName(hero, rawInfo.name)
-        local info = enrichAbilityInfoFromAbility(ability, rawInfo)
-        resolved[#resolved + 1] = info
-        seenNames[info.name] = true
+    local function tryAdd(ability, abilityName)
+        if not ability or not abilityName or seen[abilityName] then
+            return
+        end
+        local info = resolveProfileAbility(hero, ability, abilityName)
+        if not info then
+            info = resolveFallbackAbility(hero, ability, abilityName)
+        end
+        if info then
+            resolved[#resolved + 1] = info
+            seen[abilityName] = true
+        end
     end
 
     for _, ability in ipairs(enumerateHeroAbilities(hero)) do
-        local abilityName = getAbilityNameFromObject(ability)
-        if abilityName and not seenNames[abilityName] then
-            local info = inferFallbackAbilityInfo(hero, ability)
-            if info then
-                resolved[#resolved + 1] = info
-                seenNames[info.name] = true
-                usedFallback = true
+        tryAdd(ability, getAbilityName(ability))
+    end
+
+    local prefix = getHeroAbilityPrefix(heroName)
+    if prefix and LASTHIT_PROFILES then
+        local token = prefix .. "_"
+        for abilityName, _ in pairs(LASTHIT_PROFILES) do
+            if not seen[abilityName] and string.sub(abilityName, 1, #token) == token then
+                tryAdd(getAbilityByName(hero, abilityName), abilityName)
             end
         end
     end
 
-    resolvedAbilityInfoCache[signature] = {
-        abilities = resolved,
-        usedFallback = usedFallback or (#manualInfos == 0 and #resolved > 0),
-    }
-
-    return resolved, signature, resolvedAbilityInfoCache[signature].usedFallback
+    resolvedAbilityInfoCache[signature] = { abilities = resolved }
+    return resolved, signature
 end
 
 --------------------------------------------------------------------------------
--- HP PREDICTION — предсказание HP крипа через DPS-трекер
---------------------------------------------------------------------------------
-
---- Обновить HP-трекер, вернуть предсказанный HP через deltaTime секунд
-local function getPredictionDamageWindow(deltaTime)
-    if not deltaTime or deltaTime <= 0 then
-        return 0
-    end
-
-    return math.max(0, deltaTime - math.min(HP_PREDICT_WINDOW_GRACE, deltaTime * 0.35))
-end
-
-local function getPredictionConfidence(sampleCount)
-    local samples = math.max(0, sampleCount or 0)
-    return math.min(HP_PREDICT_CONFIDENCE_MAX, HP_PREDICT_CONFIDENCE_BASE + samples * HP_PREDICT_CONFIDENCE_STEP)
-end
-
-local function getPredictionReserve(projectedDamage, sampleCount)
-    local missingSamples = math.max(0, 3 - (sampleCount or 0))
-    local reserve = HP_PREDICT_BASE_RESERVE + missingSamples * HP_PREDICT_SAMPLE_RESERVE + projectedDamage * 0.22
-    return math.min(HP_PREDICT_RESERVE_MAX, reserve)
-end
-
-local function canSecureLastHit(damage, targetHP, safetyMargin)
-    local margin = math.max(0, safetyMargin or 0)
-    return damage > 0 and targetHP > 0 and damage >= (targetHP + margin)
-end
-
-local function getSpellKillSafetyMargin(info, hitDelay, usePrediction, effectiveDmg)
-    local margin = 0
-    local referenceDmg = math.max(0, effectiveDmg or 0)
-
-    if usePrediction then
-        margin = margin + 6
-    end
-
-    if hitDelay and hitDelay > 0.12 then
-        margin = margin + math.min(14, hitDelay * 12)
-    end
-
-    if info then
-        if info.attackPctKey or info.critPctKey then
-            margin = margin + math.max(10, math.min(18, referenceDmg * 0.05))
-        end
-
-        if info.dmgTypeOverride == "physical" then
-            margin = margin + math.max(5, math.min(9, referenceDmg * 0.03))
-        end
-
-        if info.projSpeed and info.projSpeed > 0 then
-            margin = margin + 4
-        end
-
-        if info.delayedAoE then
-            margin = margin + 5
-        end
-
-        if info.autoDetected then
-            margin = margin + 4
-        end
-
-        if hitDelay and hitDelay > 0.25 and (info.attackPctKey or info.critPctKey or info.dmgTypeOverride == "physical") then
-            margin = margin + 4
-        end
-    end
-
-    return math.floor(margin + 0.5)
-end
-
-local function getSecureSpellDamage(effectiveDmg, info, hitDelay, usePrediction)
-    local safetyMargin = getSpellKillSafetyMargin(info, hitDelay, usePrediction, effectiveDmg)
-    return math.max(0, effectiveDmg - safetyMargin), safetyMargin
-end
-
-local function getRequiredPredictionKillMargin(info, hitDelay, effectiveDmg)
-    local margin = 4
-    local referenceDmg = math.max(0, effectiveDmg or 0)
-
-    if hitDelay and hitDelay > 0.15 then
-        margin = margin + math.min(6, hitDelay * 8)
-    end
-
-    if info then
-        if info.projSpeed and info.projSpeed > 0 then
-            margin = margin + 3
-        end
-
-        if info.attackPctKey or info.critPctKey then
-            margin = margin + math.max(4, math.min(9, referenceDmg * 0.025))
-        end
-
-        if info.dmgTypeOverride == "physical" then
-            margin = margin + 3
-        end
-
-        if info.delayedAoE then
-            margin = margin + 3
-        end
-
-        if info.autoDetected then
-            margin = margin + 2
-        end
-    end
-
-    return math.floor(margin + 0.5)
-end
-
-local function getMaxPredictionGap(info, hitDelay, effectiveDmg)
-    local gap = 22
-    local referenceDmg = math.max(0, effectiveDmg or 0)
-
-    if hitDelay and hitDelay > 0.2 then
-        gap = gap - math.min(6, hitDelay * 8)
-    end
-
-    if info then
-        if info.projSpeed and info.projSpeed > 0 then
-            gap = gap - 4
-        end
-
-        if info.attackPctKey or info.critPctKey then
-            gap = gap - 6
-        end
-
-        if info.dmgTypeOverride == "physical" then
-            gap = gap - 4
-        end
-
-        if info.delayedAoE then
-            gap = gap - 3
-        end
-
-        if info.autoDetected then
-            gap = gap - 2
-        end
-    end
-
-    if referenceDmg > 0 then
-        gap = math.min(gap, math.max(8, referenceDmg * 0.12))
-    end
-
-    return math.max(8, math.floor(gap + 0.5))
-end
-
-local function predictCreepHP(creep, deltaTime)
-    local idx = Entity.GetIndex(creep)
-    local hp  = Entity.GetHealth(creep) or 0
-    local now = GameRules.GetGameTime()
-
-    local entry = creepHPTracker[idx]
-    if entry then
-        local dt = now - entry.time
-        if dt >= HP_PREDICT_MIN_SAMPLE_DT then
-            local currentDPS = (entry.hp - hp) / dt
-            if currentDPS < 0 then currentDPS = 0 end
-            local previousDPS = entry.dps or 0
-            local smoothDPS = previousDPS * 0.7 + currentDPS * 0.3
-            entry = {
-                hp = hp,
-                time = now,
-                dps = smoothDPS,
-                samples = math.min((entry.samples or 0) + 1, 8),
-            }
-            creepHPTracker[idx] = entry
-        end
-
-        local projectedWindow = getPredictionDamageWindow(deltaTime)
-        local predictedDPS = math.max(0, (entry.dps or 0) * getPredictionConfidence(entry.samples))
-        local projectedDamage = predictedDPS * projectedWindow
-        local reserve = getPredictionReserve(projectedDamage, entry.samples)
-        local adjustedDamage = math.max(0, projectedDamage - reserve)
-
-        return math.max(0, hp - adjustedDamage), predictedDPS
-    end
-
-    creepHPTracker[idx] = { hp = hp, time = now, dps = 0, samples = 0 }
-    return hp, 0
-end
-
---- Очистка мёртвых крипов
-local function cleanupTracker(now)
-    if now - lastTrackerCleanup < TRACKER_CLEANUP_INTERVAL then return end
-    lastTrackerCleanup = now
-    for idx, entry in pairs(creepHPTracker) do
-        if now - entry.time > 3.0 then
-            creepHPTracker[idx] = nil
-        end
-    end
-end
-
---- Задержка до попадания (cast point + время полёта)
-local function getHitDelay(hero, ability, creep, info)
-    local delay = getAbilityCastPoint(ability, info)
-
-    local projSpeed = getAbilityProjectileSpeedValue(ability, info)
-    if projSpeed > 0 then
-        local heroPos  = Entity.GetAbsOrigin(hero)
-        local creepPos = Entity.GetAbsOrigin(creep)
-        local dist     = (heroPos - creepPos):Length2D()
-        delay = delay + dist / projSpeed
-    end
-
-    delay = delay + getAbilityImpactDelay(ability, info)
-
-    return delay
-end
-
-local function getTargetLockDuration(hero, ability, creep, info)
-    local lockDuration = TARGET_COOLDOWN_MIN
-    local hitDelay = getHitDelay(hero, ability, creep, info)
-
-    if hitDelay > 0 then
-        lockDuration = math.max(lockDuration, hitDelay + 0.05)
-    end
-
-    local cooldownLength = getAbilityCooldownLength(ability)
-    if cooldownLength > 0 then
-        lockDuration = math.max(lockDuration, math.min(cooldownLength * 0.35, TARGET_COOLDOWN_MAX))
-    end
-
-    if info and info.targetCooldown and info.targetCooldown > 0 then
-        lockDuration = math.max(lockDuration, info.targetCooldown)
-    end
-
-    return math.min(lockDuration, TARGET_COOLDOWN_MAX)
-end
-
---------------------------------------------------------------------------------
--- AoE SCORING — считаем, сколько крипов убьёт AoE
---------------------------------------------------------------------------------
-
-local function getLineCastEndPosition(hero, ability, info, targetCreep)
-    local heroPos = Entity.GetAbsOrigin(hero)
-    local targetPos = Entity.GetAbsOrigin(targetCreep)
-    local direction = targetPos - heroPos
-    local directionLength = direction:Length2D()
-    if directionLength <= 0 then
-        return targetPos
-    end
-
-    local lineLength = (info and info.lineLength) or getAbilityCastRangeValue(ability)
-    if lineLength <= 0 then
-        lineLength = directionLength
-    else
-        lineLength = math.max(lineLength, directionLength)
-    end
-
-    return heroPos + direction * (lineLength / directionLength)
-end
-
-local function pointSegmentDistance2D(point, startPos, endPos)
-    local segment = endPos - startPos
-    local segmentX = segment.x or 0
-    local segmentY = segment.y or 0
-    local segmentLenSq = segmentX * segmentX + segmentY * segmentY
-    if segmentLenSq <= 0 then
-        return (point - startPos):Length2D()
-    end
-
-    local pointDir = point - startPos
-    local pointX = pointDir.x or 0
-    local pointY = pointDir.y or 0
-    local t = (pointX * segmentX + pointY * segmentY) / segmentLenSq
-    if t < 0 then
-        t = 0
-    elseif t > 1 then
-        t = 1
-    end
-
-    local closest = startPos + segment * t
-    return (point - closest):Length2D()
-end
-
-local function getCreepHpForAoECheck(hero, ability, info, creep, usePrediction)
-    local hp = Entity.GetHealth(creep) or 0
-    if not usePrediction then
-        return hp
-    end
-
-    return predictCreepHP(creep, getHitDelay(hero, ability, creep, info))
-end
-
-local function scoreLineProjectileKills(hero, ability, info, targetCreep, creeps, baseDmg, usePrediction)
-    local startPos = Entity.GetAbsOrigin(hero)
-    local endPos = getLineCastEndPosition(hero, ability, info, targetCreep)
-    local lineRadius = getAbilityLineRadiusValue(ability, info)
-    local kills = 0
-
-    for _, creep in ipairs(creeps) do
-        if Entity.IsAlive(creep) and not NPC.IsHero(creep) then
-            if info.excludePrimaryTarget and creep == targetCreep then
-                -- skip primary target
-            else
-                local creepPos = Entity.GetAbsOrigin(creep)
-                local hull = (NPC.GetHullRadius and NPC.GetHullRadius(creep)) or 0
-                local distanceToLine = pointSegmentDistance2D(creepPos, startPos, endPos)
-                if distanceToLine <= lineRadius + hull then
-                    local damage = applyResistance(baseDmg, ability, info, creep)
-                    local hitDelay = getHitDelay(hero, ability, creep, info)
-                    local secureDamage = getSecureSpellDamage(damage, info, hitDelay, usePrediction)
-                    local hp = getCreepHpForAoECheck(hero, ability, info, creep, usePrediction)
-                    if canSecureLastHit(secureDamage, hp) then
-                        kills = kills + 1
-                    end
-                end
-            end
-        end
-    end
-
-    return kills
-end
-
-local function scoreAoEKills(hero, ability, info, targetCreep, creeps, baseDmg, usePrediction)
-    if info.beh == "target" and not info.radius and not info.lineProjectile then return 1 end
-    if info.lineProjectile then
-        return scoreLineProjectileKills(hero, ability, info, targetCreep, creeps, baseDmg, usePrediction)
-    end
-
-    local aoeRadius = info.radius or 350
-    local center
-
-    if info.fixedRange then
-        local heroPos  = Entity.GetAbsOrigin(hero)
-        local creepPos = Entity.GetAbsOrigin(targetCreep)
-        local dir      = (creepPos - heroPos)
-        local len      = dir:Length2D()
-        if len > 0 then dir = dir * (info.fixedRange / len) end
-        center = heroPos + dir
-    elseif info.beh == "no_target" then
-        center = Entity.GetAbsOrigin(hero)
-    else
-        center = Entity.GetAbsOrigin(targetCreep)
-    end
-
-    local kills = 0
-    for _, creep in ipairs(creeps) do
-        if Entity.IsAlive(creep) and not NPC.IsHero(creep) then
-            local pos  = Entity.GetAbsOrigin(creep)
-            local dist = (pos - center):Length2D()
-            if info.excludePrimaryTarget and creep == targetCreep then
-                -- skip primary target
-            elseif dist <= aoeRadius then
-                local eDmg = applyResistance(baseDmg, ability, info, creep)
-                local hitDelay = getHitDelay(hero, ability, creep, info)
-                local secureDamage = getSecureSpellDamage(eDmg, info, hitDelay, usePrediction)
-                local hp   = getCreepHpForAoECheck(hero, ability, info, creep, usePrediction)
-                if canSecureLastHit(secureDamage, hp) then
-                    kills = kills + 1
-                end
-            end
-        end
-    end
-
-    return kills
-end
-
-local function evaluateCastOpportunity(hero, ability, info, creep, creeps, usePrediction, useAoE, baseDmg)
-    local damage = baseDmg or getAbilityDamage(hero, ability, info)
-    if damage <= 0 then
-        return nil
-    end
-
-    local effectiveDmg = applyResistance(damage, ability, info, creep)
-    local hp = Entity.GetHealth(creep) or 0
-    local hitDelay = getHitDelay(hero, ability, creep, info)
-    local predictedHP = hp
-    local secureDamage = effectiveDmg
-    local killSafetyMargin = 0
-    local requiredKillMargin = 0
-    local maxPredictionGap = 0
-    local predictionGap = 0
-
-    if usePrediction then
-        predictedHP = predictCreepHP(creep, hitDelay)
-    end
-
-    secureDamage, killSafetyMargin = getSecureSpellDamage(effectiveDmg, info, hitDelay, usePrediction)
-
-    if usePrediction and hitDelay > 0.05 then
-        requiredKillMargin = getRequiredPredictionKillMargin(info, hitDelay, effectiveDmg)
-    end
-
-    local killMargin = secureDamage - predictedHP
-    predictionGap = math.max(0, hp - secureDamage)
-    if usePrediction and hitDelay > 0.05 then
-        maxPredictionGap = getMaxPredictionGap(info, hitDelay, effectiveDmg)
-    end
-    local killAtImpact = canSecureLastHit(secureDamage, predictedHP) and killMargin >= requiredKillMargin
-    if killAtImpact and maxPredictionGap > 0 and predictionGap > maxPredictionGap then
-        killAtImpact = false
-    end
-    local allowImmediateKill = hitDelay <= 0.05
-    if not usePrediction and hitDelay <= 0.12 and not (info.delayedAoE or getAbilityImpactDelay(ability, info) > 0.05) then
-        allowImmediateKill = true
-    end
-    local immediateDamage = effectiveDmg
-    local immediateSafetyMargin = 0
-    if not allowImmediateKill then
-        immediateDamage, immediateSafetyMargin = getSecureSpellDamage(effectiveDmg, info, hitDelay, false)
-    end
-    local killNow = allowImmediateKill and canSecureLastHit(immediateDamage, hp, immediateSafetyMargin)
-
-    local aoeKills = 0
-    if useAoE and (info.radius or info.lineProjectile) then
-        aoeKills = scoreAoEKills(hero, ability, info, creep, creeps, damage, usePrediction)
-    end
-
-    local primaryKills = ((killAtImpact or killNow) and not info.excludePrimaryTarget) and 1 or 0
-    local extraAoEKills = math.max(0, aoeKills - primaryKills)
-    local chargeState = getAbilityChargeState(ability)
-    local reserveLastCharge = chargeState.hasCharges
-        and chargeState.max > 1
-        and chargeState.current > 0
-        and chargeState.current <= 1
-        and chargeState.restore > 1.0
-
-    return {
-        baseDmg = damage,
-        effectiveDmg = effectiveDmg,
-        secureDmg = secureDamage,
-        hp = hp,
-        predictedHP = predictedHP,
-        hitDelay = hitDelay,
-        killSafetyMargin = killSafetyMargin,
-        killMargin = killMargin,
-        requiredKillMargin = requiredKillMargin,
-        predictionGap = predictionGap,
-        maxPredictionGap = maxPredictionGap,
-        killAtImpact = killAtImpact,
-        killNow = killNow,
-        extraAoEKills = extraAoEKills,
-        chargeState = chargeState,
-        reserveLastCharge = reserveLastCharge,
-        canAoEKill = (info and info.allowAoEOnly and extraAoEKills > 0 and not reserveLastCharge) and true or false,
-    }
-end
-
---------------------------------------------------------------------------------
--- ANTI-CONFLICT HELPERS
+-- RANGE / CAST
 --------------------------------------------------------------------------------
 
 local function getAttackRange(hero)
-    if NPC.GetAttackRange then
-        local ok, v = pcall(NPC.GetAttackRange, hero)
-        if ok and v then return v end
-    end
-    do
-        local ok, v = pcall(function() return hero:GetAttackRange() end)
-        if ok and v then return v end
+    local ok, value = TryCall(NPC.GetAttackRange, hero)
+    if ok and type(value) == "number" then
+        return value
     end
     return 150
 end
 
-local function getAttackDamage(hero)
-    if NPC.GetTotalDamage then
-        local ok, v = pcall(NPC.GetTotalDamage, hero)
-        if ok and v and v > 0 then return v end
-    end
-    do
-        local ok, v = pcall(function() return hero:GetTotalDamage() end)
-        if ok and v and v > 0 then return v end
-    end
-    if NPC.GetMinDamage then
-        local ok, v = pcall(NPC.GetMinDamage, hero)
-        if ok and v and v > 0 then return v end
-    end
-    return 50
+local function isCreepInAttackRange(hero, creep)
+    local dist = (Entity.GetAbsOrigin(hero) - Entity.GetAbsOrigin(creep)):Length2D()
+    local heroHull = NPC.GetHullRadius(hero) or 0
+    local creepHull = NPC.GetHullRadius(creep) or 0
+    return dist <= getAttackRange(hero) + heroHull + creepHull + AUTO_ATTACK_RANGE_EPSILON
 end
 
-local function isHeroAttacking(hero)
-    if NPC.IsAttacking then
-        local ok, v = pcall(NPC.IsAttacking, hero)
-        if ok and v then return true end
-    end
-    do
-        local ok, v = pcall(function() return hero:IsAttacking() end)
-        if ok and v then return true end
-    end
-    if NPC.GetActivity then
-        local ok, act = pcall(NPC.GetActivity, hero)
-        if ok and act and Enum.GameActivity then
-            if act == Enum.GameActivity.ACT_DOTA_ATTACK
-                or act == Enum.GameActivity.ACT_DOTA_ATTACK2 then
-                return true
-            end
-        end
-    end
-    return false
-end
-
-local function canAutoAttackKill(hero, creep)
-    if not hero or not creep then
-        return false
-    end
-
-    local heroPos   = Entity.GetAbsOrigin(hero)
-    local creepPos  = Entity.GetAbsOrigin(creep)
-    local dist      = (heroPos - creepPos):Length2D()
-    local aaRange   = getAttackRange(hero)
-    local heroHull  = (NPC.GetHullRadius and NPC.GetHullRadius(hero)) or 0
-    local creepHull = (NPC.GetHullRadius and NPC.GetHullRadius(creep)) or 0
-
-    if dist > aaRange + heroHull + creepHull + AUTO_ATTACK_RANGE_EPSILON then return false end
-
-    local aaDmg = getAttackDamage(hero)
-    local armorMult = (NPC.GetArmorDamageMultiplier and NPC.GetArmorDamageMultiplier(creep)) or 1
-    aaDmg = aaDmg * armorMult
-
-    local hp = Entity.GetHealth(creep) or 0
-    return canSecureLastHit(aaDmg, hp)
-end
-
-local function isCreepInHeroAttackRange(hero, creep)
-    if not hero or not creep then
-        return false
-    end
-
-    local heroPos   = Entity.GetAbsOrigin(hero)
-    local creepPos  = Entity.GetAbsOrigin(creep)
-    local dist      = (heroPos - creepPos):Length2D()
-    local aaRange   = getAttackRange(hero)
-    local heroHull  = (NPC.GetHullRadius and NPC.GetHullRadius(hero)) or 0
-    local creepHull = (NPC.GetHullRadius and NPC.GetHullRadius(creep)) or 0
-
-    return dist <= aaRange + heroHull + creepHull + AUTO_ATTACK_RANGE_EPSILON
-end
-
---------------------------------------------------------------------------------
--- TARGETING HELPERS
---------------------------------------------------------------------------------
-
-local function isCreepInRange(hero, ability, creep, info)
-    local heroPos  = Entity.GetAbsOrigin(hero)
+local function isCreepInAbilityRange(hero, ability, creep, info)
+    local heroPos = Entity.GetAbsOrigin(hero)
     local creepPos = Entity.GetAbsOrigin(creep)
-    local dist     = (heroPos - creepPos):Length2D()
+    local dist = (heroPos - creepPos):Length2D()
 
-    -- SF razes: кольцо fixedRange ± radius
-    if info.fixedRange then
-        local r = info.radius or 250
-        return math.abs(dist - info.fixedRange) <= r
+    local fixed = getFixedRange(ability, info)
+    if fixed > 0 then
+        local r = getAoeRadius(ability, info)
+        if r <= 0 then r = 250 end
+        return math.abs(dist - fixed) <= r
     end
 
-    -- NO_TARGET: AoE
+    -- Forward slash (Echo Slash): length along facing + width. We face before cast.
+    local slashLen = getSlashLength(ability, info)
+    if slashLen > 0 then
+        local width = info.lineRadius or getAoeRadius(ability, info)
+        if width <= 0 then width = 150 end
+        return dist <= slashLen + width
+    end
+
     if info.beh == "no_target" then
-        local r = getAbilityAOERadiusValue(ability, info)
+        local r = getAoeRadius(ability, info)
         if r <= 0 then r = 350 end
         return dist <= r
     end
-
-    -- TARGET / POINT
-    local castRange = getAbilityCastRangeValue(ability)
+    local castRange = getCastRange(ability, info)
     if castRange <= 0 then castRange = 600 end
-
-    local heroHull  = (NPC.GetHullRadius and NPC.GetHullRadius(hero)) or 0
-    local creepHull = (NPC.GetHullRadius and NPC.GetHullRadius(creep)) or 0
-
+    local heroHull = NPC.GetHullRadius(hero) or 0
+    local creepHull = NPC.GetHullRadius(creep) or 0
     return dist <= castRange + heroHull + creepHull
 end
 
---- Повернуть героя в сторону крипа (MOVE_TO_DIRECTION + cast)
-local function faceCreep(hero, creepPos)
-    local ok, err = pcall(function()
-        local player = Players.GetLocal()
-        if not player then return end
-        Player.PrepareUnitOrders(
-            player,
-            Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_DIRECTION,
-            nil,
-            creepPos,
-            nil,
-            Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_HERO_ONLY,
-            hero,
-            false, false, false, false,
-            "ability_lasthit"
-        )
-    end)
-    if not ok then
-        dbg("faceCreep error: " .. tostring(err))
+local function getAbilitySearchRadius(ability, info)
+    local pad = 64
+    local fixed = getFixedRange(ability, info)
+    local aoe = getAoeRadius(ability, info)
+    if fixed > 0 then
+        if aoe <= 0 then aoe = 250 end
+        return fixed + aoe + pad
     end
+
+    local slashLen = getSlashLength(ability, info)
+    if slashLen > 0 then
+        local width = info.lineRadius or aoe
+        if width <= 0 then width = 150 end
+        return slashLen + width + pad
+    end
+
+    if info.beh == "no_target" then
+        if aoe <= 0 then aoe = 350 end
+        return aoe + pad
+    end
+    local castRange = getCastRange(ability, info)
+    if castRange <= 0 then castRange = 600 end
+    if info.lineProjectile then
+        return math.max(castRange, info.lineLength or castRange) + pad
+    end
+    return castRange + pad
 end
 
---- Каст способности
+local function isAbilitySelected(info)
+    if not UI.Abilities then
+        return true
+    end
+    local ok, selected = TryCall(function() return UI.Abilities:Get(info.name) end)
+    if ok and selected == false then
+        return false
+    end
+    return true
+end
+
+local function getHeroSpellSearchRange(hero, abilityInfos)
+    local maxRange = 0
+    for _, info in ipairs(abilityInfos) do
+        if isAbilitySelected(info) then
+            local ability = getAbilityByName(hero, info.name)
+            if ability and (Ability.GetLevel(ability) or 0) > 0 then
+                local range = getAbilitySearchRadius(ability, info)
+                if range > maxRange then
+                    maxRange = range
+                end
+            end
+        end
+    end
+    return maxRange
+end
+
+local function faceCreep(hero, creepPos)
+    local player = Players.GetLocal()
+    if not player then
+        return
+    end
+    Player.PrepareUnitOrders(
+        player,
+        Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_DIRECTION,
+        nil,
+        creepPos,
+        nil,
+        Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_HERO_ONLY,
+        hero,
+        false, false, false, false,
+        ORDER_ID
+    )
+end
+
+local function shouldFace(info)
+    if info.needFace or info.fixedRange or info.fixedRangeKey then
+        return true
+    end
+    return info.beh == "point" or info.beh == "no_target"
+end
+
 local function castOnCreep(hero, ability, creep, info)
     local creepPos = Entity.GetAbsOrigin(creep)
-
+    if shouldFace(info) then
+        faceCreep(hero, creepPos)
+    end
     if info.beh == "target" then
-        Ability.CastTarget(ability, creep, false, false, false, "ability_lasthit")
+        Ability.CastTarget(ability, creep, false, false, false, ORDER_ID)
     elseif info.beh == "point" then
-        faceCreep(hero, creepPos)
-        Ability.CastPosition(ability, creepPos, false, false, false, "ability_lasthit")
+        Ability.CastPosition(ability, creepPos, false, false, false, ORDER_ID)
     elseif info.beh == "no_target" then
-        faceCreep(hero, creepPos)
-        Ability.CastNoTarget(ability, false, false, false, "ability_lasthit")
+        Ability.CastNoTarget(ability, false, false, false, ORDER_ID)
     end
-end
-
---- Фильтры крипов
-local function getMultiComboValue(widget, item)
-    if not widget or not item then return nil end
-    local ok, value = pcall(function() return widget:Get(item) end)
-    if ok then return value end
-    return nil
-end
-
-local function isConditionEnabled(item, legacyWidget, default)
-    local value = getMultiComboValue(UI.Conditions, conditionLabel(item))
-    if value ~= nil then return value end
-    if legacyWidget and legacyWidget.Get then
-        return legacyWidget:Get()
-    end
-    return default or false
-end
-
-local function isCreepFilterEnabled(item, legacyWidget, default)
-    local value = getMultiComboValue(UI.CreepTypes, creepFilterLabel(item))
-    if value ~= nil then return value end
-    if legacyWidget and legacyWidget.Get then
-        return legacyWidget:Get()
-    end
-    return default or false
-end
-
-local function isCreepValid(creep)
-    if not Entity.IsAlive(creep) then return false end
-    if NPC.IsHero(creep) or (NPC.IsConsideredHero and NPC.IsConsideredHero(creep)) then return false end
-    if NPC.IsInvulnerable and NPC.IsInvulnerable(creep) then return false end
-    if (NPC.IsBuilding and NPC.IsBuilding(creep)) or (NPC.IsTower and NPC.IsTower(creep)) then return false end
-    if (NPC.IsWard and NPC.IsWard(creep)) or (NPC.IsCourier and NPC.IsCourier(creep)) then return false end
-
-    local unitName = NPC.GetUnitName(creep) or ""
-
-    if unitName:find("siege") then
-        return isCreepFilterEnabled(CREEP_FILTER_ITEMS.siege, UI.Siege, false)
-    end
-
-    if isLaneCreepUnit(creep) then
-        if isRangedUnit(creep) then
-            return isCreepFilterEnabled(CREEP_FILTER_ITEMS.ranged, UI.RangedCreeps, true)
-        end
-        return isCreepFilterEnabled(CREEP_FILTER_ITEMS.melee, UI.LaneCreeps, true)
-    end
-
-    if isNeutralUnit(creep) then
-        return isCreepFilterEnabled(CREEP_FILTER_ITEMS.neutral, UI.NeutralCreeps, false)
-    end
-
-    if isCreepUnit(creep) then
-        return isCreepFilterEnabled(CREEP_FILTER_ITEMS.melee, UI.LaneCreeps, true)
-    end
-
-    return false
-end
-
---- Приоритет крипа (ranged > melee, low HP = выше)
-local function creepPriority(creep, hp)
-    local w = 0
-    local unitName = NPC.GetUnitName(creep) or ""
-
-    if isRangedUnit(creep) then
-        w = w + 30  -- ranged дают больше золота
-    end
-    if unitName:find("siege") then
-        w = w + 10
-    end
-
-    -- Чем меньше HP, тем приоритетнее
-    w = w + math.max(0, 100 - hp)
-
-    return w
 end
 
 --------------------------------------------------------------------------------
--- SKILL SELECTOR
+-- CREEPS / FILTERS
+--------------------------------------------------------------------------------
+
+local function getMultiComboValue(widget, item)
+    if not widget or not item then
+        return nil
+    end
+    local ok, value = TryCall(function() return widget:Get(item) end)
+    if ok then
+        return value
+    end
+    return nil
+end
+
+local function isConditionEnabled(item, default)
+    local value = getMultiComboValue(UI.Conditions, conditionLabel(item))
+    if value ~= nil then
+        return value
+    end
+    return default
+end
+
+local function isCreepFilterEnabled(item, default)
+    local value = getMultiComboValue(UI.CreepTypes, creepFilterLabel(item))
+    if value ~= nil then
+        return value
+    end
+    return default
+end
+
+local function isCreepValid(creep)
+    if not creep or not Entity.IsAlive(creep) or NPC.IsHero(creep) then
+        return false
+    end
+    -- Never last-hit bosses: Tormentor (npc_dota_miniboss), Roshan, other TYPE_BOSS.
+    if NPC.IsTormentor(creep) or NPC.IsRoshan(creep) or NPC.IsBoss(creep) then
+        return false
+    end
+    local unitName = NPC.GetUnitName(creep) or ""
+    if unitName == "npc_dota_miniboss"
+        or unitName:find("roshan", 1, true)
+        or unitName:find("miniboss", 1, true) then
+        return false
+    end
+    if unitName:find("siege") then
+        return isCreepFilterEnabled(CREEP_FILTER_ITEMS.siege, false)
+    end
+    if NPC.IsNeutral(creep) then
+        return isCreepFilterEnabled(CREEP_FILTER_ITEMS.neutral, false)
+    end
+    if NPC.IsRanged(creep) then
+        return isCreepFilterEnabled(CREEP_FILTER_ITEMS.ranged, true)
+    end
+    if NPC.IsCreep(creep) or NPC.IsLaneCreep(creep) then
+        return isCreepFilterEnabled(CREEP_FILTER_ITEMS.melee, true)
+    end
+    return false
+end
+
+local function creepPriority(creep, hp)
+    local score = math.max(0, 120 - hp)
+    if NPC.IsRanged(creep) then
+        score = score + 25
+    end
+    local unitName = NPC.GetUnitName(creep) or ""
+    if unitName:find("siege") then
+        score = score + 8
+    end
+    return score
+end
+
+local function isHeroBusyAttacking(hero)
+    return NPC.IsAttacking(hero) and true or false
+end
+
+local function canAutoAttackKill(hero, creep)
+    if not isCreepInAttackRange(hero, creep) then
+        return false
+    end
+    local hp = Entity.GetHealth(creep) or 0
+    local dmg = getAttackDamage(hero)
+    local ok, mult = TryCall(NPC.GetArmorDamageMultiplier, creep)
+    if ok and type(mult) == "number" then
+        dmg = dmg * mult
+    end
+    return dmg >= hp
+end
+
+--------------------------------------------------------------------------------
+-- MENU
 --------------------------------------------------------------------------------
 
 local function getSpellIcon(abilityName)
     return "panorama/images/spellicons/" .. abilityName .. "_png.vtex_c"
 end
 
-local buildSkillsSelector = nil
-
-local function styleMenuWidget(widget, text, tooltip, icon, image)
-    if not widget then return widget end
-
+local function styleMenuWidget(widget, text, tooltip, icon)
+    if not widget then
+        return widget
+    end
     if text and widget.ForceLocalization then
         widget:ForceLocalization(text)
-    end
-    if image and widget.Image then
-        widget:Image(image)
     end
     if icon and widget.Icon then
         widget:Icon(icon)
@@ -2437,602 +1395,282 @@ local function styleMenuWidget(widget, text, tooltip, icon, image)
     if tooltip and widget.ToolTip then
         widget:ToolTip(tooltip)
     end
-
     return widget
 end
 
-local unpackArgs = unpack or table.unpack
+local unpackArgs = table.unpack
+local cachedHoldBind = nil
+local cachedHoldBindLabel = nil
 local GLOBAL_BIND_WIDGET_CANDIDATES = {
-    {
-        label = "global-key",
-        args = { "Creeps", "Main", "[v2]Last Hit Helper", "Main", "Global Settings", "Key" },
-    },
-    {
-        label = "global-hotkey",
-        args = { "Creeps", "Main", "[v2]Last Hit Helper", "Main", "Global Settings", "Hotkey" },
-    },
-    {
-        label = "global-additional-hotkey-7",
-        args = { "Creeps", "Main", "[v2]Last Hit Helper", "Main", "Global Settings", "Additional Settings", "Hotkey" },
-    },
-    {
-        label = "global-additional-hotkey-8",
-        args = { "Creeps", "Main", "[v2]Last Hit Helper", "Main", "Global Settings", "Additional Settings", "Additional Settings", "Hotkey" },
-    },
+    { label = "lhh-key", args = { "Creeps", "Main", "[v2]Last Hit Helper", "Main", "Global Settings", "Key" } },
+    { label = "lhh-hotkey", args = { "Creeps", "Main", "[v2]Last Hit Helper", "Main", "Global Settings", "Hotkey" } },
+    { label = "lhh-additional-hotkey", args = { "Creeps", "Main", "[v2]Last Hit Helper", "Main", "Global Settings", "Additional Settings", "Hotkey" } },
 }
-local GLOBAL_BIND_TYPE_CANDIDATES = {
-    {
-        label = "global-bind-type",
-        args = { "Creeps", "Main", "[v2]Last Hit Helper", "Main", "Global Settings", "Bind Type" },
-    },
-}
-
-local function getEnumName(enumTable, value)
-    if not enumTable or value == nil then
-        return tostring(value)
-    end
-
-    for name, enumValue in pairs(enumTable) do
-        if enumValue == value then
-            return tostring(name)
-        end
-    end
-
-    return tostring(value)
-end
-
-local function probeMenuWidget(widget)
-    local probe = {
-        exists = widget ~= nil,
-        hasGet = widget and widget.Get ~= nil or false,
-        hasGetKey = widget and widget.GetKey ~= nil or false,
-        hasGetItem = widget and widget.GetItem ~= nil or false,
-        typeName = "nil",
-        typeValue = nil,
-        getValue = nil,
-        getKeyValue = nil,
-        getItemValue = nil,
-    }
-
-    if not widget then
-        return probe
-    end
-
-    if widget.Type and Enum and Enum.WidgetType then
-        local ok, widgetType = pcall(function() return widget:Type() end)
-        if ok then
-            probe.typeValue = widgetType
-            probe.typeName = getEnumName(Enum.WidgetType, widgetType)
-        else
-            probe.typeName = "type_error"
-        end
-    end
-
-    if widget.Get then
-        local ok, value = pcall(function() return widget:Get() end)
-        if ok then
-            probe.getValue = value
-        else
-            probe.getValue = "get_error"
-        end
-    end
-
-    if widget.GetKey then
-        local ok, value = pcall(function() return widget:GetKey() end)
-        if ok then
-            probe.getKeyValue = value
-        else
-            probe.getKeyValue = "getkey_error"
-        end
-    end
-
-    if widget.GetItem then
-        local ok, value = pcall(function() return widget:GetItem() end)
-        if ok then
-            probe.getItemValue = value
-        else
-            probe.getItemValue = "getitem_error"
-        end
-    end
-
-    return probe
-end
 
 local function isValidBindWidget(widget)
-    local probe = probeMenuWidget(widget)
-    local typeName = string.lower(tostring(probe.typeName or ""))
-    if string.find(typeName, "bind", 1, true) then
+    if not widget then
+        return false
+    end
+    -- CMenuBind: IsDown / IsPressed / Get (no GetKey in stubs).
+    if widget.IsDown or widget.IsPressed then
         return true
     end
-
-    if probe.hasGetKey then
-        return true
+    if widget.Type and Enum and Enum.WidgetType then
+        local ok, widgetType = TryCall(function() return widget:Type() end)
+        if ok and widgetType ~= nil then
+            for name, enumValue in pairs(Enum.WidgetType) do
+                if enumValue == widgetType and string.find(string.lower(tostring(name)), "bind", 1, true) then
+                    return true
+                end
+            end
+        end
     end
-
-    return type(probe.getValue) == "number"
+    return false
 end
 
 local function findMenuWidgetByCandidates(candidates, validator)
-    if not (Menu and Menu.Find) then
+    if not Menu or not Menu.Find then
         return nil, nil
     end
-
     for _, candidate in ipairs(candidates) do
-        local ok, widget = pcall(Menu.Find, unpackArgs(candidate.args))
+        local ok, widget = TryCall(Menu.Find, unpackArgs(candidate.args))
         if ok and validator(widget) then
             return widget, candidate.label
         end
     end
-
     return nil, nil
 end
 
 local function getGlobalHoldBindWidget()
+    if cachedHoldBind and isValidBindWidget(cachedHoldBind) then
+        return cachedHoldBind, cachedHoldBindLabel
+    end
+
     local widget, label = findMenuWidgetByCandidates(GLOBAL_BIND_WIDGET_CANDIDATES, isValidBindWidget)
-    if widget then
-        return widget, label
-    end
-
-    return UI.Key, "ui-key-fallback"
+    cachedHoldBind = widget
+    cachedHoldBindLabel = label
+    return widget, label
 end
 
-local function getGlobalBindTypeWidget()
-    return findMenuWidgetByCandidates(GLOBAL_BIND_TYPE_CANDIDATES, function(widget)
-        return widget and widget.GetItem ~= nil
-    end)
-end
-
-local function getMenuBindKeyCode(widget)
-    if not widget then
-        return nil
-    end
-
-    if widget.GetKey then
-        local ok, keyCode = pcall(function() return widget:GetKey() end)
-        if ok then
-            return keyCode
-        end
-    end
-
-    if widget.Get then
-        local ok, value = pcall(function() return widget:Get() end)
-        if ok and type(value) == "number" then
-            return value
-        end
-    end
-
-    return nil
-end
-
-local function getMenuBindMode()
-    local widget = getGlobalBindTypeWidget()
-    if not widget or not widget.GetItem then
-        return "hold"
-    end
-
-    local ok, item = pcall(function() return widget:GetItem() end)
-    if not ok or type(item) ~= "string" then
-        return "hold"
-    end
-
-    local mode = string.lower(item)
-    if string.find(mode, "toggle", 1, true) then
-        return "toggle"
-    end
-
-    return "hold"
-end
-
+--- Hold-key for Last Hit Helper global Key bind (CMenuBind.IsDown).
 local function isMenuBindPressed(widget)
     if not widget then
         return false
     end
 
-    if widget.Get then
-        local ok, isPressed = pcall(function() return widget:Get() end)
+    if widget.IsDown then
+        local ok, isDown = TryCall(function() return widget:IsDown() end)
+        if ok and type(isDown) == "boolean" then
+            return isDown
+        end
+    end
+
+    if widget.IsPressed then
+        local ok, isPressed = TryCall(function() return widget:IsPressed() end)
         if ok and type(isPressed) == "boolean" then
             return isPressed
         end
     end
 
-    local keyCode = getMenuBindKeyCode(widget)
-    if keyCode and Input and Input.IsKeyDown then
-        if getMenuBindMode() == "toggle" and widget.Get then
-            local ok, isActive = pcall(function() return widget:Get() end)
-            if ok then
-                return isActive and true or false
-            end
-        end
-
-        local ok, isDown = pcall(Input.IsKeyDown, keyCode)
-        if ok then
-            return isDown and true or false
+    -- Some binds expose hold state via Get() boolean.
+    if widget.Get then
+        local ok, value = TryCall(function() return widget:Get() end)
+        if ok and type(value) == "boolean" then
+            return value
         end
     end
 
     return false
 end
 
-local function addGearSection(gear, text, image)
-    if not gear then return nil end
-
-    local label = gear:Label(text)
-    if label and image and label.Image then
-        label:Image(image)
+local function refreshAbilitiesWidgetState()
+    if not UI.Abilities then
+        return
     end
-
-    return label
+    styleMenuWidget(UI.Abilities, t("abilities"), t("abilities_tip"), Icons.abilities)
 end
 
-local function refreshSkillsWidgetState()
-    if not UI.Skills then return end
-
-    styleMenuWidget(
-        UI.Skills,
-        "Нюк-пул героя",
-        "Какие спеллы можно тратить на ластхит. Список обновляется под текущего героя.",
-        "\u{f0d0}",
-        nil
-    )
-
-    if UI.Enable then
-        UI.Skills:Disabled(not UI.Enable:Get())
-    end
+local function abilityPrefKey(abilityName)
+    return ABILITY_PREF_PREFIX .. tostring(abilityName)
 end
 
-local function buildSkillsSelectorLegacyV20(heroName)
-    if not menuGroup then return end
-    local abilities = HERO_ABILITIES[heroName]
-    if not abilities then return end
+--- Cached / Config preference. nil = never chosen → default ON.
+local function loadAbilityPref(abilityName)
+    if not abilityName or abilityName == "none" then
+        return nil
+    end
+    if abilitiesPrefs[abilityName] ~= nil then
+        return abilitiesPrefs[abilityName]
+    end
+    local ok, stored = TryCall(function()
+        return Config.ReadInt(CONFIG_SECTION, abilityPrefKey(abilityName), -1)
+    end)
+    if ok and type(stored) == "number" and stored >= 0 then
+        abilitiesPrefs[abilityName] = stored == 1
+        return abilitiesPrefs[abilityName]
+    end
+    return nil
+end
 
-    local previousState = {}
-    if UI.Skills then
-        for _, info in ipairs(abilities) do
-            local ok, val = pcall(function() return UI.Skills:Get(info.name) end)
-            if ok then previousState[info.name] = val end
+local function saveAbilityPref(abilityName, enabled)
+    if not abilityName or abilityName == "none" then
+        return
+    end
+    local on = enabled == true
+    abilitiesPrefs[abilityName] = on
+    TryCall(function()
+        Config.WriteInt(CONFIG_SECTION, abilityPrefKey(abilityName), on and 1 or 0)
+    end)
+end
+
+local function isAbilityPrefEnabled(abilityName)
+    local pref = loadAbilityPref(abilityName)
+    if pref ~= nil then
+        return pref
+    end
+    return true
+end
+
+local function syncAbilitiesPrefsFromWidget()
+    if not UI.Abilities or not UI.Abilities.Get then
+        return
+    end
+    local listed = nil
+    if UI.Abilities.List then
+        local okList, value = TryCall(function() return UI.Abilities:List() end)
+        if okList and type(value) == "table" then
+            listed = value
         end
+    end
+    if not listed then
+        return
+    end
+    for _, itemId in ipairs(listed) do
+        if itemId and itemId ~= "none" then
+            local okGet, enabled = TryCall(function() return UI.Abilities:Get(itemId) end)
+            if okGet and type(enabled) == "boolean" then
+                saveAbilityPref(itemId, enabled)
+            end
+        end
+    end
+end
+
+local function applyAbilitiesPrefsToWidget()
+    if not UI.Abilities or not UI.Abilities.Set or not UI.Abilities.List then
+        return
+    end
+    local okList, listed = TryCall(function() return UI.Abilities:List() end)
+    if not okList or type(listed) ~= "table" then
+        return
+    end
+    for _, itemId in ipairs(listed) do
+        if itemId and itemId ~= "none" then
+            local enabled = isAbilityPrefEnabled(itemId)
+            TryCall(function()
+                UI.Abilities:Set(itemId, enabled)
+            end)
+        end
+    end
+end
+
+local function bindAbilitiesPrefCallback()
+    if abilitiesCallbackBound or not UI.Abilities or not UI.Abilities.SetCallback then
+        return
+    end
+    UI.Abilities:SetCallback(function()
+        syncAbilitiesPrefsFromWidget()
+    end, false)
+    abilitiesCallbackBound = true
+end
+
+local function buildAbilitiesSelector(heroName, abilities, signature)
+    if not menuGroup or not abilities then
+        return
+    end
+
+    -- Keep live toggles before list rebuild (hero change / new skill level).
+    if abilitiesUiReady then
+        syncAbilitiesPrefsFromWidget()
     end
 
     local items = {}
+    local seen = {}
     for _, info in ipairs(abilities) do
-        local enabled = previousState[info.name]
-        if enabled == nil then enabled = true end
-        items[#items + 1] = {
-            info.name,
-            getSpellIcon(info.name),
-            enabled and true or false,
-        }
-    end
-
-    if UI.Skills and UI.Skills.Update then
-        UI.Skills:Update(items, true)
-    else
-        UI.Skills = menuGroup:MultiSelect("Способности", items, true)
-    end
-
-    refreshSkillsWidgetState()
-    currentHeroName = heroName
-end
-
---------------------------------------------------------------------------------
--- MENU
---------------------------------------------------------------------------------
-
-local function legacy_OnScriptsLoaded_v20()
-    local group = Menu.Create(
-        "Creeps", "Main", "[v2]Last Hit Helper", "Main", "Skill LastHit"
-    )
-    menuGroup = group
-
-    UI.Enable = group:Switch("Включить", false)
-    UI.Enable:Image("panorama/images/spellicons/zuus_arc_lightning_png.vtex_c")
-
-    UI.Key = group:Bind("Клавиша", Enum.ButtonCode.KEY_V)
-    UI.Key:ToolTip("Зажмите для авто-добития способностями")
-
-    local gear = UI.Enable:Gear("Настройки")
-
-    UI.Debug         = gear:Switch("Дебаг-лог", false)
-    UI.Buffer        = gear:Slider("Буфер HP",        -20, 60, 5, "%d")
-    UI.MinMana       = gear:Slider("Мин. мана %%",      0, 80, 15, "%d%%")
-    UI.SearchRange   = gear:Slider("Радиус поиска",   400, 1200, 900, "%d")
-    UI.SmartPriority = gear:Switch("Умный приоритет", true)
-    UI.SmartPriority:ToolTip("Не кастовать, если крип добивается обычным ударом")
-    UI.PredictHP     = gear:Switch("Предсказание HP", true)
-    UI.PredictHP:ToolTip("Учитывать урон союзников по крипу при расчёте")
-    UI.AoEMode       = gear:Switch("AoE приоритет", true)
-    UI.AoEMode:ToolTip("Предпочитать AoE-каст, убивающий больше крипов")
-    UI.LaneCreeps    = gear:Switch("Лейн крипы",  true)
-    UI.RangedCreeps  = gear:Switch("Дальние крипы", true)
-    UI.Siege         = gear:Switch("Осадные крипы", false)
-    UI.NeutralCreeps = gear:Switch("Нейтральные крипы", false)
-
-    UI.Enable:SetCallback(function()
-        local on = UI.Enable:Get()
-        UI.Buffer:Disabled(not on)
-        UI.MinMana:Disabled(not on)
-        UI.SearchRange:Disabled(not on)
-        UI.SmartPriority:Disabled(not on)
-        UI.PredictHP:Disabled(not on)
-        UI.AoEMode:Disabled(not on)
-        UI.LaneCreeps:Disabled(not on)
-        UI.RangedCreeps:Disabled(not on)
-        UI.Siege:Disabled(not on)
-        UI.NeutralCreeps:Disabled(not on)
-    end, true)
-
-    Log.Write(DEBUG_PREFIX .. "Menu v2.0 initialized OK")
-end
-
---------------------------------------------------------------------------------
--- ACTIVE MENU OVERRIDES
---------------------------------------------------------------------------------
-
-local function buildSkillsSelectorLegacyV21(heroName)
-    if not menuGroup then return end
-    local abilities = HERO_ABILITIES[heroName]
-    if not abilities then return end
-
-    local previousState = {}
-    if UI.Skills then
-        for _, info in ipairs(abilities) do
-            local ok, val = pcall(function() return UI.Skills:Get(info.name) end)
-            if ok then previousState[info.name] = val end
-        end
-    end
-
-    local items = {}
-    for _, info in ipairs(abilities) do
-        local enabled = previousState[info.name]
-        if enabled == nil then enabled = true end
-        items[#items + 1] = {
-            info.name,
-            getSpellIcon(info.name),
-            enabled and true or false,
-        }
-    end
-
-    if UI.Skills and UI.Skills.Update then
-        UI.Skills:Update(items, true)
-    else
-        UI.Skills = menuGroup:MultiSelect("Нюк-пул героя", items, true)
-    end
-
-    refreshSkillsWidgetState()
-    currentHeroName = heroName
-end
-
-refreshSkillsWidgetState = function()
-    if not UI.Skills then return end
-
-    styleMenuWidget(
-        UI.Skills,
-        t("spells"),
-        t("spells_tip"),
-        "\u{f0d0}",
-        nil
-    )
-
-    if UI.Enable then
-        UI.Skills:Disabled(not UI.Enable:Get())
-    end
-end
-
-buildSkillsSelector = function(heroName, abilities, signature)
-    if not menuGroup or not abilities or #abilities == 0 then return end
-    local previousState = {}
-    if UI.Skills then
-        for _, info in ipairs(abilities) do
-            local ok, val = pcall(function() return UI.Skills:Get(info.name) end)
-            if ok then previousState[info.name] = val end
-        end
-    end
-
-    local items = {}
-    local seenNames = {}
-    for _, info in ipairs(abilities) do
-        if not seenNames[info.name] then
-            seenNames[info.name] = true
-            local enabled = previousState[info.name]
-            if enabled == nil then enabled = true end
+        if info.name and not seen[info.name] then
+            seen[info.name] = true
+            -- Default ON; honor Config / previous user choice.
+            local enabled = isAbilityPrefEnabled(info.name)
             items[#items + 1] = {
                 info.name,
                 getSpellIcon(info.name),
-                enabled and true or false,
+                enabled,
             }
         end
     end
 
-    if UI.Skills and UI.Skills.Update then
-        UI.Skills:Update(items, true)
-    else
-        UI.Skills = menuGroup:MultiSelect(t("spells"), items, true)
+    if #items == 0 then
+        items[1] = { "none", getSpellIcon("invoker_empty1"), false }
     end
 
-    refreshSkillsWidgetState()
+    if UI.Abilities and UI.Abilities.Update then
+        -- saveToConfig=false: do not let Update overwrite user prefs with rebuild.
+        -- Persistence is Config.WriteInt via callback / apply below.
+        UI.Abilities:Update(items, true, false)
+    else
+        UI.Abilities = menuGroup:MultiSelect(t("abilities"), items, true)
+        abilitiesCallbackBound = false
+    end
+
+    applyAbilitiesPrefsToWidget()
+    bindAbilitiesPrefCallback()
+    refreshAbilitiesWidgetState()
+    abilitiesUiReady = true
     currentHeroName = heroName
     currentHeroAbilitySignature = signature
 end
 
-local function legacy_OnScriptsLoaded_v21()
-    local group = Menu.Create(
-        "Creeps", "Main", "[v2]Last Hit Helper", "Main", "Skill LastHit"
-    )
-    menuGroup = group
-
-    UI.Enable = group:Switch("Врубить Spell CS", false)
-    styleMenuWidget(
-        UI.Enable,
-        "Врубить Spell CS",
-        "Автодобив спеллами. Пока держишь хоткей, скрипт ищет лучший нюк под ластхит.",
-        nil,
-        getSpellIcon("nevermore_shadowraze2")
-    )
-
-    UI.Key = group:Bind("Холд для добива", Enum.ButtonCode.KEY_V, getSpellIcon("zuus_arc_lightning"))
-    styleMenuWidget(
-        UI.Key,
-        "Холд для добива",
-        "Зажми кнопку, когда хочешь отдать крипа нюком, а не с руки.",
-        nil,
-        nil
-    )
-
-    local gear = UI.Enable:Gear("Фарм-панель")
-    UI.SettingsGear = gear
-
-    addGearSection(gear, "Линия и тайминг", getSpellIcon("lina_dragon_slave"))
-    UI.Buffer = gear:Slider("Добивочный запас", -20, 60, 5, "%d")
-    UI.MinMana = gear:Slider("Сейв маны", 0, 80, 15, "%d%%")
-    UI.SearchRange = gear:Slider("Радиус фарма", 400, 1200, 900, "%d")
-
-    addGearSection(gear, "Поведение на линии", getSpellIcon("shadow_shaman_ether_shock"))
-    UI.SmartPriority = gear:Switch("Не воровать у тычки", true)
-    UI.PredictHP = gear:Switch("Чекать входящий урон", true)
-    UI.AoEMode = gear:Switch("Жадничать на пачку", true)
-
-    addGearSection(gear, "Каких крипов резать", getSpellIcon("leshrac_split_earth"))
-    UI.LaneCreeps = gear:Switch("Лейн-милишники", true)
-    UI.RangedCreeps = gear:Switch("Лейн-ренджи", true)
-    UI.Siege = gear:Switch("Катапульты", false)
-    UI.NeutralCreeps = gear:Switch("Нейтралы", false)
-
-    addGearSection(gear, "Тесты и лог", getSpellIcon("tinker_laser"))
-    UI.Debug = gear:Switch("Спамить в лог", false)
-
-    styleMenuWidget(UI.Buffer, "Добивочный запас", "Сколько HP можно накинуть сверху, чтобы нюк не мисснул добив.", "\u{f21e}", nil)
-    styleMenuWidget(UI.MinMana, "Сейв маны", "Ниже этого процента скрипт перестанет тратить ману на фарм.", "\u{f043}", nil)
-    styleMenuWidget(UI.SearchRange, "Радиус фарма", "На каком расстоянии искать крипов под spell CS.", "\u{f140}", nil)
-    styleMenuWidget(UI.SmartPriority, "Не воровать у тычки", "Не жать спелл, если крип и так падает от обычной тычки героя.", "\u{f00c}", nil)
-    styleMenuWidget(UI.PredictHP, "Чекать входящий урон", "Учитывать тычки крипов и союзников, чтобы точнее ловить тайминг добива.", "\u{f06e}", nil)
-    styleMenuWidget(UI.AoEMode, "Жадничать на пачку", "Если можно срезать несколько крипов одним кастом, приоритет уйдёт в AoE.", "\u{f0c0}", nil)
-    styleMenuWidget(UI.LaneCreeps, "Лейн-милишники", "Разрешить добивать ближних крипов с линии.", "\u{f00c}", nil)
-    styleMenuWidget(UI.RangedCreeps, "Лейн-ренджи", "Разрешить добивать дальников. Обычно это самый жирный приоритет по голде.", "\u{f00c}", nil)
-    styleMenuWidget(UI.Siege, "Катапульты", "Разрешить добивать осадных крипов спеллами.", "\u{f00c}", nil)
-    styleMenuWidget(UI.NeutralCreeps, "Нейтралы", "Подключить нейтралов к spell CS, если фармишь лес спеллами.", "\u{f6ee}", nil)
-    styleMenuWidget(UI.Debug, "Спамить в лог", "Писать в лог расчёты урона, предикт HP и выбранный каст.", "\u{f06e}", nil)
-
-    UI.Enable:SetCallback(function()
-        local on = UI.Enable:Get()
-        UI.Key:Disabled(not on)
-        UI.Buffer:Disabled(not on)
-        UI.MinMana:Disabled(not on)
-        UI.SearchRange:Disabled(not on)
-        UI.SmartPriority:Disabled(not on)
-        UI.PredictHP:Disabled(not on)
-        UI.AoEMode:Disabled(not on)
-        UI.LaneCreeps:Disabled(not on)
-        UI.RangedCreeps:Disabled(not on)
-        UI.Siege:Disabled(not on)
-        UI.NeutralCreeps:Disabled(not on)
-        UI.Debug:Disabled(not on)
-        if UI.Skills then
-            UI.Skills:Disabled(not on)
-        end
-    end, true)
-
-    refreshSkillsWidgetState()
-    Log.Write(DEBUG_PREFIX .. "Menu v2.1 styled UI initialized OK")
+--- Always keep Abilities list in sync with local hero (bind not required).
+local function syncAbilitiesUi(hero)
+    if not hero or not menuGroup then
+        return
+    end
+    local heroName = NPC.GetUnitName(hero)
+    local abilities, signature = getResolvedHeroAbilityInfos(hero)
+    if heroName ~= currentHeroName or signature ~= currentHeroAbilitySignature then
+        buildAbilitiesSelector(heroName, abilities or {}, signature)
+    end
 end
 
-local function legacy_OnScriptsLoaded_v22()
-    local group = Menu.Create(
-        "Creeps", "Main", "[v2]Last Hit Helper", "Main", "Skill LastHit"
-    )
-    menuGroup = group
-
-    UI.Enable = group:Switch("Включить", false)
-    styleMenuWidget(
-        UI.Enable,
-        "Включить",
-        "Автодобив спеллами. Работает, пока держишь хоткей.",
-        "\u{f0e7}",
-        nil
-    )
-
-    UI.Key = group:Bind("Хоткей", Enum.ButtonCode.KEY_V)
-    styleMenuWidget(
-        UI.Key,
-        "Хоткей",
-        "Зажми кнопку, когда хочешь отдать крипа нюком.",
-        "\u{f11c}",
-        nil
-    )
-
-    local gear = UI.Enable:Gear("Настройки")
-    UI.SettingsGear = gear
-
-    UI.Conditions = gear:MultiCombo("Условия", {
-        CONDITION_ITEMS.smart,
-        CONDITION_ITEMS.predict,
-        CONDITION_ITEMS.aoe,
-    }, {
-        CONDITION_ITEMS.smart,
-        CONDITION_ITEMS.predict,
-        CONDITION_ITEMS.aoe,
-    })
-    UI.CreepTypes = gear:MultiCombo("Крипы", {
-        CREEP_FILTER_ITEMS.melee,
-        CREEP_FILTER_ITEMS.ranged,
-        CREEP_FILTER_ITEMS.neutral,
-        CREEP_FILTER_ITEMS.siege,
-    }, {
-        CREEP_FILTER_ITEMS.melee,
-        CREEP_FILTER_ITEMS.ranged,
-    })
-    UI.SearchRange = gear:Slider("Радиус", 400, 1200, 900, "%d")
-    UI.MinMana = gear:Slider("Мана %", 0, 80, 15, "%d%%")
-    UI.Buffer = gear:Slider("Запас HP", -20, 60, 5, "%d")
-    UI.Debug = gear:Switch("Лог", false)
-
-    styleMenuWidget(UI.Conditions, "Условия", "Что учитывать при выборе каста.", "\u{f070}", nil)
-    styleMenuWidget(UI.CreepTypes, "Крипы", "Какие типы крипов можно добивать спеллом.", "\u{f0c0}", nil)
-    styleMenuWidget(UI.SearchRange, "Радиус", "На каком расстоянии искать крипов под spell CS.", "\u{f140}", nil)
-    styleMenuWidget(UI.MinMana, "Мана %", "Ниже этого процента скрипт перестанет тратить ману на фарм.", "\u{f043}", nil)
-    styleMenuWidget(UI.Buffer, "Запас HP", "Сколько HP можно накинуть сверху, чтобы нюк не мисснул добив.", "\u{f21e}", nil)
-    styleMenuWidget(UI.Debug, "Лог", "Писать в лог расчеты урона, предикт HP и выбранный каст.", "\u{f188}", nil)
-
-    UI.Enable:SetCallback(function()
-        local on = UI.Enable:Get()
-        UI.Key:Disabled(not on)
-        UI.Conditions:Disabled(not on)
-        UI.CreepTypes:Disabled(not on)
-        UI.SearchRange:Disabled(not on)
-        UI.MinMana:Disabled(not on)
-        UI.Buffer:Disabled(not on)
-        UI.Debug:Disabled(not on)
-        if UI.Skills then
-            UI.Skills:Disabled(not on)
-        end
-    end, true)
-
-    refreshSkillsWidgetState()
-    Log.Write(DEBUG_PREFIX .. "Menu v2.2 compact UI initialized OK")
-end
-
-script.OnScriptsLoaded = function()
+Script.OnScriptsLoaded = function()
     MENU_LANG = detectMenuLanguage()
-    UI.Key = getGlobalHoldBindWidget()
+    cachedHoldBind = nil
+    cachedHoldBindLabel = nil
+    abilitiesUiReady = false
+    abilitiesCallbackBound = false
+    abilitiesPrefs = {} -- re-read from Config as abilities appear
 
     local group = Menu.Create(
         "Creeps", "Main", "[v2]Last Hit Helper", "Main", "Skill LastHit"
     )
     menuGroup = group
 
-    UI.Enable = group:Switch(t("enable"), false)
-    styleMenuWidget(UI.Enable, t("enable"), t("enable_tip"), "\u{f0e7}", nil)
+    UI.Enable = group:Switch(t("enable"), false, Icons.enable)
+    styleMenuWidget(UI.Enable, t("enable"), t("enable_tip"), nil)
+
+    -- Abilities always visible under the script group (not gated by Enable/bind).
+    UI.Abilities = group:MultiSelect(t("abilities"), {
+        { "none", getSpellIcon("invoker_empty1"), false },
+    }, true)
+    bindAbilitiesPrefCallback()
+    refreshAbilitiesWidgetState()
 
     local gear = UI.Enable:Gear(t("settings"))
     UI.SettingsGear = gear
 
     UI.Conditions = gear:MultiCombo(t("conditions"), {
         conditionLabel(CONDITION_ITEMS.smart),
-        conditionLabel(CONDITION_ITEMS.predict),
-        conditionLabel(CONDITION_ITEMS.aoe),
     }, {
         conditionLabel(CONDITION_ITEMS.smart),
-        conditionLabel(CONDITION_ITEMS.predict),
-        conditionLabel(CONDITION_ITEMS.aoe),
     })
 
     UI.CreepTypes = gear:MultiCombo(t("creeps"), {
@@ -3045,324 +1683,228 @@ script.OnScriptsLoaded = function()
         creepFilterLabel(CREEP_FILTER_ITEMS.ranged),
     })
 
-    UI.SearchRange = gear:Slider(t("search_range"), 400, 1200, 900, "%d")
     UI.MinMana = gear:Slider(t("min_mana"), 0, 80, 15, "%d%%")
-    UI.Debug = gear:Switch(t("debug"), false)
+    UI.Debug = gear:Switch(t("debug"), false, Icons.debug)
 
-    styleMenuWidget(UI.Conditions, t("conditions"), t("conditions_tip"), "\u{f070}", nil)
-    styleMenuWidget(UI.CreepTypes, t("creeps"), t("creeps_tip"), "\u{f0c0}", nil)
-    styleMenuWidget(UI.SearchRange, t("search_range"), t("search_range_tip"), "\u{f140}", nil)
-    styleMenuWidget(UI.MinMana, t("min_mana"), t("min_mana_tip"), "\u{f043}", nil)
-    styleMenuWidget(UI.Debug, t("debug"), t("debug_tip"), "\u{f188}", nil)
+    styleMenuWidget(UI.Conditions, t("conditions"), t("conditions_tip"), Icons.conditions)
+    styleMenuWidget(UI.CreepTypes, t("creeps"), t("creeps_tip"), Icons.creeps)
+    styleMenuWidget(UI.MinMana, t("min_mana"), t("min_mana_tip"), Icons.mana)
 
     UI.Enable:SetCallback(function()
         local on = UI.Enable:Get()
         UI.Conditions:Disabled(not on)
         UI.CreepTypes:Disabled(not on)
-        UI.SearchRange:Disabled(not on)
         UI.MinMana:Disabled(not on)
         UI.Debug:Disabled(not on)
-        if UI.Skills then
-            UI.Skills:Disabled(not on)
-        end
+        -- Abilities stay interactive always.
     end, true)
 
-    refreshSkillsWidgetState()
-    Log.Write(DEBUG_PREFIX .. "Skill LastHit menu initialized OK")
+    local bind, bindLabel = getGlobalHoldBindWidget()
+    if bind then
+        Log.Write(DEBUG_PREFIX .. "Hold bind linked: " .. tostring(bindLabel)
+            .. " (Creeps → [v2]Last Hit Helper → Global Settings → Key)")
+    else
+        Log.Write(DEBUG_PREFIX .. "Hold bind NOT found. Expected Menu.Find("
+            .. "\"Creeps\", \"Main\", \"[v2]Last Hit Helper\", \"Main\", \"Global Settings\", \"Key\")")
+    end
+    Log.Write(DEBUG_PREFIX .. "Skill LastHit slim menu ready")
 end
 
 --------------------------------------------------------------------------------
--- MAIN LOGIC
+-- MAIN
 --------------------------------------------------------------------------------
 
-script.OnUpdate = function()
-    if not UI.Enable or not UI.Enable:Get() then return end
-    local holdBind = getGlobalHoldBindWidget()
-    if not isMenuBindPressed(holdBind) then return end
-
+Script.OnUpdate = function()
     local myHero = Heroes.GetLocal()
-    if not myHero then dbgThrottle("No local hero") return end
-    if not Entity.IsAlive(myHero) then return end
-    if (NPC.IsSilenced and NPC.IsSilenced(myHero))
-        or (NPC.IsStunned and NPC.IsStunned(myHero))
-        or (NPC.IsHexed and NPC.IsHexed(myHero)) then return end
-    if NPC.IsChannellingAbility and NPC.IsChannellingAbility(myHero) then return end
+    if myHero and Entity.IsAlive(myHero) then
+        syncAbilitiesUi(myHero)
+    end
 
-    if isHeroAttacking(myHero) then
-        dbgThrottle("Герой атакует, пропуск")
+    if not UI.Enable or not UI.Enable:Get() then
         return
     end
 
-    local mana    = NPC.GetMana(myHero) or 0
+    local holdBind, bindLabel = getGlobalHoldBindWidget()
+    if not holdBind then
+        return
+    end
+    if not isMenuBindPressed(holdBind) then
+        return
+    end
+    if not myHero or not Entity.IsAlive(myHero) then
+        return
+    end
+    if NPC.IsSilenced(myHero) or NPC.IsStunned(myHero) then
+        return
+    end
+    if NPC.IsChannellingAbility(myHero) then
+        return
+    end
+
+    local smart = isConditionEnabled(CONDITION_ITEMS.smart, true)
+    if smart and isHeroBusyAttacking(myHero) then
+        local aaRange = getAttackRange(myHero) + (NPC.GetHullRadius(myHero) or 0) + AUTO_ATTACK_RANGE_EPSILON + 40
+        local near = NPCs.InRadius(
+            Entity.GetAbsOrigin(myHero),
+            aaRange,
+            Entity.GetTeamNum(myHero),
+            Enum.TeamType.TEAM_ENEMY
+        )
+        if near then
+            for _, creep in ipairs(near) do
+                if isCreepValid(creep) and canAutoAttackKill(myHero, creep) then
+                    dbgThrottle("Respect AA kill")
+                    return
+                end
+            end
+        end
+    end
+
+    local mana = NPC.GetMana(myHero) or 0
     local maxMana = NPC.GetMaxMana(myHero) or 1
     local manaPercent = (maxMana > 0) and (mana / maxMana * 100) or 0
     if manaPercent < (UI.MinMana and UI.MinMana:Get() or 15) then
-        dbgThrottle(string.format("Low mana: %.0f%%", manaPercent))
         return
     end
 
     local now = GameRules.GetGameTime()
-    local castLockDuration = lastCastLockDuration
-    if castLockDuration <= 0 then
-        castLockDuration = CAST_INTERVAL
+    local castLock = lastCastLockDuration > 0 and lastCastLockDuration or CAST_INTERVAL
+    if now - lastCastTime < castLock then
+        return
     end
-    if now - lastCastTime < castLockDuration then return end
-
-    cleanupTracker(now)
+    if lastTargetEntity and (now - lastTargetTime) < lastTargetLockDuration then
+        -- soft lock only applied per-candidate below
+    end
 
     local heroName = NPC.GetUnitName(myHero)
-    local heroAbilities, heroAbilitySignature, usedFallback = getResolvedHeroAbilityInfos(myHero)
+    local heroAbilities = getResolvedHeroAbilityInfos(myHero)
     if not heroAbilities or #heroAbilities == 0 then
-        dbgThrottleKey("hero-no-pool:" .. tostring(heroName), "No supported spell pool: " .. tostring(heroName), 2.0)
+        dbgThrottleKey("pool:" .. tostring(heroName), "No ability pool: " .. tostring(heroName), 2.0)
         return
     end
 
-    if usedFallback then
-        dbgThrottleKey("hero-fallback:" .. tostring(heroName), "Using fallback spell scan: " .. tostring(heroName), 5.0)
+    local searchRange = getHeroSpellSearchRange(myHero, heroAbilities)
+    if searchRange <= 0 then
+        return
     end
-
-    if heroName ~= currentHeroName or heroAbilitySignature ~= currentHeroAbilitySignature then
-        buildSkillsSelector(heroName, heroAbilities, heroAbilitySignature)
-    end
-
-    local searchRange   = UI.SearchRange and UI.SearchRange:Get() or 900
-    local usePrediction = isConditionEnabled(CONDITION_ITEMS.predict, UI.PredictHP, true)
-    local useAoE        = isConditionEnabled(CONDITION_ITEMS.aoe, UI.AoEMode, true)
 
     local creeps = NPCs.InRadius(
-        Entity.GetAbsOrigin(myHero), searchRange,
-        Entity.GetTeamNum(myHero), Enum.TeamType.TEAM_ENEMY
+        Entity.GetAbsOrigin(myHero),
+        searchRange,
+        Entity.GetTeamNum(myHero),
+        Enum.TeamType.TEAM_ENEMY
     )
     if not creeps or #creeps == 0 then
-        dbgThrottle("No enemy creeps in " .. searchRange .. " range")
         return
     end
 
-    -- Обновить HP-трекер
-    for _, creep in ipairs(creeps) do
-        if Entity.IsAlive(creep) and not NPC.IsHero(creep) then
-            predictCreepHP(creep, 0)
-        end
-    end
-
-    -- Поиск лучшего каста (score-based)
-    local bestCreep    = nil
-    local bestAbility  = nil
-    local bestInfo     = nil
-    local bestScore    = -1
-    local debugChecked = 0
-    local debugCastable = 0
+    local bestCreep, bestAbility, bestInfo, bestScore = nil, nil, nil, -1
 
     for _, info in ipairs(heroAbilities) do
-        if UI.Skills then
-            local ok, selected = pcall(function() return UI.Skills:Get(info.name) end)
-            if ok and not selected then
-                goto continue_ability
-            end
+        if not isAbilitySelected(info) then
+            goto continue_ability
         end
 
         local ability = getAbilityByName(myHero, info.name)
-        if not ability then
-            -- тихо пропускаем (не инвокирован и т.п.)
-        elseif (Ability.GetLevel(ability) or 0) <= 0 then
-            -- не выучена
-        elseif not Ability.IsCastable(ability, mana) then
-            dbgThrottle(info.name .. " not castable (mana=" .. string.format("%.0f", mana) .. ")")
-        elseif (Ability.GetCooldown(ability) or 0) > 0 then
-            dbgThrottle(info.name .. " on CD: " .. string.format("%.1f", Ability.GetCooldown(ability)))
-        elseif isAbilityInPhase(ability) then
-            dbgThrottleKey("phase:" .. info.name, info.name .. " in ability phase", 0.25)
-        elseif not canAffordAbilityCast(myHero, ability, info) then
-            dbgThrottle(info.name .. " blocked by self-damage / health cost")
-        elseif isAbilityPassiveState(ability) then
-            -- passive
-        elseif isAbilityHiddenState(ability) then
-            -- hidden
-        else
-            debugCastable = debugCastable + 1
-            local baseDmg = getAbilityDamage(myHero, ability, info)
+        if not ability or (Ability.GetLevel(ability) or 0) <= 0 then
+            goto continue_ability
+        end
+        if not Ability.IsCastable(ability, mana) then
+            goto continue_ability
+        end
+        if (Ability.GetCooldown(ability) or 0) > 0 then
+            goto continue_ability
+        end
+        if Ability.IsInAbilityPhase(ability) then
+            goto continue_ability
+        end
+        if not canAffordSelfDamage(myHero, ability, info) then
+            goto continue_ability
+        end
 
-            if baseDmg <= 0 then
-                local found = {}
-                local allKeys = getAbilityDamageKeyCandidates(info)
-                for _, k in ipairs(allKeys) do
-                    local v = SV(ability, k)
-                    if v ~= nil then
-                        found[#found+1] = k .. "=" .. tostring(v)
-                        if #found >= 6 then break end
-                    end
-                end
-                local foundStr = #found > 0 and table.concat(found, ", ") or "ALL_NIL"
-                dbgThrottleKey("zero-dmg:" .. info.name, string.format(
-                    "%s baseDmg=0 | dmgKey=%s | found: %s",
-                    info.name, tostring(info.dmgKey), foundStr
-                ), DEBUG_REPEAT_INTERVAL)
-            else
-                for _, creep in ipairs(creeps) do
-                    debugChecked = debugChecked + 1
-                    if isCreepValid(creep) and isCreepInRange(myHero, ability, creep, info) then
-                        -- Анти-спам
-                        if lastTargetEntity and creep == lastTargetEntity
-                            and (now - lastTargetTime) < lastTargetLockDuration then
-                            -- skip
+        local baseDmg = getAbilityDamage(myHero, ability, info)
+        if baseDmg <= 0 then
+            goto continue_ability
+        end
 
-                        -- Respect hero attack range
-                        elseif isCreepInHeroAttackRange(myHero, creep) then
-                            -- skip attack-range creeps
-
-                        else
-                            local eval = evaluateCastOpportunity(
-                                myHero, ability, info, creep, creeps, usePrediction, useAoE, baseDmg
-                            )
-
-                            dbgThrottle(string.format(
-                                "%s → %s hp=%d pred=%.0f dmg=%.0f margin=%.0f need=%.0f gap=%.0f/%.0f kill=%s",
-                                info.name,
-                                NPC.GetUnitName(creep) or "?",
-                                eval.hp, eval.predictedHP, eval.secureDmg, eval.killMargin, eval.requiredKillMargin or 0,
-                                eval.predictionGap or 0, eval.maxPredictionGap or 0,
-                                tostring(eval.killAtImpact or eval.killNow)
-                            ))
-
-                            if eval.killAtImpact or eval.killNow or eval.canAoEKill then
-                                local score = 0
-                                if eval.killAtImpact or eval.killNow then
-                                    score = creepPriority(creep, eval.predictedHP)
-                                elseif eval.canAoEKill then
-                                    score = 25
-                                end
-
-                                -- AoE бонус: +50 за каждого доп. крипа
-                                if useAoE and (info.radius or info.lineProjectile) then
-                                    score = score + eval.extraAoEKills * 50
-                                end
-
-                                if eval.reserveLastCharge then
-                                    score = score - 12
-                                end
-
-                                if info.autoDetected then
-                                    score = score - 2
-                                end
-
-                                if score > bestScore then
-                                    bestScore   = score
-                                    bestCreep   = creep
-                                    bestAbility = ability
-                                    bestInfo    = info
-                                end
-                            end
-                        end
-                    end
-                end
+        for _, creep in ipairs(creeps) do
+            if not isCreepValid(creep) then
+                goto continue_creep
             end
+            if isCreepInAttackRange(myHero, creep) then
+                goto continue_creep
+            end
+            if lastTargetEntity == creep and (now - lastTargetTime) < lastTargetLockDuration then
+                goto continue_creep
+            end
+            if not isCreepInAbilityRange(myHero, ability, creep, info) then
+                goto continue_creep
+            end
+
+            local hp = Entity.GetHealth(creep) or 0
+            local hitDelay = getHitDelay(myHero, ability, creep, info)
+            local effective = applyResistance(baseDmg, ability, info, creep)
+            local buffer = getSafetyBuffer(ability, info, hitDelay)
+            if not canSecureKill(effective, hp, buffer) then
+                goto continue_creep
+            end
+
+            local score = creepPriority(creep, hp) + math.min(40, effective - hp)
+            if info.autoDetected then
+                score = score - 2
+            end
+            if score > bestScore then
+                bestScore = score
+                bestCreep = creep
+                bestAbility = ability
+                bestInfo = info
+            end
+
+            ::continue_creep::
         end
 
         ::continue_ability::
     end
 
-    if not bestCreep then
-        dbgThrottle(string.format(
-            "No killable creep (checked=%d, castable=%d, creeps=%d)",
-            debugChecked, debugCastable, #creeps
-        ))
+    if not bestCreep or not bestAbility or not bestInfo then
         return
     end
 
-    local finalEval = evaluateCastOpportunity(
-        myHero, bestAbility, bestInfo, bestCreep, creeps, usePrediction, useAoE
-    )
-    if isCreepInHeroAttackRange(myHero, bestCreep) then
-        dbgThrottleKey(
-            "attack-range:" .. tostring(Entity.GetIndex(bestCreep)) .. ":" .. bestInfo.name,
-            string.format(
-                "Skip attack-range creep %s → %s",
-                bestInfo.name,
-                NPC.GetUnitName(bestCreep) or "?"
-            ),
-            0.2
-        )
+    -- Revalidate once before cast.
+    if isCreepInAttackRange(myHero, bestCreep) or not Entity.IsAlive(bestCreep) then
         return
     end
-    if not finalEval or not (finalEval.killAtImpact or finalEval.killNow or finalEval.canAoEKill) then
-        dbgThrottleKey(
-            "revalidate:" .. tostring(Entity.GetIndex(bestCreep)) .. ":" .. bestInfo.name,
-            string.format(
-                "Skip stale cast %s → %s (hp=%d pred=%.0f dmg=%.0f)",
-                bestInfo.name,
-                NPC.GetUnitName(bestCreep) or "?",
-                finalEval and finalEval.hp or (Entity.GetHealth(bestCreep) or 0),
-                finalEval and finalEval.predictedHP or 0,
-                finalEval and finalEval.secureDmg or 0
-            ),
-            0.2
-        )
+    local hp = Entity.GetHealth(bestCreep) or 0
+    local baseDmg = getAbilityDamage(myHero, bestAbility, bestInfo)
+    local effective = applyResistance(baseDmg, bestAbility, bestInfo, bestCreep)
+    local hitDelay = getHitDelay(myHero, bestAbility, bestCreep, bestInfo)
+    local buffer = getSafetyBuffer(bestAbility, bestInfo, hitDelay)
+    if not canSecureKill(effective, hp, buffer) then
+        return
+    end
+    if not isCreepInAbilityRange(myHero, bestAbility, bestCreep, bestInfo) then
         return
     end
 
-    local castReason = (finalEval.killAtImpact or finalEval.killNow) and "kill" or "aoe"
     dbg(string.format(
-        "CAST %s → %s (hp=%d pred=%.0f dmg=%.0f margin=%.0f need=%.0f gap=%.0f/%.0f score=%.0f reason=%s)",
+        "CAST %s → %s (hp=%d dmg=%.0f buf=%.0f score=%.0f)",
         bestInfo.name,
         NPC.GetUnitName(bestCreep) or "?",
-        finalEval.hp,
-        finalEval.predictedHP,
-        finalEval.secureDmg,
-        finalEval.killMargin,
-        finalEval.requiredKillMargin or 0,
-        finalEval.predictionGap or 0,
-        finalEval.maxPredictionGap or 0,
-        bestScore,
-        castReason
+        hp,
+        effective,
+        buffer,
+        bestScore
     ))
+
     castOnCreep(myHero, bestAbility, bestCreep, bestInfo)
     lastCastTime = now
-    lastCastLockDuration = math.max(CAST_INTERVAL, getAbilityCastPoint(bestAbility, bestInfo) + 0.12)
+    lastCastLockDuration = math.max(CAST_INTERVAL, getCastPoint(bestAbility) + 0.10)
     lastTargetEntity = bestCreep
     lastTargetTime = now
-    lastTargetLockDuration = getTargetLockDuration(myHero, bestAbility, bestCreep, bestInfo)
+    lastTargetLockDuration = math.min(1.0, math.max(0.15, hitDelay * 0.85))
 end
 
-local rawIsHeroAttacking = isHeroAttacking
-isHeroAttacking = function(hero)
-    if not rawIsHeroAttacking(hero) then
-        return false
-    end
-
-    local myHero = Heroes.GetLocal()
-    if not hero or hero ~= myHero then
-        return true
-    end
-
-    local smartPriority = isConditionEnabled(CONDITION_ITEMS.smart, UI.SmartPriority, true)
-    if not smartPriority then
-        return false
-    end
-
-    local searchRange = UI.SearchRange and UI.SearchRange:Get() or 900
-    local creeps = NPCs.InRadius(
-        Entity.GetAbsOrigin(hero), searchRange,
-        Entity.GetTeamNum(hero), Enum.TeamType.TEAM_ENEMY
-    )
-
-    if not creeps or #creeps == 0 then
-        return false
-    end
-
-    for _, creep in ipairs(creeps) do
-        if isCreepValid(creep) and canAutoAttackKill(hero, creep) then
-            return true
-        end
-    end
-
-    return false
-end
-
---------------------------------------------------------------------------------
--- RESET
---------------------------------------------------------------------------------
-
-script.OnGameEnd = function()
+Script.OnGameEnd = function()
     lastCastTime = 0
     lastCastLockDuration = 0
     lastDebugTime = 0
@@ -3373,8 +1915,10 @@ script.OnGameEnd = function()
     currentHeroName = nil
     currentHeroAbilitySignature = nil
     resolvedAbilityInfoCache = {}
-    creepHPTracker = {}
-    lastTrackerCleanup = 0
+    cachedHoldBind = nil
+    cachedHoldBindLabel = nil
+    abilitiesUiReady = false
+    -- Keep abilitiesPrefs / Config across games; only UI list rebuilds next match.
 end
 
-return script
+return Script
