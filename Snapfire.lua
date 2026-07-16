@@ -1830,6 +1830,10 @@ Script.Timing = {
     -- After lock dies: wait before re-picking (cursor thrash).
     LOCK_REACQUIRE_DELAY = 0.28,
     LOCK_REACQUIRE_RADIUS_MUL = 1.75,
+    -- Cookie hop follows facing; GetTimeToFace alone is too loose (casts sideways).
+    -- FindRotationAngle is radians → degrees; engage must be nearly aimed.
+    COOKIE_FACE_MAX_DEG = 16,
+    COOKIE_FACE_MAX_DEG_URGENT = 26,
 }
 
 Script.Target = {
@@ -2514,9 +2518,9 @@ Script.Indicator = {
     CONFIG = "Snapfire",
     ABILITY_SLOTS = 6,
     ITEM_SLOTS = 6,
-    -- HUD layout is stable; refresh rarely (GetBounds / GetPanelInfo are expensive).
-    BOUNDS_TTL = 2.5,
-    BOUNDS_MISS_TTL = 1.25,
+    -- HUD layout is stable; refresh often enough that badges do not drift after UI scale/layout.
+    BOUNDS_TTL = 0.85,
+    BOUNDS_MISS_TTL = 0.40,
     SANITIZE_TTL = 3.0,
     ICON_CHROME_Y = 12,
     ---@type table<string, { uiId: string, widget: string }>|nil
@@ -2532,6 +2536,8 @@ Script.Indicator = {
     colorOff = nil,
     ---@type Color|nil
     colorShadow = nil,
+    ---@type Color|nil
+    colorBadgeBg = nil,
     ---@type boolean|nil
     hudReady = nil,
     hudProbeAt = -math.huge,
@@ -2620,42 +2626,50 @@ function Script.Indicator.EnsureFont()
     if not Render or not Render.LoadFont then
         return 0
     end
-    local ok, handle = TryCall(
-        Render.LoadFont,
-        "Segoe UI",
-        Enum.FontCreate.FONTFLAG_ANTIALIAS,
-        700
-    )
-    if (not ok or type(handle) ~= "number" or handle == 0) then
-        ok, handle = TryCall(
-            Render.LoadFont,
-            "Arial",
-            Enum.FontCreate.FONTFLAG_ANTIALIAS,
-            700
-        )
-    end
-    if ok and type(handle) == "number" and handle ~= 0 then
-        Ind.font = handle
-        return handle
+    -- Bold HUD-style (matches common cheat ON/OFF badges).
+    local flags = Enum.FontCreate.FONTFLAG_ANTIALIAS
+    local names = { "Tahoma", "Segoe UI", "Verdana", "Arial" }
+    for i = 1, #names do
+        local ok, handle = TryCall(Render.LoadFont, names[i], flags, 800)
+        if ok and type(handle) == "number" and handle ~= 0 then
+            Ind.font = handle
+            return handle
+        end
+        ok, handle = TryCall(Render.LoadFont, names[i], flags, 700)
+        if ok and type(handle) == "number" and handle ~= 0 then
+            Ind.font = handle
+            return handle
+        end
     end
     return 0
 end
 
 function Script.Indicator.RefreshTheme()
     local Ind = Script.Indicator
-    Ind.colorShadow = Color(0, 0, 0, 210)
-    Ind.colorOn = Color(255, 148, 64, 245)
-    Ind.colorOff = Color(175, 178, 185, 230)
-    if not Menu or not Menu.Style then
-        return
+    Ind.colorShadow = Color(0, 0, 0, 220)
+    -- Dark plate so ON/OFF never blends into the icon art.
+    Ind.colorBadgeBg = Color(12, 14, 18, 210)
+    Ind.colorOn = Color(255, 148, 64, 255)
+    -- OFF is always red (not theme secondary).
+    Ind.colorOff = Color(255, 56, 56, 255)
+    if Menu and Menu.Style then
+        local ok, primary = TryCall(Menu.Style, "primary")
+        if ok and primary and type(primary.r) == "number" then
+            Ind.colorOn = Color(primary.r, primary.g, primary.b, 255)
+        end
     end
-    local ok, primary = TryCall(Menu.Style, "primary")
-    if ok and primary and type(primary.r) == "number" then
-        Ind.colorOn = Color(primary.r, primary.g, primary.b, 245)
-    end
-    local ok2, secondary = TryCall(Menu.Style, "secondary")
-    if ok2 and secondary and type(secondary.r) == "number" then
-        Ind.colorOff = Color(secondary.r, secondary.g, secondary.b, 230)
+    -- Theme primary often is red too — keep ON distinct from OFF.
+    local on = Ind.colorOn
+    local off = Ind.colorOff
+    if on and off then
+        local dr = (on.r or 0) - (off.r or 0)
+        local dg = (on.g or 0) - (off.g or 0)
+        local db = (on.b or 0) - (off.b or 0)
+        local dist2 = dr * dr + dg * dg + db * db
+        -- ~90 RGB units: red theme vs red OFF would collide.
+        if dist2 < 8100 then
+            Ind.colorOn = Color(64, 220, 96, 255)
+        end
     end
 end
 
@@ -3705,16 +3719,28 @@ function Script.Indicator.DrawNative(me)
     if (not UI.AbilitiesIndicator or not UI.AbilitiesIndicator.Get or UI.AbilitiesIndicator:Get() == true) then
         for slot = 0, Ind.ABILITY_SLOTS - 1 do
             local panel = Ind.abilityPanels[slot]
-            local bounds = Script.Indicator.GetPanelBoundsCached("ab" .. tostring(slot), panel)
-            -- Prefer panel image (matches what the HUD actually shows).
-            local name = Script.Indicator.AbilityNameFromPanel(panel)
-            if not name or not tracked[name] then
+            local drawPanel = panel and Script.Indicator.AbilityDrawPanel(panel) or nil
+            local bounds = Script.Indicator.GetPanelBoundsCached(
+                "ab" .. tostring(slot) .. "d",
+                drawPanel
+            )
+            if not bounds then
+                bounds = Script.Indicator.GetPanelBoundsCached("ab" .. tostring(slot), panel)
+            end
+            -- Prefer the image on this HUD button. Never remap an untracked panel (innate)
+            -- onto AbilitySelect via HudAbilityName — that shifted every badge one slot.
+            local name = Script.Indicator.AbilityNameFromPanel(drawPanel or panel)
+            if name then
+                if not tracked[name] then
+                    name = nil
+                end
+            else
                 local fallback = Script.Indicator.HudAbilityName(me, slot)
                 if fallback and tracked[fallback] then
                     name = fallback
                 end
             end
-            if bounds and name and tracked[name] then
+            if bounds and name then
                 local ix, iy, side = Script.Indicator.IconSquare(
                     bounds.x, bounds.y, bounds.w, bounds.h
                 )
@@ -3734,10 +3760,18 @@ function Script.Indicator.DrawNative(me)
             slotBounds = {}
             local goodCount = 0
             for slot = 0, Ind.ITEM_SLOTS - 1 do
+                local slotPanel = Ind.itemPanels[slot]
+                local drawPanel = slotPanel and Script.Indicator.ItemDrawPanel(slotPanel) or nil
                 local bounds = Script.Indicator.GetPanelBoundsCached(
-                    "it" .. tostring(slot),
-                    Ind.itemPanels[slot]
+                    "it" .. tostring(slot) .. "d",
+                    drawPanel
                 )
+                if not bounds then
+                    bounds = Script.Indicator.GetPanelBoundsCached(
+                        "it" .. tostring(slot),
+                        slotPanel
+                    )
+                end
                 if bounds then
                     slotBounds[slot] = bounds
                     goodCount = goodCount + 1
@@ -3757,6 +3791,13 @@ function Script.Indicator.DrawNative(me)
                         h = b.h,
                         at = now,
                     }
+                    Ind.boundsCache["it" .. tostring(slot) .. "d"] = {
+                        x = b.x,
+                        y = b.y,
+                        w = b.w,
+                        h = b.h,
+                        at = now,
+                    }
                 end
             end
             Ind.itemSlotBounds = slotBounds
@@ -3766,7 +3807,9 @@ function Script.Indicator.DrawNative(me)
         for slot = 0, Ind.ITEM_SLOTS - 1 do
             local panel = Ind.itemPanels[slot]
             local bounds = slotBounds[slot]
-            local name = Script.Indicator.ItemNameFromPanel(panel)
+            local name = Script.Indicator.ItemNameFromPanel(
+                panel and Script.Indicator.ItemDrawPanel(panel) or panel
+            )
             if not name then
                 local item = SafeValue(NPC.GetItemByIndex, me, slot)
                 if item then
@@ -3786,7 +3829,12 @@ function Script.Indicator.DrawNative(me)
         if neutral then
             local name = SafeValue(Ability.GetName, neutral)
             local entry = (type(name) == "string" and map[name]) or nil
-            local bounds = Script.Indicator.GetPanelBoundsCached("neutral", Ind.neutralPanel)
+            local nPanel = Ind.neutralPanel
+            local nDraw = nPanel and Script.Indicator.ItemDrawPanel(nPanel) or nPanel
+            local bounds = Script.Indicator.GetPanelBoundsCached("neutrald", nDraw)
+            if not bounds then
+                bounds = Script.Indicator.GetPanelBoundsCached("neutral", Ind.neutralPanel)
+            end
             if entry and bounds then
                 local ix, iy, side = Script.Indicator.ItemIconSquare(bounds)
                 drew = true
@@ -3857,9 +3905,10 @@ function Script.Indicator.HudAbilityName(me, hudSlot)
             local ability = SafeValue(NPC.GetAbilityByIndex, me, actual)
             actual = actual + 1
             if ability then
+                -- Keep innate on the bar (Ability0) so HUD slot indices match Panorama AbilityN.
+                -- Skipping innate used to shift every badge one slot (blast on the fire icon, cookie missing).
                 local skip = SafeValue(Ability.IsHidden, ability) == true
                     or SafeValue(Ability.IsAttributes, ability) == true
-                    or SafeValue(Ability.IsInnatePassive, ability) == true
                 local name = SafeValue(Ability.GetName, ability)
                 if type(name) == "string" then
                     if string.find(name, "special_bonus", 1, true)
@@ -4019,9 +4068,9 @@ function Script.Indicator.DrawBadge(iconX, iconY, iconW, enabled, widget, toggle
     local font = Script.Indicator.EnsureFont()
     local label = enabled and "ON" or "OFF"
     local fontSize = 11
-    if iconW >= 48 then
+    if iconW >= 52 then
         fontSize = 12
-    elseif iconW < 32 then
+    elseif iconW < 34 then
         fontSize = 10
     end
 
@@ -4042,19 +4091,35 @@ function Script.Indicator.DrawBadge(iconX, iconY, iconW, enabled, widget, toggle
         Ind.badgeTextSize[sizeKey] = { w = tw, h = th }
     end
 
-    -- Top-right of icon; text only (no background plate).
-    local bx = iconX + iconW - tw - 2
-    local by = iconY + 1
-    if bx < iconX then
-        bx = iconX
+    local padX, padY = 3, 1
+    local plateW = tw + padX * 2
+    local plateH = th + padY * 2
+    -- Top-right corner, slightly above the icon (like standard cheat HUD badges).
+    local plateX = iconX + iconW - plateW - 1
+    local plateY = iconY - 4
+    if plateX < iconX - 2 then
+        plateX = iconX - 2
     end
-    local color = enabled and (Ind.colorOn or Color(255, 148, 64, 245))
-        or (Ind.colorOff or Color(175, 178, 185, 230))
-    local shadow = Ind.colorShadow or Color(0, 0, 0, 220)
+    local textX = plateX + padX
+    local textY = plateY + padY
+
+    local bg = Ind.colorBadgeBg or Color(12, 14, 18, 210)
+    local color = enabled and (Ind.colorOn or Color(255, 148, 64, 255))
+        or (Ind.colorOff or Color(255, 56, 56, 255))
+
+    if Render and Render.FilledRect then
+        TryCall(
+            Render.FilledRect,
+            Vec2(plateX, plateY),
+            Vec2(plateX + plateW, plateY + plateH),
+            bg,
+            3,
+            nil
+        )
+    end
 
     if font ~= 0 and Render and Render.Text then
-        TryCall(Render.Text, font, fontSize, label, Vec2(bx + 1, by + 1), shadow)
-        TryCall(Render.Text, font, fontSize, label, Vec2(bx, by), color)
+        TryCall(Render.Text, font, fontSize, label, Vec2(textX, textY), color)
     end
 
     Ind.hits[#Ind.hits + 1] = {
@@ -4092,14 +4157,23 @@ function Script.Indicator.ItemClickPanel(slotPanel)
     return slotPanel
 end
 
----Right-align icon square inside panel bounds (inventory slots often include left chrome).
+---Center icon square inside panel bounds (hotkey letters sit on the icon, not as left chrome).
 ---@param bounds { x: number, y: number, w: number, h: number }
 ---@return number, number, number
 function Script.Indicator.ItemIconSquare(bounds)
-    local ix, iy, side = Script.Indicator.IconSquare(bounds.x, bounds.y, bounds.w, bounds.h)
-    if bounds.w > side + 1 then
-        ix = bounds.x + bounds.w - side
+    local side = bounds.w
+    if bounds.h > 0 and bounds.h < side then
+        side = bounds.h
     end
+    local pitch = Script.Indicator.slotPitch
+    if type(pitch) == "number" and pitch >= 24 and pitch < side * 1.35 then
+        side = math.min(side, pitch)
+    end
+    if side < 18 then
+        side = math.max(bounds.w, 18)
+    end
+    local ix = bounds.x + math.max(0, (bounds.w - side) * 0.5)
+    local iy = bounds.y + math.max(0, (bounds.h - side) * 0.5)
     return ix, iy, side
 end
 
@@ -5509,15 +5583,34 @@ end
 ---@param loose? boolean  urgent refresh: cast sooner when almost facing
 ---@return boolean
 local function NeedsFaceForCookie(me, aimPos, loose)
-    local limit = loose and 0.05 or 0.08
-    local faceTime = SafeValue(NPC.GetTimeToFacePosition, me, aimPos)
-    if type(faceTime) == "number" and faceTime > limit then
-        return true
-    end
     if SafeValue(NPC.IsTurning, me) == true then
         return true
     end
-    return false
+
+    local T = Script.Timing
+    local maxDeg = loose
+            and ((T and T.COOKIE_FACE_MAX_DEG_URGENT) or 26)
+        or ((T and T.COOKIE_FACE_MAX_DEG) or 16)
+
+    -- Primary: yaw delta to the enemy (hop uses facing, not move intent).
+    local rot = SafeValue(NPC.FindRotationAngle, me, aimPos)
+    if type(rot) == "number" then
+        local deg = math.abs(math.deg(rot))
+        if deg > maxDeg then
+            return true
+        end
+        return false
+    end
+
+    -- Fallback when FindRotationAngle is unavailable.
+    local limit = loose and 0.06 or 0.14
+    local faceTime = SafeValue(NPC.GetTimeToFacePosition, me, aimPos)
+    if type(faceTime) == "number" then
+        return faceTime > limit
+    end
+
+    -- Unknown facing: engage must face; urgent may cast to save the stun chain.
+    return not loose
 end
 
 ---Face enemy without collapsing standoff: only when already at min distance.
@@ -5536,14 +5629,25 @@ function Script.EnsureCookieFacing(now, me, targetPos, urgent)
         if SafeValue(NPC.IsTurning, me) == true or SafeValue(NPC.IsRunning, me) == true then
             return true
         end
-        if (now - (Runtime.lastAnyOrderAt or -math.huge)) < (urgent and 0.10 or 0.20) then
+        if (now - (Runtime.lastAnyOrderAt or -math.huge)) < (urgent and 0.10 or 0.18) then
             return true
         end
+        -- Still misaligned after the wait — re-issue face below.
     end
     local myPos = SafeValue(Entity.GetAbsOrigin, me)
     local facePos = targetPos
     if myPos then
-        facePos = myPos:Extend2D(targetPos, 6)
+        local dist = Dist2D(myPos, targetPos)
+        -- Far enough MoveTo that the engine commits a real turn (6u was a no-op facing).
+        local faceDist = 120
+        if type(dist) == "number" and dist > 0 then
+            if dist < faceDist then
+                faceDist = math.max(40, dist * 0.5)
+            elseif dist > 280 then
+                faceDist = 200
+            end
+        end
+        facePos = myPos:Extend2D(targetPos, faceDist)
     end
     local tag = "cookie_face"
     local okSend, reason = CanSendOrder(now, me, false)
@@ -5551,14 +5655,16 @@ function Script.EnsureCookieFacing(now, me, targetPos, urgent)
         Dbg("skip %s: %s", tag, reason or "?")
         return true
     end
-    if not CanIssue(now, tag, urgent and 0.14 or 0.22) then
+    if not CanIssue(now, tag, urgent and 0.12 or 0.18) then
         return true
     end
     local ok, err = TryCall(NPC.MoveTo, me, facePos, false, false, false, true, OrderId(tag), false)
     if ok then
         MarkIssued(now, tag, 0.05)
         Runtime.cookieNeedFace = true
-        Dbg("cookie face → enemy")
+        local rot = SafeValue(NPC.FindRotationAngle, me, targetPos)
+        local deg = type(rot) == "number" and math.abs(math.deg(rot)) or -1
+        Dbg("cookie face → enemy (deg=%.0f)", deg)
         return true
     end
     Dbg("FAIL %s: %s", tag, tostring(err))
@@ -5629,38 +5735,14 @@ function Script.PrepCookieForCast(now, me, targetPos, cookie, urgent)
     Runtime.cookieSpacing = false
     Runtime.cookieSpaceAt = -math.huge
 
-    if urgent then
-        -- One MoveTo toward the enemy stops kite-away and faces — no Hold/stop frame.
-        if Script.EnsureCookieFacing(now, me, targetPos, true) then
-            return true
-        end
-        Runtime.cookieNeedFace = false
-        return false
-    end
-
-    -- Engage: still running after step-back / manual kite — stop, then face.
-    if SafeValue(NPC.IsRunning, me) == true and NeedsFaceForCookie(me, targetPos) then
-        local okSend = CanSendOrder(now, me, false)
-        if okSend and CanIssue(now, "cookie_stop", 0.12) then
-            local player = SafeValue(Players.GetLocal)
-            if player then
-                local ok = TryCall(Player.HoldPosition, player, me, false, true, true, OrderId("cookie_stop"))
-                if ok then
-                    MarkIssued(now, "cookie_stop", 0.04)
-                    Dbg("cookie stop (face before hop)")
-                    return true
-                end
-            end
-        end
-        return true
-    end
-
-    if Script.EnsureCookieFacing(now, me, targetPos, false) then
+    -- Face via MoveTo toward the enemy (cancels kite-away). Never Hold/stop here —
+    -- stop after cookie_face cancels the turn and loops: stop → face → stop…
+    if Script.EnsureCookieFacing(now, me, targetPos, urgent == true) then
         return true
     end
     Runtime.cookieNeedFace = false
 
-    if HoldForAbilityCast(now, me) then
+    if not urgent and HoldForAbilityCast(now, me) then
         return true
     end
     return false
@@ -7339,7 +7421,15 @@ local function UpdateCombo(now, me, target)
                     Runtime.cookieFaced = true
                     if CastTarget(now, me, cookie, me, "cookie") then
                         Runtime.cookieSpacing = false
-                        Dbg("cookie engage dist=%.0f hop=%.0f after=%.0f", dist, hop, distAfter)
+                        local rot = SafeValue(NPC.FindRotationAngle, me, targetPos)
+                        local deg = type(rot) == "number" and math.abs(math.deg(rot)) or -1
+                        Dbg(
+                            "cookie engage dist=%.0f hop=%.0f after=%.0f faceDeg=%.0f",
+                            dist,
+                            hop,
+                            distAfter,
+                            deg
+                        )
                         return
                     end
                 end
