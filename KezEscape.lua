@@ -74,15 +74,45 @@ local ABILITY_CAST_READY = Enum.AbilityCastResult.READY
 local ABILITY_CAST_HIDDEN = Enum.AbilityCastResult.HIDDEN
 local ABILITY_CAST_CD = Enum.AbilityCastResult.ABILITY_CD
 local TEAM_ENEMY = Enum.TeamType.TEAM_ENEMY
+
+local ORDER_MOVE_POS = Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_POSITION
+local ORDER_MOVE_TARGET = Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_TARGET
+local ORDER_MOVE_DIR = Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_DIRECTION
+local ORDER_MOVE_REL = Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_RELATIVE
+local ORDER_HOLD = Enum.UnitOrder.DOTA_UNIT_ORDER_HOLD_POSITION
+local ORDER_STOP = Enum.UnitOrder.DOTA_UNIT_ORDER_STOP
+local ORDER_ATTACK_MOVE = Enum.UnitOrder.DOTA_UNIT_ORDER_ATTACK_MOVE
+local ORDER_ATTACK_TARGET = Enum.UnitOrder.DOTA_UNIT_ORDER_ATTACK_TARGET
+local ORDER_CAST_POS = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_POSITION
 local ORDER_CAST_TARGET = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_TARGET
 local ORDER_CAST_TREE = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_TARGET_TREE
 local ORDER_CAST_NO_TARGET = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_NO_TARGET
+local ORDER_CAST_TOGGLE = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_TOGGLE
+local ORDER_CAST_TOGGLE_AUTO = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_TOGGLE_AUTO
+local ORDER_CAST_TOGGLE_ALT = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_TOGGLE_ALT
+local ORDER_CONSUME_ITEM = Enum.UnitOrder.DOTA_UNIT_ORDER_CONSUME_ITEM
+local ORDER_DROP_ITEM = Enum.UnitOrder.DOTA_UNIT_ORDER_DROP_ITEM
+local ORDER_GIVE_ITEM = Enum.UnitOrder.DOTA_UNIT_ORDER_GIVE_ITEM
+local ORDER_PICKUP_ITEM = Enum.UnitOrder.DOTA_UNIT_ORDER_PICKUP_ITEM
+local ORDER_PICKUP_RUNE = Enum.UnitOrder.DOTA_UNIT_ORDER_PICKUP_RUNE
+local ORDER_CAST_RUNE = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_RUNE
+local ORDER_TAUNT = Enum.UnitOrder.DOTA_UNIT_ORDER_TAUNT
+local ORDER_PATROL = Enum.UnitOrder.DOTA_UNIT_ORDER_PATROL
+local ORDER_VECTOR_POS = Enum.UnitOrder.DOTA_UNIT_ORDER_VECTOR_TARGET_POSITION
+local ORDER_CONTINUE = Enum.UnitOrder.DOTA_UNIT_ORDER_CONTINUE
+local ORDER_RADAR = Enum.UnitOrder.DOTA_UNIT_ORDER_RADAR
 local ORDER_ISSUER = Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_PASSED_UNIT_ONLY
 
 local MOD_KATANA = "modifier_kez_katana"
 local MOD_SAI = "modifier_kez_sai"
 local MOD_EUL_CYCLONE = "modifier_eul_cyclone"
 local MOD_WIND_WAKER = "modifier_wind_waker"
+
+-- Attribute switchers from Automatic Power Treads / Vambrace break Raven's Veil invis.
+local APT_BREAK_ITEMS = {
+    item_power_treads = true,
+    item_vambrace = true,
+}
 
 -- Runtime Enum often lacks modifierState (AntiMage note). Values match Enum.modifierState stubs.
 local STATE_ROOTED = 0
@@ -1617,6 +1647,67 @@ local function ShouldPreserveVeilInvis(me, now)
     return IsInvisible(me)
 end
 
+---@param order any
+---@return boolean
+local function IsSafeOrderWhileInvis(order)
+    return order == ORDER_MOVE_POS
+        or order == ORDER_MOVE_TARGET
+        or order == ORDER_MOVE_DIR
+        or order == ORDER_MOVE_REL
+        or order == ORDER_HOLD
+        or order == ORDER_STOP
+end
+
+---@param order any
+---@return boolean
+local function IsBreakInvisOrder(order)
+    return order == ORDER_ATTACK_MOVE
+        or order == ORDER_ATTACK_TARGET
+        or order == ORDER_CAST_POS
+        or order == ORDER_CAST_TARGET
+        or order == ORDER_CAST_TREE
+        or order == ORDER_CAST_NO_TARGET
+        or order == ORDER_CAST_TOGGLE
+        or order == ORDER_CAST_TOGGLE_AUTO
+        or order == ORDER_CAST_TOGGLE_ALT
+        or order == ORDER_CONSUME_ITEM
+        or order == ORDER_DROP_ITEM
+        or order == ORDER_GIVE_ITEM
+        or order == ORDER_PICKUP_ITEM
+        or order == ORDER_PICKUP_RUNE
+        or order == ORDER_CAST_RUNE
+        or order == ORDER_TAUNT
+        or order == ORDER_PATROL
+        or order == ORDER_VECTOR_POS
+        or order == ORDER_CONTINUE
+        or order == ORDER_RADAR
+end
+
+---@param ability userdata|nil
+---@return boolean
+local function IsAptBreakAbility(ability)
+    if not ability then
+        return false
+    end
+    local name = SafeValue(Ability.GetName, ability)
+    return type(name) == "string" and APT_BREAK_ITEMS[name] == true
+end
+
+---@param me userdata|nil
+---@param npc userdata|nil
+---@return boolean
+local function IsLocalNpcOrder(me, npc)
+    if not me or not npc then
+        return true
+    end
+    if me == npc then
+        return true
+    end
+    local a = SafeValue(Entity.GetIndex, me)
+    local b = SafeValue(Entity.GetIndex, npc)
+    return type(a) == "number" and a == b
+end
+
 --- Re-arm phases while the key stays held: when Claw/Echo come off CD,
 --- return to katana; when only Veil is ready, use sai; otherwise finish items.
 --- While preserving Raven's Veil invis, do not re-arm katana/finish casts.
@@ -1924,11 +2015,52 @@ function Script.OnUpdate()
     UpdateEscape(me, now)
 end
 
-function Script.OnPrepareUnitOrders(data)
+function Script.OnPrepareUnitOrders(data, player, order, target, position, ability, orderIssuer, npc, queue, showEffects)
     local identifier = type(data) == "table" and data.identifier or nil
-    if IsOurOrder(identifier) then
+    local ourOrder = IsOurOrder(identifier)
+
+    if not UI.enabled or not UI.enabled:Get() then
         return true
     end
+
+    local me = SafeValue(Heroes.GetLocal)
+    local now = SafeValue(GameRules.GetGameTime) or 0
+    if not me or not ShouldPreserveVeilInvis(me, now) then
+        if ourOrder then
+            return true
+        end
+        return true
+    end
+
+    if not IsLocalNpcOrder(me, npc) then
+        return true
+    end
+
+    -- Under Veil stealth: allow only move + the Veil cast that started the window.
+    if ourOrder then
+        if identifier == OrderId("move") or identifier == OrderId("veil") then
+            return true
+        end
+        DebugLog("veto own order under veil: %s", tostring(identifier))
+        return false
+    end
+
+    -- Cut Automatic Power Treads / Vambrace — attribute swaps break stealth.
+    if IsAptBreakAbility(ability) then
+        DebugLog("block APT under veil")
+        return false
+    end
+
+    if IsSafeOrderWhileInvis(order) then
+        return true
+    end
+
+    if IsBreakInvisOrder(order) then
+        DebugLog("block break-invis order")
+        return false
+    end
+
+    return true
 end
 
 function Script.OnGameEnd()

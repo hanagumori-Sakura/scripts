@@ -2,7 +2,7 @@
     Batrider — Blink + Flaming Lasso Extract
     Hold combo key: pop Linken's, blink + lasso on cursor target, drag to ally cluster.
     Drag phase uses speed/displacement/survival/invis items with strict priority.
-    Script by Euphoria
+    Script by 花曇り hanagumori
 --]]
 
 local Script = {}

@@ -2,7 +2,7 @@
     Theme Color Sync
     Keeps cheat menu color pickers aligned with Menu.Style() theme colors.
     Syncs on theme change, supports restore, grouped toggles, and debug reports.
-    Script by Euphoria
+    Script by 花曇り hanagumori
 --]]
 
 ---@diagnostic disable: undefined-global, param-type-mismatch

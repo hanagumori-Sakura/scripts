@@ -15,6 +15,7 @@ local HERO_NAME = "npc_dota_hero_magnataur"
 local HARPOON_NAME = "item_harpoon"
 local RP_NAME = "magnataur_reverse_polarity"
 local ORDER_ID = "magnus.harpoon_blink_rp"
+local FORCE_ICON = "panorama/images/items/force_staff_png.vtex_c"
 
 local function OrderTag(tag, suffix)
     return ORDER_ID .. "." .. tag .. "." .. suffix
@@ -55,6 +56,12 @@ local HARPOON_RETRY_DELAY = 0.12
 local LINK_BREAK_VERIFY = 0.35
 local LINK_BREAK_CAST_INTERVAL = 0.12
 local TARGET_RESOLVE_INTERVAL = 0.05
+local FORCE_PUSH_DISTANCE = 600
+local FORCE_SETTLE = 0.28
+local FORCE_FACE_MAX_TURN_TIME = 0.02
+local FORCE_FACE_MAX_ANGLE = 10
+local FORCE_FACE_STABLE = 0.10
+local FORCE_HARPOON_MARGIN = 40
 
 -- Always-on logic (hidden from menu to avoid breaking the combo)
 local CONFIG = {
@@ -73,6 +80,11 @@ local BLINK_ITEMS = {
     "item_overwhelming_blink",
     "item_swift_blink",
     "item_arcane_blink",
+}
+
+local FORCE_ITEMS = {
+    "item_force_staff",
+    "item_hurricane_pike",
 }
 
 local BLINK_SETTLE = {
@@ -136,6 +148,11 @@ local State = {
     overlayFont = 0,
     unitMotion = {},
     pendingBlinkName = nil,
+    forcePending = false,
+    forcePendingTime = 0,
+    forceUsed = false,
+    forceFaceStarted = false,
+    forceFaceOkSince = nil,
 }
 
 --#endregion
@@ -203,6 +220,11 @@ local Locale = {
         ru = "Дистанция за толпой",
         cn = "敌后距离",
     },
+    ui_use_force = {
+        en = "Use Force Staff",
+        ru = "Использовать Force Staff",
+        cn = "使用原力法杖",
+    },
     ui_debug = {
         en = "Debug logs",
         ru = "Debug логи",
@@ -219,9 +241,9 @@ local Locale = {
         cn = "Magnus 钩矛+闪烁+反转极性连招脚本总开关。",
     },
     tip_combo_key = {
-        en = "Hold this key to run the combo: approach if needed, harpoon, blink behind the cluster, then RP.",
-        ru = "Удерживай для комбо: подход при необходимости, harpoon, блинк за толпу, затем RP.",
-        cn = "按住此键执行连招：必要时接近、钩矛、闪到敌后、再反转极性。",
+        en = "Hold this key to run the combo: approach (optional Force Staff to close Harpoon range), harpoon, blink behind the cluster, then RP.",
+        ru = "Удерживай для комбо: подход (опционально Force Staff дотянуть Harpoon), harpoon, блинк за толпу, затем RP.",
+        cn = "按住此键执行连招：接近（可选原力法杖进入钩矛射程）、钩矛、闪到敌后、再反转极性。",
     },
     tip_min_sep = {
         en = "Minimum distance between harpoon target and blink anchor enemy.",
@@ -237,6 +259,11 @@ local Locale = {
         en = "Minimum distance past the predicted cluster; blink uses full range beyond this point.",
         ru = "Минимальное расстояние за предсказанной толпой; блинк идёт на полный радиус дальше этой точки.",
         cn = "超过预测敌群的最小距离；在此之外会使用闪烁的完整射程。",
+    },
+    tip_use_force = {
+        en = "When enabled, cast Force Staff / Hurricane Pike on self during approach to enter Harpoon cast range. Not used before Blink.",
+        ru = "Если включено: на подходе кастует Force Staff / Hurricane Pike на себя, чтобы войти в дальность Harpoon. Перед Blink не используется.",
+        cn = "开启后，在接近阶段对自己使用原力法杖/飓风长戟以进入钩矛射程。闪烁前不使用。",
     },
     tip_debug = {
         en = "Write combo decisions and casts to debug.log.",
@@ -312,6 +339,12 @@ local function MenuIcon(widget, icon)
     end
 end
 
+local function MenuImage(widget, imagePath)
+    if widget and widget.Image and imagePath then
+        widget:Image(imagePath)
+    end
+end
+
 local function MenuTip(widget, key)
     if widget and widget.ToolTip then
         widget:ToolTip(L(key))
@@ -348,6 +381,9 @@ local function ApplyLocalization(force)
 
     MenuLabel(UI.BehindDistance, "ui_behind_dist")
     MenuTip(UI.BehindDistance, "tip_behind_dist")
+
+    MenuLabel(UI.UseForce, "ui_use_force")
+    MenuTip(UI.UseForce, "tip_use_force")
 
     MenuLabel(UI.Debug, "ui_debug")
     MenuTip(UI.Debug, "tip_debug")
@@ -465,6 +501,9 @@ local function InitializeUI()
     ui.BehindDistance = gear:Slider("Behind distance", 100, 500, LoadConfigInt("behind_dist", 280), "%d")
     MenuIcon(ui.BehindDistance, I.ruler)
 
+    ui.UseForce = gear:Switch("Use Force Staff", LoadConfigInt("use_force", 0) == 1)
+    MenuImage(ui.UseForce, FORCE_ICON)
+
     ui.Debug = gear:Switch("Debug logs", LoadConfigInt("debug", 0) == 1)
     MenuIcon(ui.Debug, I.bug)
 
@@ -478,6 +517,7 @@ local function InitializeUI()
         ui.MinSep:Disabled(not enabled)
         ui.MinRPHits:Disabled(not enabled)
         ui.BehindDistance:Disabled(not enabled)
+        ui.UseForce:Disabled(not enabled)
         ui.Debug:Disabled(not enabled)
         ui.DrawOverlay:Disabled(not enabled)
     end
@@ -497,6 +537,10 @@ local function InitializeUI()
 
     ui.BehindDistance:SetCallback(function()
         SaveConfigInt("behind_dist", ui.BehindDistance:Get())
+    end, true)
+
+    ui.UseForce:SetCallback(function()
+        SaveConfigInt("use_force", ui.UseForce:Get() and 1 or 0)
     end, true)
 
     ui.Debug:SetCallback(function()
@@ -555,6 +599,11 @@ local function IsComboDebugAbility(abilityName)
     end
     if string.find(abilityName, "blink", 1, true) then
         return true
+    end
+    for _, itemName in ipairs(FORCE_ITEMS) do
+        if abilityName == itemName then
+            return true
+        end
     end
     for _, itemName in ipairs(POP_ITEMS) do
         if abilityName == itemName then
@@ -832,6 +881,36 @@ local function GetBlinkSettleTime(blinkName)
     return COMBO_BLINK_SETTLE
 end
 
+local function IsUseForceEnabled()
+    return State.menuReady
+        and UI.UseForce
+        and SafeCall(UI.UseForce.Get, UI.UseForce) == true
+end
+
+local function GetForceItem(me, mana)
+    for _, name in ipairs(FORCE_ITEMS) do
+        local item = SafeCall(NPC.GetItem, me, name, true)
+        if item and SafeCall(Ability.IsCastable, item, mana) then
+            return item, name
+        end
+    end
+    return nil, nil
+end
+
+local function CanPlanWithForce(me)
+    if not IsUseForceEnabled() then
+        return false
+    end
+
+    for _, name in ipairs(FORCE_ITEMS) do
+        if SafeCall(NPC.GetItem, me, name, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
 local function UpdateUnitMotionCache(units, now)
     if not units then
         return
@@ -964,6 +1043,11 @@ local function ResetHoldState()
     State.overlayReason = ""
     State.unitMotion = {}
     State.pendingBlinkName = nil
+    State.forcePending = false
+    State.forcePendingTime = 0
+    State.forceUsed = false
+    State.forceFaceStarted = false
+    State.forceFaceOkSince = nil
 end
 
 local function PartialResetForRepeat()
@@ -983,6 +1067,11 @@ local function PartialResetForRepeat()
     State.lockedTargets = nil
     State.unitMotion = {}
     State.pendingBlinkName = nil
+    State.forcePending = false
+    State.forcePendingTime = 0
+    State.forceUsed = false
+    State.forceFaceStarted = false
+    State.forceFaceOkSince = nil
 end
 
 local function FinishComboCycle(now)
@@ -1094,9 +1183,213 @@ local function CanCastHarpoonNow(me, target, harpoon, mana)
     return Ability.IsCastable(harpoon, mana) and IsHarpoonInCastRange(me, target, harpoon)
 end
 
+local function GetHarpoonForceReach(me, harpoon)
+    local range = GetHarpoonCastRange(me, harpoon)
+    if CanPlanWithForce(me) then
+        return range + FORCE_PUSH_DISTANCE - FORCE_HARPOON_MARGIN
+    end
+    return range
+end
+
+local function GetFacingAngleTo(me, pos)
+    if NPC.FindRotationAngle then
+        local angle = SafeCall(NPC.FindRotationAngle, me, pos)
+        if angle ~= nil then
+            return math.abs(math.deg(angle))
+        end
+    end
+    return 999
+end
+
+local function GetForwardDotTo(me, targetPos)
+    local myPos = SafeCall(Entity.GetAbsOrigin, me)
+    if not myPos or not targetPos then
+        return -1, 999
+    end
+
+    local toX = targetPos.x - myPos.x
+    local toY = targetPos.y - myPos.y
+    local toLen = math.sqrt(toX * toX + toY * toY)
+    if toLen < 1 then
+        return 1, 0
+    end
+    toX, toY = toX / toLen, toY / toLen
+
+    local forward = SafeCall(Entity.GetForwardPosition, me, 250)
+    if not forward then
+        return -1, 999
+    end
+
+    local fx = forward.x - myPos.x
+    local fy = forward.y - myPos.y
+    local flen = math.sqrt(fx * fx + fy * fy)
+    if flen < 0.001 then
+        return -1, 999
+    end
+    fx, fy = fx / flen, fy / flen
+
+    local dot = fx * toX + fy * toY
+    if dot > 1 then
+        dot = 1
+    elseif dot < -1 then
+        dot = -1
+    end
+
+    return dot, math.deg(math.acos(dot))
+end
+
+--- Strict facing gate: rotation angle AND forward vector must both point at the enemy.
+--- GetTimeToFace alone is too loose and was allowing sideways Force pushes.
+local function GetHarpoonFacingInfo(me, harpoonTarget, targetPos)
+    local rotAngle = GetFacingAngleTo(me, targetPos)
+    local forwardDot, forwardAngle = GetForwardDotTo(me, targetPos)
+
+    local timeToFace = 999.0
+    if NPC.GetTimeToFace and harpoonTarget then
+        timeToFace = tonumber(SafeCall(NPC.GetTimeToFace, me, harpoonTarget)) or 999.0
+    elseif NPC.GetTimeToFacePosition and targetPos then
+        timeToFace = tonumber(SafeCall(NPC.GetTimeToFacePosition, me, targetPos)) or 999.0
+    end
+
+    local facing = rotAngle <= FORCE_FACE_MAX_ANGLE
+        and forwardAngle <= FORCE_FACE_MAX_ANGLE
+        and timeToFace <= FORCE_FACE_MAX_TURN_TIME
+
+    return facing, rotAngle, forwardAngle, timeToFace
+end
+
+--- Force/Pike on self to enter Harpoon cast range.
+--- Returns true while facing / casting / settling. Casts only when facing the enemy.
+local function TryForceForHarpoonGap(me, harpoon, harpoonTarget, mana, now)
+    if not harpoonTarget or not CanAct(me) then
+        return false
+    end
+
+    if State.forcePending then
+        if now >= State.forcePendingTime + FORCE_SETTLE then
+            State.forcePending = false
+            State.forceUsed = true
+            State.forceFaceStarted = false
+            State.forceFaceOkSince = nil
+            Dbg("approach force settle done")
+            return false
+        end
+        return true
+    end
+
+    if State.forceUsed or not IsUseForceEnabled() then
+        return false
+    end
+
+    if CanCastHarpoonNow(me, harpoonTarget, harpoon, mana) then
+        return false
+    end
+
+    local force, forceName = GetForceItem(me, mana)
+    if not force then
+        return false
+    end
+
+    local dist = GetHarpoonDist(me, harpoonTarget)
+    local harpoonRange = GetHarpoonCastRange(me, harpoon)
+    local forceReach = harpoonRange + FORCE_PUSH_DISTANCE - FORCE_HARPOON_MARGIN
+
+    -- Too far for one Force push to enter range — keep walking until within forceReach.
+    if dist > forceReach then
+        State.forceFaceOkSince = nil
+        return false
+    end
+
+    -- Already close enough that Force is unnecessary / would overshoot badly.
+    if dist <= harpoonRange then
+        State.forceFaceOkSince = nil
+        return false
+    end
+
+    local targetPos = SafeCall(Entity.GetAbsOrigin, harpoonTarget)
+    if not targetPos then
+        return false
+    end
+
+    local facing, rotAngle, forwardAngle, timeToFace = GetHarpoonFacingInfo(me, harpoonTarget, targetPos)
+    if not facing then
+        State.forceFaceOkSince = nil
+        if now - State.lastApproachMove >= APPROACH_MOVE_INTERVAL then
+            State.lastApproachMove = now
+            NPC.MoveTo(me, targetPos, false, false, false, true, ORDER_ID .. ".force_harpoon_face", false)
+            State.forceFaceStarted = true
+            Dbg(
+                "approach force wait face | rot=%.0f fwd=%.0f ttf=%.3f dist=%.0f",
+                rotAngle,
+                forwardAngle,
+                timeToFace,
+                dist
+            )
+        end
+        return true
+    end
+
+    -- Hold facing briefly so we don't cast mid-turn when angle flickers into range.
+    if not State.forceFaceOkSince then
+        State.forceFaceOkSince = now
+        if now - State.lastApproachMove >= APPROACH_MOVE_INTERVAL then
+            State.lastApproachMove = now
+            NPC.MoveTo(me, targetPos, false, false, false, true, ORDER_ID .. ".force_harpoon_face", false)
+        end
+        Dbg(
+            "approach force face lock | rot=%.0f fwd=%.0f ttf=%.3f",
+            rotAngle,
+            forwardAngle,
+            timeToFace
+        )
+        return true
+    end
+
+    if now - State.forceFaceOkSince < FORCE_FACE_STABLE then
+        return true
+    end
+
+    -- Re-check on the cast tick — facing can drift while we waited.
+    facing, rotAngle, forwardAngle, timeToFace = GetHarpoonFacingInfo(me, harpoonTarget, targetPos)
+    if not facing then
+        State.forceFaceOkSince = nil
+        Dbg(
+            "approach force face lost | rot=%.0f fwd=%.0f ttf=%.3f",
+            rotAngle,
+            forwardAngle,
+            timeToFace
+        )
+        return true
+    end
+
+    SafeCall(Ability.CastTarget, force, me, false, true, true, OrderTag("approach", forceName or "force"))
+    State.forcePending = true
+    State.forcePendingTime = now
+    State.forceFaceStarted = false
+    State.forceFaceOkSince = nil
+    State.forceUsed = true
+    Dbg(
+        "CAST approach | %s self | facing ok rot=%.0f fwd=%.0f | dist=%.0f harpoon=%.0f",
+        forceName or "force",
+        rotAngle,
+        forwardAngle,
+        dist,
+        harpoonRange
+    )
+    return true
+end
+
 local function TryApproachHarpoonTarget(me, harpoon, harpoonTarget, now, mana, force)
     if not CanAct(me) then
         return false
+    end
+
+    if State.forcePending then
+        return TryForceForHarpoonGap(me, harpoon, harpoonTarget, mana, now)
+    end
+
+    if TryForceForHarpoonGap(me, harpoon, harpoonTarget, mana, now) then
+        return true
     end
 
     if not force and CanCastHarpoonNow(me, harpoonTarget, harpoon, mana) then
@@ -1402,7 +1695,7 @@ local function BuildTargetsFromPlan(harpoonTarget, blinkTarget, plan, harpoonDis
         blinkPos = plan.blinkPos,
         hitCount = plan.rpHits,
         harpoonDist = harpoonDist,
-        blinkDist = plan.distFromMe,
+        blinkDist = plan.distFromMe or plan.blinkDist or 0,
         sepDist = sepDist or 0,
     }
 end
@@ -1540,7 +1833,15 @@ local function RefreshRecoveryTargets(me, locked, harpoon, blink, rp, mana, now)
 
     if #enemies >= 2 then
         if focusUnit and focusUnit ~= harpoonTarget then
-            local plan = EvaluateBlinkPlan(me, harpoonTarget, enemies, blinkOrigin, focusUnit, blinkRange, rpRadius)
+            local plan = EvaluateBlinkPlan(
+                me,
+                harpoonTarget,
+                enemies,
+                blinkOrigin,
+                focusUnit,
+                blinkRange,
+                rpRadius
+            )
             if IsBlinkPlanValid(plan, blinkRange, minRPHits) then
                 local anchorPos = GetPredictedPosForUnit(plan.predicted, focusUnit, Entity.GetAbsOrigin(focusUnit))
                 sepDist = anchorPos and (anchorPos - harpoonPos):Length2D() or sepDist
@@ -1594,7 +1895,13 @@ local function RefreshRecoveryTargets(me, locked, harpoon, blink, rp, mana, now)
     if CONFIG.soloMode then
         local solo = FindSoloBlinkPlan(me, harpoonTarget, blinkRange, rpRadius, minRPHits)
         if solo then
-            return BuildTargetsFromPlan(harpoonTarget, nil, solo, GetHarpoonDist(me, harpoonTarget), 0)
+            return BuildTargetsFromPlan(
+                harpoonTarget,
+                nil,
+                solo,
+                GetHarpoonDist(me, harpoonTarget),
+                0
+            )
         end
     end
 
@@ -1655,8 +1962,14 @@ local function ResolveComboTargets(me, harpoon, blink, rp, debugReason, now)
     end
 
     local harpoonDist = GetHarpoonDist(me, harpoonTarget)
-    if harpoonDist > harpoonRange then
-        debugReason[1] = string.format("harpoon target too far (%.0f > %.0f)", harpoonDist, harpoonRange)
+    local harpoonReach = GetHarpoonForceReach(me, harpoon)
+    if harpoonDist > harpoonReach then
+        debugReason[1] = string.format(
+            "harpoon target too far (%.0f > %.0f%s)",
+            harpoonDist,
+            harpoonRange,
+            harpoonReach > harpoonRange and string.format(" forceReach=%.0f", harpoonReach) or ""
+        )
         return nil
     end
 
@@ -1672,15 +1985,7 @@ local function ResolveComboTargets(me, harpoon, blink, rp, debugReason, now)
             )
             if solo then
                 debugReason[1] = "ok (solo)"
-                return {
-                    harpoonTarget = harpoonTarget,
-                    blinkTarget = nil,
-                    blinkPos = solo.blinkPos,
-                    hitCount = solo.rpHits,
-                    harpoonDist = harpoonDist,
-                    blinkDist = solo.distFromMe,
-                    sepDist = 0,
-                }
+                return BuildTargetsFromPlan(harpoonTarget, nil, solo, harpoonDist, 0)
             end
         end
         debugReason[1] = string.format("need 2 enemies, found %d", #enemies)
@@ -1707,16 +2012,14 @@ local function ResolveComboTargets(me, harpoon, blink, rp, debugReason, now)
         return nil
     end
 
-    debugReason[1] = "ok"
-    return {
-        harpoonTarget = harpoonTarget,
-        blinkTarget = best.enemy,
-        blinkPos = best.blinkPos,
-        hitCount = best.rpHits,
-        harpoonDist = harpoonDist,
-        blinkDist = best.distFromMe,
-        sepDist = best.sepDist,
-    }
+    debugReason[1] = harpoonDist > harpoonRange and "ok (approach force)" or "ok"
+    return BuildTargetsFromPlan(
+        harpoonTarget,
+        best.enemy,
+        best,
+        harpoonDist,
+        best.sepDist
+    )
 end
 
 local function IsComboReady(me, mana, harpoon, blink, rp, targets)
@@ -2134,7 +2437,10 @@ function Script:OnUpdate()
             TryChainRPAfterBlink(activeTargets, rp, mana, now, "recovery")
         end
 
-        if SafeCall(Ability.IsCastable, harpoon, mana) and elapsed >= HARPOON_RETRY_DELAY then
+        if not State.forcePending
+            and not State.blinkPending
+            and SafeCall(Ability.IsCastable, harpoon, mana)
+            and elapsed >= HARPOON_RETRY_DELAY then
             Dbg(
                 "harpoon retry | dist=%.0f inRange=%s",
                 GetHarpoonDist(me, activeTargets.harpoonTarget),

@@ -557,6 +557,7 @@ local Runtime = {
     ---@type Vector|nil
     lockWorldPos = nil,
     lockLostAt = -math.huge,
+    lockLostWhy = nil,
     comboMode = nil,
     comboStage = "idle",
     fieldPos = nil,
@@ -654,6 +655,7 @@ local function ResetRuntime()
     Runtime.lockEntIndex = nil
     Runtime.lockWorldPos = nil
     Runtime.lockLostAt = -math.huge
+    Runtime.lockLostWhy = nil
     Runtime.comboMode = nil
     Runtime.comboStage = "idle"
     Runtime.fieldPos = nil
@@ -694,6 +696,7 @@ local function ResetComboSession()
     Runtime.lockEntIndex = nil
     Runtime.lockWorldPos = nil
     Runtime.lockLostAt = -math.huge
+    Runtime.lockLostWhy = nil
 end
 
 ---@param fmt string
@@ -1793,6 +1796,15 @@ local function IsValidEnemyHero(unit)
         and SafeValue(NPC.IsIllusion, unit) ~= true
 end
 
+---True when we can unit-target (Q / sheep). Fog last-known is not enough.
+---@param unit userdata|nil
+---@return boolean
+local function TargetHasVision(unit)
+    return unit ~= nil
+        and SafeValue(Entity.IsDormant, unit) ~= true
+        and SafeValue(NPC.IsVisible, unit) == true
+end
+
 ---Keep a locked combo target while the key is held (alive, or Aegis rebirth).
 ---@param unit userdata|nil
 ---@return boolean
@@ -1811,6 +1823,19 @@ local function IsValidLockedEnemy(unit)
         return true
     end
     return false
+end
+
+---Sticky combo aim: alive + vision, or Aegis wait. Dead / fog → release for reacquire.
+---@param unit userdata|nil
+---@return boolean
+local function IsStickyComboTarget(unit)
+    if not IsValidLockedEnemy(unit) then
+        return false
+    end
+    if SafeValue(Entity.IsAlive, unit) ~= true then
+        return true
+    end
+    return TargetHasVision(unit)
 end
 
 ---Remaining time on a named modifier, or nil.
@@ -2190,7 +2215,7 @@ end
 ---@param unit userdata|nil
 ---@return number
 function Script.Target.ScoreEnemy(me, unit)
-    if not IsValidEnemyHero(unit) then
+    if not IsValidEnemyHero(unit) or not TargetHasVision(unit) then
         return -math.huge
     end
     local score = 1000
@@ -2242,7 +2267,7 @@ function Script.Target.PickNearPos(me, center, searchRadius)
     local best, bestDist = nil, math.huge
     for i = 1, #heroes do
         local enemy = heroes[i]
-        if IsValidEnemyHero(enemy) then
+        if IsValidEnemyHero(enemy) and TargetHasVision(enemy) then
             local pos = SafeValue(Entity.GetAbsOrigin, enemy)
             if pos then
                 local d = Dist2D(center, pos)
@@ -2267,7 +2292,10 @@ function Script.Target.PickNearCursor(me, searchRadius)
     end
 
     local nearest = SafeValue(Input.GetNearestHeroToCursor, team, Enum.TeamType.TEAM_ENEMY)
-    if IsValidEnemyHero(nearest) and Script.Target.NearCursor(nearest, searchRadius) then
+    if IsValidEnemyHero(nearest)
+        and TargetHasVision(nearest)
+        and Script.Target.NearCursor(nearest, searchRadius)
+    then
         return nearest
     end
 
@@ -2354,6 +2382,18 @@ function Script.Target.RememberLock(unit)
         Runtime.lockWorldPos = pos
     end
     Runtime.lockLostAt = -math.huge
+    Runtime.lockLostWhy = nil
+end
+
+---On lock death/fog: drop draw + unlocked Field aim so visuals/attacks follow the next hero.
+local function ClearComboAimForRetarget()
+    Runtime.drawTarget = nil
+    Runtime.comboTarget = nil
+    Runtime.fencePos = nil
+    if not Runtime.fieldLocked then
+        Runtime.fieldPos = nil
+        Runtime.fieldHits = 0
+    end
 end
 
 ---@param now number
@@ -2366,19 +2406,33 @@ function Script.Target.ResolveOrKeep(now, me, locked, label)
         locked = Script.Target.FindByEntIndex(Runtime.lockEntIndex)
     end
 
-    -- Alive lock sticks — cursor must not steal mid-combo.
-    if IsValidLockedEnemy(locked) then
+    -- Stick only while alive+visible (or Aegis). Dead / fog → pick someone else.
+    if IsStickyComboTarget(locked) then
         Script.Target.RememberLock(locked)
         return locked
     end
 
-    -- Target died / invalid: short pause, then continue on the next enemy (same combo state).
+    -- Target died / fog / invalid: short pause, then continue on the next enemy.
     if locked ~= nil or type(Runtime.lockEntIndex) == "number" then
         if Runtime.lockLostAt < 0 then
             Runtime.lockLostAt = now
-            Dbg("%s target lost → next enemy", label)
+            local why = "lost"
+            if locked ~= nil and SafeValue(Entity.IsAlive, locked) ~= true and not IsValidLockedEnemy(locked) then
+                why = "dead"
+            elseif locked ~= nil and not TargetHasVision(locked) then
+                why = "fog"
+            end
+            Runtime.lockLostWhy = why
+            ClearComboAimForRetarget()
+            Dbg("%s target %s → next enemy", label, why)
         end
         local delay = (Script.Timing and Script.Timing.LOCK_REACQUIRE_DELAY) or 0.28
+        local why = Runtime.lockLostWhy
+        if why == "dead" then
+            delay = 0.10
+        elseif why == "fog" then
+            delay = math.max(delay, 0.40)
+        end
         if (now - Runtime.lockLostAt) < delay then
             return nil
         end
@@ -2386,37 +2440,57 @@ function Script.Target.ResolveOrKeep(now, me, locked, label)
 
     local searchRadius = Script.Target.GetSearchRadius()
     local style = Script.Target.GetStyleMode()
+    local deadIdx = Runtime.lockEntIndex
 
-    -- Prefer fight cluster around the corpse, then cursor.
+    -- Prefer fight cluster around the last lock, then cursor, then around self (cast range).
     local pick = nil
     if Runtime.lockWorldPos then
-        local mul = (Script.Timing and Script.Timing.LOCK_REACQUIRE_RADIUS_MUL) or 1.75
-        pick = Script.Target.PickNearPos(me, Runtime.lockWorldPos, searchRadius * mul)
+        local mul = (Script.Timing and Script.Timing.LOCK_REACQUIRE_RADIUS_MUL) or 2.25
+        pick = Script.Target.PickNearPos(me, Runtime.lockWorldPos, math.max(searchRadius * mul, 700))
     end
     if not pick then
         pick = Script.Target.PickNearCursor(me, searchRadius)
     end
+    if not pick then
+        local myPos = SafeValue(Entity.GetAbsOrigin, me)
+        if myPos then
+            local scan = (DC.E_RANGE or 900) + (DC.FIELD_RADIUS or 350) + 250
+            pick = Script.Target.PickNearPos(me, myPos, math.max(scan, 1200))
+        end
+    end
 
-    -- Never re-lock the same dead index; Prefer a different living hero when possible.
-    if pick and type(Runtime.lockEntIndex) == "number" then
+    -- Never re-lock the same dead / fog index when a different visible hero is available.
+    if pick and type(deadIdx) == "number" then
         local pickIdx = SafeValue(Entity.GetIndex, pick)
-        if pickIdx == Runtime.lockEntIndex and not IsValidLockedEnemy(pick) then
+        if pickIdx == deadIdx and not IsStickyComboTarget(pick) then
             pick = nil
         end
     end
 
+    local function adopt(unit, tag)
+        Script.Target.RememberLock(unit)
+        Runtime.lockLostWhy = nil
+        -- Always re-aim Field/Storm on a new hero (unless Field already spent this chain).
+        if not Runtime.eDone then
+            Runtime.fieldLocked = false
+            Runtime.fieldPos = nil
+            Runtime.fencePos = nil
+            Runtime.fieldHits = 0
+        end
+        Runtime.drawTarget = unit
+        Runtime.comboTarget = unit
+        Dbg("%s lock target=%s%s", label, FmtUnit(unit), tag or "")
+        return unit
+    end
+
     if pick then
-        Script.Target.RememberLock(pick)
-        Dbg("%s lock target=%s", label, FmtUnit(pick))
-        return pick
+        return adopt(pick, "")
     end
 
     if style == Script.Target.STYLE_SCORE then
-        local scored = Script.Target.PickByScore(me, searchRadius)
-        if scored then
-            Script.Target.RememberLock(scored)
-            Dbg("%s lock target=%s (score)", label, FmtUnit(scored))
-            return scored
+        local scored = Script.Target.PickByScore(me, math.max(searchRadius, 900))
+        if scored and IsStickyComboTarget(scored) then
+            return adopt(scored, " (score)")
         end
     end
 
@@ -4765,6 +4839,8 @@ end
 local ABILITY_ISSUE_TIMEOUT = 2.0
 -- Interrupted casts (still ready, not in phase, queue empty) retry after this.
 local ABILITY_ISSUE_CANCEL_TIMEOUT = 0.85
+-- Items fail fast so a dead sheep order does not stall Q→E→R (~0.85s).
+local ITEM_ISSUE_CANCEL_TIMEOUT = 0.30
 
 ---True after the game accepted the cast: cooldown started, or a charge was spent.
 ---@param abilityName string
@@ -4969,7 +5045,11 @@ local function CanUseAbilityOnce(abilityName, ability, me, readyOverride)
             local chargeSkill = (type(chargesBefore) == "number" and chargesBefore > 0)
                 or abilityName == ABILITY.glimpse
             local timeout = (stillReady and not inPhase and queueEmpty and not chargeSkill)
-                and ABILITY_ISSUE_CANCEL_TIMEOUT
+                and (
+                    (type(abilityName) == "string" and string.sub(abilityName, 1, 5) == "item_")
+                        and ITEM_ISSUE_CANCEL_TIMEOUT
+                        or ABILITY_ISSUE_CANCEL_TIMEOUT
+                )
                 or ABILITY_ISSUE_TIMEOUT
             if (now - issuedAt) >= timeout then
                 -- Charge Glimpse: never retry after a settled issue — prevents double-spend.
@@ -5276,29 +5356,13 @@ end
 
 
 
----True while Disruptor Q→E→Fence→R still owns the cast slot.
+---True while a main Disruptor ability order is in flight / in cast point,
+---or while waiting for Refresher 2nd-cycle window. Between casts the slot is free for items.
 ---@param me userdata
 ---@return boolean
 function Script.IsMainComboBusy(me)
     if Runtime.comboStage == "wait_trap" then
         return true
-    end
-    if Runtime.comboStage == "cast" then
-        if not (Runtime.qDone and Runtime.wDone and Runtime.eDone and Runtime.fenceDone and Runtime.rDone) then
-            return true
-        end
-    end
-    if Runtime.abilityChainStarted
-        and Runtime.comboStage ~= "done"
-        and Runtime.comboStage ~= "idle"
-        and Runtime.comboStage ~= "wait_trap"
-    then
-        if not (Runtime.qDone and Runtime.wDone and Runtime.eDone and Runtime.fenceDone and Runtime.rDone) then
-            return true
-        end
-    end
-    if not Runtime.abilityChainStarted then
-        return false
     end
     if Runtime.abilityIssued[ABILITY.thunder]
         or Runtime.abilityIssued[ABILITY.field]
@@ -5307,16 +5371,17 @@ function Script.IsMainComboBusy(me)
     then
         return true
     end
-    local function mainReady(abilityName)
+    local function inPhase(abilityName)
         if not IsAbilityEnabled(abilityName) then
             return false
         end
         local ability = GetAbility(me, abilityName)
-        return ability ~= nil and CanCastAbility(ability, me) == true
+        return ability ~= nil and SafeValue(Ability.IsInAbilityPhase, ability) == true
     end
-    if mainReady(ABILITY.thunder)
-        or mainReady(ABILITY.field)
-        or mainReady(ABILITY.storm)
+    if inPhase(ABILITY.thunder)
+        or inPhase(ABILITY.field)
+        or inPhase(ABILITY.fence)
+        or inPhase(ABILITY.storm)
     then
         return true
     end
@@ -6822,8 +6887,18 @@ function DC.GetFenceAimPos(fieldPos, target, fieldRadius)
         dirY = targetPos.y - fieldPos.y
     end
     local len = math.sqrt(dirX * dirX + dirY * dirY)
+    -- Target parked on Field center (hex / already inside): push fence away from us, never on center.
     if len < 0.001 then
-        return fieldPos
+        local me = SafeValue(Heroes.GetLocal)
+        local myPos = me and SafeValue(Entity.GetAbsOrigin, me) or nil
+        if myPos then
+            dirX = fieldPos.x - myPos.x
+            dirY = fieldPos.y - myPos.y
+            len = math.sqrt(dirX * dirX + dirY * dirY)
+        end
+    end
+    if len < 0.001 then
+        dirX, dirY, len = 1, 0, 1
     end
     dirX, dirY = dirX / len, dirY / len
     local fencePos = Vector(
@@ -6832,6 +6907,15 @@ function DC.GetFenceAimPos(fieldPos, target, fieldRadius)
         fieldPos.z
     )
     if not DC.IsWorldTraversable(fencePos) then
+        -- Try opposite rim before giving up on center.
+        local alt = Vector(
+            fieldPos.x - dirX * radius,
+            fieldPos.y - dirY * radius,
+            fieldPos.z
+        )
+        if DC.IsWorldTraversable(alt) then
+            return alt
+        end
         return fieldPos
     end
     return fencePos
@@ -6925,8 +7009,8 @@ function DC.CollectComboEnemies(me, fieldAbility)
     for i = 1, #raw do
         local enemy = raw[i]
         if IsValidEnemyHero(enemy)
+            and TargetHasVision(enemy)
             and SafeValue(Entity.IsSameTeam, me, enemy) ~= true
-            and SafeValue(NPC.IsVisible, enemy) == true
             and not IsMagicImmune(enemy)
         then
             -- Without Aghs mute, skip heroes who can walk out of Field / shrug Storm.
@@ -6991,6 +7075,67 @@ function DC.ResetDisruptorComboFlags()
     Runtime.fencePos = nil
 end
 
+---True when an enabled Disruptor combo skill can cast again.
+---@param me userdata
+---@return boolean
+function DC.AnyDisruptorComboReady(me)
+    local function ready(abilityName)
+        if not IsAbilityEnabled(abilityName) then
+            return false
+        end
+        if abilityName == ABILITY.fence and not DC.HasShard(me) then
+            return false
+        end
+        local ability = GetAbility(me, abilityName)
+        return ability ~= nil and CanCastAbility(ability, me) == true
+    end
+    return ready(ABILITY.thunder)
+        or ready(ABILITY.field)
+        or ready(ABILITY.fence)
+        or ready(ABILITY.storm)
+end
+
+---While combo key is held: after a finished cycle, open another when skills leave CD.
+---@param me userdata
+---@param now number
+---@return boolean
+function DC.TryReArmHoldCycle(me, now)
+    if Runtime.comboStage ~= "done" then
+        return false
+    end
+    if not DC.AnyDisruptorComboReady(me) then
+        return false
+    end
+
+    ClearAbilityIssued(ABILITY.thunder)
+    ClearAbilityIssued(ABILITY.field)
+    ClearAbilityIssued(ABILITY.fence)
+    ClearAbilityIssued(ABILITY.storm)
+    Runtime.abilityChainStarted = false
+    Runtime.refresherUsed = false
+    Runtime.comboCompleteLogged = false
+    Runtime.fieldLocked = false
+    Runtime.fieldPos = nil
+    Runtime.fencePos = nil
+    -- Fresh cycle: Refresher must see a Field cast from this hold cycle, not a stale one.
+    Runtime.fieldCastAt = -math.huge
+    Runtime.fieldEndsAt = -math.huge
+    Runtime.stormCastAt = -math.huge
+    Runtime.stormEndsAt = -math.huge
+    Runtime.trapCenter = nil
+    Runtime.qDone = false
+    Runtime.wDone = true
+    Runtime.eDone = false
+    Runtime.fenceDone = false
+    Runtime.rDone = false
+    Runtime.stageStartedAt = now
+    Runtime.comboStage = "idle"
+    Runtime.blinkUsed = false
+
+    Dbg("re-arm hold cycle (abilities ready)")
+    return true
+end
+
 ---Drive Refresher consume → ReArm even while Humanizer busy blocks new orders.
 ---@param me userdata
 function DC.PollRefresherConsume(me)
@@ -7003,6 +7148,90 @@ function DC.PollRefresherConsume(me)
             return
         end
     end
+end
+
+---Any non-refresher item order still waiting to consume / cancel.
+---@return boolean
+function DC.HasPendingItemOrder()
+    for name, issued in pairs(Runtime.abilityIssued) do
+        if issued and type(name) == "string" and string.sub(name, 1, 5) == "item_" then
+            if name ~= "item_refresher" and name ~= "item_refresher_shard" then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+---Advance item consume / cancel-timeout so sheep etc. do not race the ability chain.
+---@param me userdata
+function DC.PollPendingItemConsumes(me)
+    local pending = {}
+    for name, issued in pairs(Runtime.abilityIssued) do
+        if issued and type(name) == "string" and string.sub(name, 1, 5) == "item_" then
+            pending[#pending + 1] = name
+        end
+    end
+    for i = 1, #pending do
+        local name = pending[i]
+        local item = GetItem(me, name)
+        if not item and (name == "item_dagon" or string.find(name, "item_dagon_", 1, true) == 1) then
+            item = select(1, GetDagonItem(me, false))
+        end
+        if not item and (name == "item_diffusal_blade" or name == "item_diffusal_blade_2") then
+            item = select(1, GetDiffusalItem(me))
+        end
+        CanUseAbilityOnce(name, item, me, item ~= nil and CanCastItem(item, me))
+    end
+end
+
+---Hold only while an item cast is actually resolving (phase / brief grace) — not on dead orders.
+---@param me userdata
+---@return boolean
+function DC.ShouldHoldForItemCast(me)
+    DC.PollPendingItemConsumes(me)
+    for name, issued in pairs(Runtime.abilityIssued) do
+        if issued
+            and type(name) == "string"
+            and string.sub(name, 1, 5) == "item_"
+            and name ~= "item_refresher"
+            and name ~= "item_refresher_shard"
+        then
+            local item = GetItem(me, name)
+            if not item and (name == "item_dagon" or string.find(name, "item_dagon_", 1, true) == 1) then
+                item = select(1, GetDagonItem(me, false))
+            end
+            if IsOrderActivelyResolving(name, item, me) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+---Full enabled item suite (Important → Neutral). One cast per call.
+---@param now number
+---@param me userdata
+---@param target userdata
+---@param targetPos Vector
+---@return boolean
+function DC.TryComboItemSuite(now, me, target, targetPos)
+    if TryImportantItems(now, me, target, targetPos) then
+        return true
+    end
+    if TrySemiImportantItems(now, me, target, targetPos) then
+        return true
+    end
+    if TryOtherItems(now, me, target, targetPos) then
+        return true
+    end
+    if TryUtilityItems(now, me, target, targetPos) then
+        return true
+    end
+    if TryNeutralItems(now, me, target, targetPos) then
+        return true
+    end
+    return false
 end
 
 function DC.GetFieldFormationLead(fieldAbility)
@@ -7081,22 +7310,28 @@ function DC.BuildDisruptorPlan(me, mode, now)
     local fieldAbility = GetAbility(me, ABILITY.field)
     local enemies = DC.CollectComboEnemies(me, fieldAbility)
     local myPos = SafeValue(Entity.GetAbsOrigin, me)
-    if not myPos or #enemies == 0 then
+    if not myPos then
+        return nil, nil, 0
+    end
+    if mode ~= "target" and #enemies == 0 then
         return nil, nil, 0
     end
     local fieldRadius = DC.GetFieldRadius(fieldAbility)
     local lead = DC.GetFieldFormationLead(fieldAbility)
 
     if mode == "target" then
+        -- Solo: Field/Storm/Fence/items only on the locked hero — ignore nearby enemies.
         local locked = Runtime.comboTarget
-        if not IsValidEnemyHero(locked) then
+        if not IsValidLockedEnemy(locked) then
             return nil, nil, 0
         end
         local fieldPos = DC.PredictEnemyPos(locked, lead)
+            or SafeValue(Entity.GetAbsOrigin, locked)
         if fieldPos then
             local targetPos = SafeValue(Entity.GetAbsOrigin, locked) or fieldPos
             fieldPos = DC.NudgeTowardWall(fieldPos, targetPos, fieldRadius)
         end
+        Runtime.fieldHits = 1
         return locked, fieldPos, 1
     end
 
@@ -7210,7 +7445,11 @@ function DC.UpdateDisruptorAbilities(now, me, target, targetPos)
     local fieldPos = DC.RefreshFieldAim(me, target, now) or targetPos
 
     if not Runtime.qDone and IsAbilityEnabled(ABILITY.thunder) then
-        if DC.AbilityStepDone(ABILITY.thunder, q, me) then
+        -- Unit-target Q cannot land in fog; don't stall Field/Storm on last-known ghosts.
+        if not TargetHasVision(target) then
+            Runtime.qDone = true
+            Dbg("thunder skip: no vision")
+        elseif DC.AbilityStepDone(ABILITY.thunder, q, me) then
             Runtime.qDone = true
         elseif CanUseAbilityOnce(ABILITY.thunder, q, me) then
             local qRange = DC.GetAbilityCastRange(me, q, DC.Q_RANGE)
@@ -7398,7 +7637,8 @@ function DC.UpdateCombo(now, me, target)
     local windowClosed, windowRem, windowReason = Script.IsComboWindowClosed(target, now)
     if windowClosed then
         if Script.ShouldHoldForTiming(windowRem) then
-            Script.Target.FollowCursor(now, me, true)
+            -- Stay on the locked target — do not FollowCursor (pulls toward a 2nd hero).
+            FaceToward(now, me, targetPos)
             return
         end
         if not Runtime.abilityChainStarted and TryBlinkEngage(now, me, targetPos) then
@@ -7422,94 +7662,98 @@ function DC.UpdateCombo(now, me, target)
     end
 
     if ShouldSkipAbilitiesForDamageReturn(now, target) then
-        if Script.IsAttackBlocked(target) then
-            Script.Target.FollowCursor(now, me, true)
-        else
-            AttackEnemy(now, me, target)
-        end
+        FaceToward(now, me, targetPos)
         return
     end
 
     if SafeValue(NPC.HasModifier, me, PIKE_RANGE_MOD) == true then
-        if Script.IsAttackBlocked(target) then
-            Script.Target.FollowCursor(now, me, true)
-        else
-            AttackEnemy(now, me, target)
-        end
+        FaceToward(now, me, targetPos)
         return
     end
 
-    -- Cycle finished: Refresher for a second trap, otherwise hold quietly.
+    local seeTarget = TargetHasVision(target)
+
+    -- Cycle finished: Refresher 2nd trap, else re-arm when skills leave CD, else items.
     if Runtime.comboStage == "done" then
         if Script.TryRefresher(now, me) then
-            return
-        end
-        -- Consume may move us to wait_trap / idle; only idle continues this frame.
-        if Runtime.comboStage == "done" then
             return
         end
         if Runtime.comboStage == "wait_trap" then
             return
         end
+        if DC.TryReArmHoldCycle(me, now) then
+            -- Fall through into a fresh idle→cast cycle while the key stays held.
+        elseif Runtime.comboStage == "done" then
+            if DC.ShouldHoldForItemCast(me) then
+                return
+            end
+            if seeTarget and DC.TryComboItemSuite(now, me, target, targetPos) then
+                return
+            end
+            return
+        end
+        -- idle after ReArm / refresher: continue this frame.
     end
 
     if TargetNeedsLinkBreak(target) and Script.HasPendingLinkbreak() then
         DC.PollLinkbreakConsume(me)
         return
     end
-    if TryLinkbreaker(now, me, target) then
+    if seeTarget and TryLinkbreaker(now, me, target) then
         return
     end
 
-    -- Before the ability chain: blink / hex / roots. Mid-chain: only emergency items.
-    -- After Refresher, skip setup items and open the trap immediately.
-    if not Runtime.abilityChainStarted then
-        if not Runtime.refresherUsed then
-            if TryImportantItems(now, me, target, targetPos) then
-                return
-            end
-            if TrySemiImportantItems(now, me, target, targetPos) then
-                return
-            end
-            if TryOtherItems(now, me, target, targetPos) then
-                return
-            end
-            if TryUtilityItems(now, me, target, targetPos) then
-                return
-            end
-            if TryNeutralItems(now, me, target, targetPos) then
-                return
-            end
-        elseif TryBlinkEngage(now, me, targetPos) then
+    -- Items before the ability chain only (not between Q→E→R — that stalled the trap).
+    -- Hold only while an item is actually in cast point; dead sheep orders do not block Q.
+    local busy = Script.IsMainComboBusy(me)
+    if seeTarget and not Runtime.refresherUsed and not busy and not Runtime.abilityChainStarted then
+        if DC.ShouldHoldForItemCast(me) then
+            return
+        end
+        if DC.TryComboItemSuite(now, me, target, targetPos) then
+            return
+        end
+    elseif not seeTarget and not Runtime.abilityChainStarted then
+        if TryBlinkEngage(now, me, targetPos) then
             Runtime.blinkSettleUntil = now + DC.BLINK_SETTLE_DEFAULT
             return
         end
-    else
-        if DC.TrySelfSave(now, me) then
+    elseif Runtime.refresherUsed and not Runtime.abilityChainStarted then
+        if TryBlinkEngage(now, me, targetPos) then
+            Runtime.blinkSettleUntil = now + DC.BLINK_SETTLE_DEFAULT
             return
         end
-        if TryBloodstone(now, me) then
-            return
-        end
-        if Script.IsMainComboBusy(me) then
-            if SafeValue(NPC.HasModifier, me, SATANIC_ACTIVE_MOD) ~= true then
-                local threshold = 25
-                if UI.SatanicHp and UI.SatanicHp.Get then
-                    threshold = tonumber(UI.SatanicHp:Get()) or 25
-                end
-                if GetHealthPct(me) <= threshold then
-                    if TryCastNoTargetItem(now, me, "item_satanic", "satanic") then
-                        return
-                    end
+    end
+
+    if DC.TrySelfSave(now, me) then
+        return
+    end
+    if TryBloodstone(now, me) then
+        return
+    end
+    if busy then
+        if SafeValue(NPC.HasModifier, me, SATANIC_ACTIVE_MOD) ~= true then
+            local threshold = 25
+            if UI.SatanicHp and UI.SatanicHp.Get then
+                threshold = tonumber(UI.SatanicHp:Get()) or 25
+            end
+            if GetHealthPct(me) <= threshold then
+                if TryCastNoTargetItem(now, me, "item_satanic", "satanic") then
+                    return
                 end
             end
         end
     end
 
-    if TargetNeedsLinkBreak(target) and not Runtime.abilityChainStarted then
+    if seeTarget and TargetNeedsLinkBreak(target) and not Runtime.abilityChainStarted then
         if Script.HasPendingLinkbreak() or TryLinkbreaker(now, me, target) then
             return
         end
+    end
+
+    -- If hex/orchid just started cast point, let it finish; otherwise open Q immediately.
+    if not Runtime.abilityChainStarted and DC.ShouldHoldForItemCast(me) then
+        return
     end
 
     DC.UpdateDisruptorAbilities(now, me, target, targetPos)
@@ -7566,6 +7810,7 @@ function DC.UpdateCombat(now)
             Runtime.lockEntIndex = nil
             Runtime.lockWorldPos = nil
             Runtime.lockLostAt = -math.huge
+            Runtime.lockLostWhy = nil
             DC.ResetDisruptorComboFlags()
         end
     end
@@ -7587,31 +7832,54 @@ function DC.UpdateCombat(now)
         Runtime.drawTarget = Runtime.comboTarget
         if Runtime.comboTarget ~= nil then
             if not Runtime.fieldLocked then
-                local _, fieldPos = DC.BuildDisruptorPlan(me, "target", now)
+                local _, fieldPos, hits = DC.BuildDisruptorPlan(me, "target", now)
                 if fieldPos then
                     Runtime.fieldPos = fieldPos
+                    Runtime.fieldHits = hits or Runtime.fieldHits or 1
                 end
             end
+            Runtime.drawTarget = Runtime.comboTarget
             DC.UpdateCombo(now, me, Runtime.comboTarget)
         else
-            Script.Target.FollowCursor(now, me)
+            -- Retargeting: chase cursor / next hero — do not face the corpse forever.
+            Runtime.drawTarget = nil
+            Script.Target.FollowCursor(now, me, true)
         end
         return
     end
 
-    -- AOE mode
-    local primary, fieldPos, hits = DC.BuildDisruptorPlan(me, "aoe", now)
-    if primary then
-        Runtime.comboTarget = primary
+    -- AOE mode: sticky primary while alive+visible; on death/fog take the new planned hero.
+    local planned, fieldPos, hits = DC.BuildDisruptorPlan(me, "aoe", now)
+    local sticky = Runtime.comboTarget
+    if IsStickyComboTarget(sticky) then
         if not Runtime.fieldLocked and fieldPos then
             Runtime.fieldPos = fieldPos
             Runtime.fieldHits = hits or 0
         end
-        Runtime.drawTarget = primary
-        DC.UpdateCombo(now, me, primary)
+        Runtime.drawTarget = sticky
+        DC.UpdateCombo(now, me, sticky)
+    elseif planned then
+        if sticky ~= nil and sticky ~= planned then
+            Dbg("aoe primary %s → %s", FmtUnit(sticky), FmtUnit(planned))
+            if not Runtime.eDone then
+                Runtime.fieldLocked = false
+                Runtime.fencePos = nil
+            end
+        end
+        Runtime.comboTarget = planned
+        Script.Target.RememberLock(planned)
+        if not Runtime.fieldLocked and fieldPos then
+            Runtime.fieldPos = fieldPos
+            Runtime.fieldHits = hits or 0
+        end
+        Runtime.drawTarget = planned
+        DC.UpdateCombo(now, me, planned)
     else
         Runtime.drawTarget = nil
-        Script.Target.FollowCursor(now, me)
+        if Runtime.comboTarget ~= nil and not IsStickyComboTarget(Runtime.comboTarget) then
+            Runtime.comboTarget = nil
+        end
+        Script.Target.FollowCursor(now, me, true)
     end
 end
 

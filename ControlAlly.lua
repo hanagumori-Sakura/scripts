@@ -1,8938 +1,8643 @@
-﻿--[[
-    Control Ally
-    Hold your hero Combo Key to run a smart combo on a controllable ally
-    (disconnect / shared unit control). Menu: Heroes > Settings > General > Units Controller.
-    Script by 花曇り hanagumori
+--[[
+    Control Ally Remake — multi-hero ally control on the local Combo Key.
+    Selected controllable allies cast abilities/items, chase the locked target,
+    and run special AI (Invoker, Meepo, Alchemist, etc.) while the key is held.
+    Script by 花曇り hanagumori, 64qt 32tq//
 --]]
 
-local Script = {}
-local Core = {
-    Snapshot = {},
-    Catalog = {},
-    GenericPlanner = {},
-    InvokerController = {},
-    ActionRunner = {},
-    MovementController = {},
-    OrderGateway = {},
-    Settings = {},
-    Overlay = {},
+local toggleOwnershipRegistry = {}
+
+local ControlAlly = {
+	UI = {},
+	Runtime = {
+		initialized = false,
+		wasInGame = false,
+		inSession = false,
+		lastUpdateAt = -math.huge,
+		lastRosterScanAt = -math.huge,
+		lastControllerScanAt = -math.huge,
+		lastEnemyScanAt = -math.huge,
+		lastAllyScanAt = -math.huge,
+		lastMenuSyncAt = -math.huge,
+		lastBuiltinBindScanAt = -math.huge,
+		invokerFastUntil = -math.huge,
+		rosterInitialized = false,
+		rosterSignature = "",
+		controllerSignature = "",
+		actionMenuSignature = "",
+		itemMenuSignature = "",
+		roster = {},
+		rosterById = {},
+		playerLabelToId = {},
+		controllers = {},
+		allies = {},
+		controllerStates = {},
+		selectedPlayerIds = {},
+		abilityEnabled = {},
+		itemEnabled = {},
+		enemies = {},
+		lockedTarget = nil,
+		lastTargetSwitchAt = -math.huge,
+		disableReservations = {},
+		linkensReservations = {},
+		effectReservations = {},
+		supportReservations = {},
+		positionReservations = {},
+		meepoNetChains = {},
+		meepoPlans = {},
+		activityCache = {},
+		toggleOwnershipRegistry = toggleOwnershipRegistry,
+		cloneCountByPlayer = {},
+		orderBudget = 0,
+		orderSequence = 0,
+		sessionGeneration = 0,
+		roundRobinIndex = 1,
+		localPlayer = nil,
+		localPlayerId = nil,
+		localHero = nil,
+		builtinComboBind = nil,
+		builtinComboHeroName = nil,
+	},
+	Constants = {
+		UPDATE_INTERVAL = 0.03,
+		ROSTER_SCAN_INTERVAL = 0.50,
+		CONTROLLER_SCAN_INTERVAL = 0.15,
+		ENEMY_SCAN_INTERVAL = 0.03,
+		ALLY_SCAN_INTERVAL = 0.05,
+		MENU_SYNC_INTERVAL = 0.50,
+		BUILTIN_BIND_SCAN_INTERVAL = 1.00,
+		CONTROLLER_THINK_INTERVAL = 0.05,
+		ORDER_GAP = 0.06,
+		ATTACK_RESEND_INTERVAL = 0.32,
+		MOVE_RESEND_INTERVAL = 0.30,
+		CAST_DEDUP_INTERVAL = 0.22,
+		MAX_ORDERS_PER_UPDATE = 4,
+		MAX_CASTS_BEFORE_ATTACK = 2,
+		CAST_RANGE_BUFFER = 55,
+		TARGET_SWITCH_CURSOR_RADIUS = 425,
+		TARGET_LOCK_LEASH = 1.35,
+		DEFAULT_CAST_RANGE = 650,
+		DEFAULT_NO_TARGET_RADIUS = 450,
+		DEFAULT_POINT_RADIUS = 250,
+		INVOKER_ORB_GAP = 0.010,
+		INVOKER_INTERNAL_ORDER_GAP = 0.012,
+		INVOKER_POST_INVOKE_WAIT = 0.035,
+		INVOKER_COMBO_CAST_TOLERANCE = 0.09,
+		INVOKER_COMBO_LATE_TOLERANCE = 0.16,
+		INVOKER_COMBO_FINISH_GRACE = 0.65,
+		INVOKER_TORNADO_HIT_GRACE = 0.25,
+		ICE_WALL_POSITION_TOLERANCE = 8,
+		ICE_WALL_FACE_ANGLE = 0.09,
+		FACE_RESEND_INTERVAL = 0.08,
+		MEEPO_NET_CHAIN_OVERLAP = 0.08,
+		MEEPO_NET_HIT_GRACE = 0.22,
+		REFRESHER_MIN_TOTAL_COOLDOWN = 12,
+		TINKER_REARM_GAP = 0.85,
+		GHOST_WALK_EXIT_HEALTH = 42,
+		MOTION_LOCK_MAX = 3.50,
+		PENDING_CHANNEL_END_DEBOUNCE = 0.06,
+		PENDING_PHASE_HARD_TIMEOUT = 2.50,
+		ICE_WALL_POSITION_TIMEOUT = 1.25,
+		ALCHEMIST_BREW_FALLBACK = 7.5,
+	},
+	Profiles = {
+		Heroes = {},
+		GlobalAbilities = {},
+		InvokerSpells = {},
+		Items = {},
+		SupportItems = {},
+		HiddenAbilities = {},
+		AbilityRulesById = nil,
+		AbilityAliases = {
+			kez_falcon_rush_ad = "kez_falcon_rush",
+			kez_talon_toss_ad = "kez_talon_toss",
+			kez_shodo_sai_ad = "kez_shodo_sai",
+			kez_ravens_veil_ad = "kez_ravens_veil",
+		},
+		InternalInvokerAbilities = {
+			invoker_quas = true,
+			invoker_wex = true,
+			invoker_exort = true,
+			invoker_invoke = true,
+		},
+		RefreshableTinkerActions = {},
+	},
+	Utils = {},
+	Menu = {},
+	Roster = {},
+	Targeting = {},
+	Orders = {},
+	AbilityAI = {},
+	ItemAI = {},
+	SupportAI = {},
+	InvokerAI = {},
+	MeepoAI = {},
+	AlchemistAI = {},
+	TechiesAI = {},
+	KezAI = {},
+	SpecialAI = {},
+	TinkerAI = {},
+	Combat = {},
 }
 
---#region Constants
-
-local LOG_PREFIX = "[ControlAlly] "
-local CONFIG_SECTION = "control_ally"
--- One-way migrate from the pre-release config section name.
-local CONFIG_SECTION_LEGACY = "leaked_ally_combo"
-local ORDER_PREFIX = "control_ally:"
-
-local UPDATE_INTERVAL = 0.04
-local ALLY_SCAN_INTERVAL = 0.5
-local TARGET_RESOLVE_INTERVAL = 0.12
-local MULTISELECT_SYNC_INTERVAL = 0.35
-local BUILTIN_MENU_SYNC_INTERVAL = 1.0
-local MOVE_ORDER_INTERVAL = 0.10
-local ATTACK_ORDER_INTERVAL = 0.22
-local MELEE_ATTACK_ORDER_INTERVAL = 0.50
-local RANGE_ATTACK_BUFFER = 35
-local RANGE_CAST_BUFFER = 90
-local RANGE_TOLERANCE = 25
--- AbilityCastRange=0 (true global) or unresolved API/asset range. Callers must not
--- melee-approach or block casts on this sentinel.
-local GLOBAL_CAST_RANGE = 99999
-local DEBUG_VERBOSE_INTERVAL = 0.12
-local EXTEND_BUFFER = 0.15
-local BLINK_SETTLE = 0.12
-local ACTION_TIMEOUT = 1.8
-local ACTION_RETRY_INTERVAL = 0.08
-local ORDER_ACK_RETRY_DELAY = 0.40
-local INVOKER_ORB_ACK_SETTLE = 0.02
-local MAX_ACTION_ATTEMPTS = 8
-local INVOKER_SPELL_GAP = 0.02
-local INVOKER_INVOKE_SETTLE = 0.03
--- Post-invoke: spell can sit on the bar before CanBeExecuted/IsCastable flips true.
-local INVOKER_SLOT_WAIT = 0.45
-local COMBO_RELEASE_GRACE = 0.22
-local FAIL_SKIP_DURATION = 4.0
-local TARGET_LOCK_BONUS = 2500
--- World-space hover radius for Cursor mode (not hero search radius).
-local CURSOR_WORLD_PICK_MIN = 100
-local CURSOR_WORLD_PICK_MAX = 300
-local CURSOR_MAX_SCREEN_DIST = 80
-local FALLBACK_ABILITY_SLOTS = 24
-local FALLBACK_ITEM_SLOTS = 17 -- 0..16 inclusive; slot 16 is the neutral item slot
--- Trample stomps after ~140 travel; orbit radius keeps PB near the target.
-local TRAMPLE_ORBIT_RADIUS = 175
-local TRAMPLE_ORBIT_STEP = 1.15
-local TRAMPLE_ORBIT_INTERVAL = 0.10
-
-local TARGET_STYLE_CURSOR = 0
-local TARGET_STYLE_SCORE = 1
-local SCAN_RADIUS_BUFFER = 200
-
-local O_CAST_TARGET = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_TARGET
-local O_CAST_POSITION = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_POSITION
-local O_CAST_NO_TARGET = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_NO_TARGET
-local O_MOVE = Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_POSITION
-local O_ATTACK = Enum.UnitOrder.DOTA_UNIT_ORDER_ATTACK_TARGET
-local O_STOP = Enum.UnitOrder.DOTA_UNIT_ORDER_STOP
-local ORDER_ISSUER = Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_PASSED_UNIT_ONLY
-
-local TEAM_ENEMY = Enum.TeamType.TEAM_ENEMY
-
-local BEH = Enum.AbilityBehavior
-local ABILITY_CAST_READY = Enum.AbilityCastResult.READY
-local TT = Enum.TargetTeam
-local TARGET_MODE_ITEMS = { "Cursor", "Auto Score" }
-
-Core.Catalog.SkipItems = {
-    item_tpscroll = true,
-    item_flask = true,
-    item_clarity = true,
-    item_enchanted_mango = true,
-    item_famango = true,
-    item_famango_single = true,
-    item_royale_with_cheese = true,
-    item_ward_observer = true,
-    item_ward_sentry = true,
-    item_ward_dispenser = true,
-    item_dust = true,
-    item_smoke_of_deceit = true,
-    item_tango = true,
-    item_tango_single = true,
-    item_blood_grenade = true,
-    item_furion_teleport_scroll = true,
-    item_tome_of_knowledge = true,
-    item_aghanims_shard = true,
-    item_aghanims_shard_roshan = true,
-    item_refresher_shard = true,
-    item_infused_raindrop = true,
-    item_bottle = true,
-    item_branches = true,
-    item_magic_stick = true,
-    item_magic_wand = true,
-    item_quelling_blade = true,
-    item_orb_of_venom = true,
-    item_blight_stone = true,
-    item_wind_lace = true,
-    item_ring_of_protection = true,
-    item_sobi_mask = true,
-    item_ring_of_regen = true,
-    item_circlet = true,
-    item_gauntlets = true,
-    item_slippers = true,
-    item_mantle = true,
-    -- Creep/consume utilities -- not hero-combo actives.
-    item_hand_of_midas = true,
-    item_helm_of_the_dominator = true,
-    item_helm_of_the_overlord = true,
-    item_bfury = true,
-    item_iron_talon = true,
-    item_moon_shard = true,
-    item_ultimate_scepter_roshan = true,
-    item_power_treads = true,
-    item_radiance = true,
+ControlAlly.Profiles.HiddenAbilities = {
+	tinker_keen_teleport = true,
+	tinker_eureka = true,
+	arc_warden_tempest_recall = true,
+	invoker_quas = true,
+	invoker_wex = true,
+	invoker_exort = true,
+	invoker_invoke = true,
+	invoker_empty1 = true,
+	invoker_empty2 = true,
+	furion_teleportation = true,
+	furion_force_of_nature = true,
+	wisp_relocate = true,
+	wisp_tether_break = true,
+	chen_holy_persuasion = true,
+	chen_summon_convert = true,
+	doom_bringer_devour = true,
+	life_stealer_infest = true,
+	pudge_eject = true,
+	phoenix_icarus_dive_stop = true,
+	hoodwink_sharpshooter_release = true,
+	primal_beast_onslaught_release = true,
+	techies_reactive_tazer_stop = true,
+	techies_focused_detonate = true,
+	techies_minefield_sign = true,
+	faceless_void_time_walk_reverse = true,
+	morphling_morph = true,
+	morphling_replicate = true,
+	morphling_morph_replicate = true,
 }
 
-Core.Catalog.BlinkItems = {
-    "item_blink",
-    "item_overwhelming_blink",
-    "item_swift_blink",
-    "item_arcane_blink",
+ControlAlly.Profiles.GlobalAbilities = {
+	ogre_magi_bloodlust = {
+		policy = "self",
+		priority = 52,
+		combatBuff = true,
+		selfModifiers = { "modifier_ogre_magi_bloodlust" },
+	},
+	magnataur_empower = {
+		policy = "self",
+		priority = 48,
+		combatBuff = true,
+		selfModifiers = { "modifier_magnataur_empower" },
+	},
+	lich_frost_shield = {
+		policy = "self",
+		priority = 62,
+		defensiveHealthPct = 80,
+		selfModifiers = { "modifier_lich_frost_shield" },
+	},
+	abaddon_aphotic_shield = {
+		policy = "self",
+		priority = 82,
+		defensiveHealthPct = 72,
+		selfModifiers = { "modifier_abaddon_aphotic_shield" },
+		urgent = true,
+	},
+	dazzle_shallow_grave = {
+		policy = "self",
+		priority = 120,
+		defensiveHealthPct = 24,
+		selfModifiers = { "modifier_dazzle_shallow_grave" },
+		urgent = true,
+	},
+	legion_commander_press_the_attack = {
+		policy = "self",
+		priority = 78,
+		defensiveHealthPct = 68,
+		selfModifiers = { "modifier_legion_commander_press_the_attack" },
+		urgent = true,
+	},
+	windrunner_windrun = {
+		policy = "noTarget",
+		priority = 76,
+		defensiveHealthPct = 52,
+		radiusSpecial = "radius",
+		selfModifiers = { "modifier_windrunner_windrun" },
+		urgent = true,
+	},
 }
 
-Core.Catalog.LinkbreakItems = {
-    "item_cyclone",
-    "item_wind_waker",
-    "item_dagon",
-    "item_orchid",
-    "item_bloodthorn",
-    "item_sheepstick",
-    "item_abyssal_blade",
-    "item_heavens_halberd",
-    "item_rod_of_atos",
-    "item_gungir",
-    "item_nullifier",
-    "item_ethereal_blade",
-    "item_diffusal_blade",
-    "item_disperser",
-    "item_spirit_vessel",
-    "item_urn_of_shadows",
-    "item_harpoon",
+ControlAlly.Profiles.Heroes.npc_dota_hero_arc_warden = {
+	abilities = {
+		arc_warden_tempest_double = {
+			policy = "selfPosition",
+			priority = 125,
+			mainOnly = true,
+			requiresNoClone = true,
+			requiresTarget = true,
+			urgent = true,
+		},
+		arc_warden_flux = {
+			policy = "enemy",
+			priority = 98,
+			disable = false,
+			requiresIsolated = true,
+			isolationRadiusSpecial = "search_radius",
+			allowStacking = true,
+		},
+		arc_warden_magnetic_field = {
+			policy = "selfPosition",
+			priority = 72,
+			enemyRadiusSpecial = "radius",
+			requiresCombatPressure = true,
+			selfModifiers = {
+				"modifier_arc_warden_magnetic_field_evasion",
+				"modifier_arc_warden_magnetic_field_attack_speed",
+			},
+		},
+		arc_warden_spark_wraith = {
+			policy = "point",
+			priority = 68,
+			radiusSpecial = "radius",
+			delaySpecial = "base_activation_delay",
+		},
+	},
 }
 
-Core.Catalog.SelfItems = {
-    item_manta = true,
-    item_lotus_orb = true,
-    item_glimmer_cape = true,
-    item_force_staff = true,
-    item_hurricane_pike = true,
-    item_cyclone = true,
-    item_wind_waker = true,
-    item_ghost = true,
-    item_essence_ring = true,
-    item_faerie_fire = true,
-    item_greater_faerie_fire = true,
-    item_cheese = true,
-    item_phase_boots = true,
-    item_solar_crest = true,
-    item_pavise = true,
-    item_sphere = true,
-    item_holy_locket = true,
-    item_mjollnir = true,
-    item_shadow_amulet = true,
-    item_polliwog_charm = true,
+ControlAlly.Profiles.Heroes.npc_dota_hero_tinker = {
+	abilities = {
+		tinker_keen_teleport = { policy = "disabled" },
+		tinker_rearm = { policy = "special" },
+		tinker_laser = { policy = "enemy", priority = 105 },
+		tinker_warp_grenade = { policy = "enemy", priority = 92, disable = true },
+		tinker_march_of_the_machines = {
+			policy = "point",
+			priority = 66,
+			radiusSpecial = "radius",
+		},
+		tinker_deploy_turrets = {
+			policy = "point",
+			priority = 78,
+			radiusSpecial = "drop_aoe_radius",
+			delaySpecial = "drop_delay",
+		},
+		tinker_defense_matrix = {
+			policy = "self",
+			priority = 74,
+			defensiveHealthPct = 78,
+			selfModifiers = { "modifier_tinker_defense_matrix" },
+		},
+	},
 }
 
-Core.Catalog.SelfNoTargetItems = {
-    item_black_king_bar = true,
-    item_crimson_guard = true,
-    item_mekansm = true,
-    item_guardian_greaves = true,
-    item_pipe = true,
-    item_ancient_janggo = true,
-    item_boots_of_bearing = true,
-    item_shivas_guard = true,
-    item_blade_mail = true,
-    item_satanic = true,
-    item_mask_of_madness = true,
-    item_silver_edge = true,
-    item_invis_sword = true,
-    item_bloodstone = true,
-    item_veil_of_discord = true,
-    item_manta = true,
-    item_phase_boots = true,
-    -- Neutral actives (tier + legacy KV still in items.json).
-    item_ash_legion_shield = true,
-    item_dagger_of_ristul = true,
-    item_demonicon = true,
-    item_essence_ring = true,
-    item_flayers_bota = true,
-    item_force_field = true,
-    item_havoc_hammer = true,
-    item_idol_of_screeauk = true,
-    item_jidi_pollen_bag = true,
-    item_kobold_cup = true,
-    item_mana_draught = true,
-    item_metamorphic_mandible = true,
-    item_minotaur_horn = true,
-    item_ogre_seal_totem = true,
-    item_pogo_stick = true,
-    item_riftshadow_prism = true,
-    item_spider_legs = true,
-    item_stonefeather_satchel = true,
+ControlAlly.Profiles.Heroes.npc_dota_hero_techies = {
+	abilities = {
+		techies_sticky_bomb = {
+			policy = "point",
+			priority = 88,
+			radiusSpecial = "radius",
+			projectileSpeedSpecial = "speed",
+		},
+		techies_reactive_tazer = {
+			policy = "self",
+			priority = 76,
+			combatBuff = true,
+			selfModifiers = { "modifier_techies_reactive_tazer" },
+		},
+		techies_suicide = {
+			policy = "point",
+			priority = 96,
+			radiusSpecial = "radius",
+			minimumHealthPct = 38,
+		},
+		techies_land_mines = {
+			policy = "special",
+			priority = 68,
+			radiusSpecial = "radius",
+			positionReservationFamily = "techies_mine",
+		},
+	},
 }
 
--- Activatable neutrals (combo + UI). Passives omitted; point/unit use ClassifyItemPolicy.
-Core.Catalog.NeutralActiveItems = {
-    item_ash_legion_shield = true,
-    item_crippling_crossbow = true,
-    item_dagger_of_ristul = true,
-    item_demonicon = true,
-    item_essence_ring = true,
-    item_fallen_sky = true,
-    item_flayers_bota = true,
-    item_force_field = true,
-    item_havoc_hammer = true,
-    item_heavy_blade = true,
-    item_idol_of_screeauk = true,
-    item_jidi_pollen_bag = true,
-    item_kobold_cup = true,
-    item_mana_draught = true,
-    item_medallion_of_courage = true,
-    item_metamorphic_mandible = true,
-    item_minotaur_horn = true,
-    item_ogre_seal_totem = true,
-    item_pogo_stick = true,
-    item_polliwog_charm = true,
-    item_psychic_headband = true,
-    item_riftshadow_prism = true,
-    item_seeds_of_serenity = true,
-    item_spider_legs = true,
-    item_stonefeather_satchel = true,
+ControlAlly.Profiles.Heroes.npc_dota_hero_enigma = {
+	abilities = {
+		enigma_demonic_conversion = {
+			policy = "point",
+			priority = 58,
+		},
+		enigma_black_hole = {
+			policy = "point",
+			priority = 132,
+			radiusSpecial = "radius",
+			disable = true,
+			avoidAllies = true,
+			ignoreCaster = true,
+			allowMagicImmune = true,
+			urgent = true,
+		},
+	},
 }
 
--- Point neutrals used as combat land / gap tools (priority in AppendGenericActions).
-Core.Catalog.CombatLandItems = {
-    item_fallen_sky = 855,
-    item_heavy_blade = 750,
-    item_seeds_of_serenity = 640,
+ControlAlly.Profiles.Heroes.npc_dota_hero_bristleback = {
+	abilities = {
+		bristleback_hairball = {
+			policy = "point",
+			priority = 92,
+			radiusSpecial = "radius",
+			projectileSpeedSpecial = "projectile_speed",
+			allowHidden = true,
+		},
+	},
 }
 
-Core.Catalog.MagicImmuneModifiers = {
-    "modifier_black_king_bar_immune",
-    "modifier_life_stealer_rage",
-    "modifier_juggernaut_blade_fury",
-    "modifier_item_sphere_target",
+ControlAlly.Profiles.Heroes.npc_dota_hero_alchemist = {
+	abilities = {
+		alchemist_acid_spray = {
+			policy = "point",
+			priority = 74,
+			radiusSpecial = "radius",
+			positionReservationFamily = "alchemist_acid_spray",
+			durationSpecial = "duration",
+		},
+		alchemist_chemical_rage = {
+			policy = "noTarget",
+			priority = 94,
+			combatBuff = true,
+			selfModifiers = { "modifier_alchemist_chemical_rage" },
+		},
+		alchemist_berserk_potion = {
+			policy = "ally",
+			priority = 92,
+			allyMode = "buff",
+			allowHidden = true,
+			menuVisible = true,
+		},
+		alchemist_unstable_concoction = { policy = "special" },
+		alchemist_unstable_concoction_throw = { policy = "special", allowHidden = true },
+	},
 }
 
-Core.Catalog.DispellableModifiers = {
-    "modifier_rod_of_atos_debuff",
-    "modifier_gungir_root",
-    "modifier_ensnare",
-    "modifier_naga_siren_ensnare",
-    "modifier_meepo_earthbind",
-    "modifier_treant_overgrowth",
-    "modifier_cage_trap",
-    "modifier_silencer_curse_of_the_silent",
-    "modifier_orchid_malevolence_debuff",
-    "modifier_bloodthorn_debuff",
+ControlAlly.Profiles.Heroes.npc_dota_hero_faceless_void = {
+	abilities = {
+		faceless_void_chronosphere = {
+			policy = "point",
+			priority = 118,
+			radiusSpecial = "radius",
+			disable = true,
+			avoidAllies = true,
+			ignoreCaster = true,
+			allowMagicImmune = true,
+		},
+	},
 }
 
-Core.Catalog.LocalBuffModifiers = {
-    "modifier_earth_spirit_geomagnetic_grip",
-    "modifier_bane_fiends_grip",
-    "modifier_shadow_shaman_shackles",
-    "modifier_pudge_dismember",
-    "modifier_batrider_flaming_lasso",
-    "modifier_legion_commander_duel",
-    "modifier_faceless_void_chronosphere_freeze",
-    "modifier_winter_wyvern_winters_curse",
+ControlAlly.Profiles.Heroes.npc_dota_hero_muerta = {
+	abilities = {
+		muerta_dead_shot = { policy = "vectorTarget", priority = 96, disable = true },
+		muerta_the_calling = { policy = "point", priority = 82, radiusSpecial = "hit_radius" },
+		muerta_pierce_the_veil = {
+			policy = "noTarget",
+			priority = 108,
+			alwaysNoTarget = true,
+			selfModifiers = { "modifier_muerta_pierce_the_veil" },
+		},
+	},
 }
 
-Core.Catalog.DisableModifiers = {
-    tidehunter_ravage = { "modifier_tidehunter_ravage" },
-    enigma_black_hole = { "modifier_enigma_black_hole_pull" },
-    faceless_void_chronosphere = { "modifier_faceless_void_chronosphere_freeze" },
-    magnataur_reverse_polarity = { "modifier_magnataur_reverse_polarity" },
-    axe_berserkers_call = { "modifier_axe_berserkers_call" },
-    bane_fiends_grip = { "modifier_bane_fiends_grip" },
-    shadow_shaman_shackles = { "modifier_shadow_shaman_shackles" },
-    batrider_flaming_lasso = { "modifier_batrider_flaming_lasso" },
-    earthshaker_fissure = { "modifier_earthshaker_fissure_stun" },
-    crystal_maiden_crystal_nova = { "modifier_crystal_maiden_crystal_nova_slow" },
-    crystal_maiden_freezing_field = { "modifier_crystal_maiden_freezing_field_slow" },
-    lion_impale = { "modifier_lion_impale" },
-    lion_voodoo = { "modifier_lion_voodoo" },
-    witch_strike = { "modifier_witch_strike_debuff" },
-    invoker_cold_snap = { "modifier_invoker_cold_snap" },
-    ogre_magi_fireblast = { "modifier_stunned" },
-    ogre_magi_ignite = { "modifier_ogre_magi_ignite" },
-    rubick_telekinesis = { "modifier_rubick_telekinesis_stun" },
-    beastmaster_primal_roar = { "modifier_beastmaster_primal_roar_slow" },
-    warlock_rain_of_chaos = { "modifier_warlock_rain_of_chaos_debuff" },
-    jakiro_macropyre = { "modifier_jakiro_macropyre_burn" },
-    lina_laguna_blade = {},
-    item_rod_of_atos = { "modifier_rod_of_atos_debuff" },
-    item_gungir = { "modifier_gungir_root" },
-    item_sheepstick = { "modifier_sheepstick_debuff" },
-    item_orchid = { "modifier_orchid_malevolence_debuff" },
-    item_bloodthorn = { "modifier_bloodthorn_debuff" },
-    item_abyssal_blade = { "modifier_abyssal_blade_stun" },
-    item_heavens_halberd = { "modifier_heavens_halberd_debuff" },
-    item_nullifier = { "modifier_item_nullifier_mute" },
-    item_ethereal_blade = { "modifier_item_ethereal_blade_ethereal" },
-    naga_siren_ensnare = { "modifier_naga_siren_ensnare" },
+ControlAlly.Profiles.Heroes.npc_dota_hero_nyx_assassin = {
+	abilities = {
+		nyx_assassin_impale = {
+			policy = "point",
+			priority = 106,
+			disable = true,
+			lineProjectile = true,
+			radiusSpecial = "width",
+			travelDistanceSpecial = "length",
+			projectileSpeedSpecial = "speed",
+		},
+		nyx_assassin_jolt = { policy = "enemy", priority = 86 },
+		nyx_assassin_mana_burn = { policy = "enemy", priority = 86 },
+		nyx_assassin_spiked_carapace = {
+			policy = "noTarget",
+			priority = 118,
+			requiresRecentDamage = true,
+			alwaysNoTarget = true,
+			urgent = true,
+		},
+		nyx_assassin_vendetta = { policy = "noTarget", priority = 92, alwaysNoTarget = true },
+	},
 }
 
-Core.Catalog.AbilityMeta = {
-    magnataur_reverse_polarity = { radiusSpecial = "pull_radius", defaultRadius = 430, noTarget = true },
-    enigma_black_hole = { radiusSpecial = "radius", defaultRadius = 420, point = true, channel = true },
-    tidehunter_ravage = { radiusSpecial = "radius", defaultRadius = 1250, noTarget = true },
-    -- avoidAllies: place so teammates stay outside and can hit frozen enemies.
-    -- L25 right (+140): special_bonus_unique_faceless_void_2 / TALENT_8.
-    faceless_void_chronosphere = {
-        radiusSpecial = "radius",
-        defaultRadius = 500,
-        point = true,
-        avoidAllies = true,
-        radiusTalent = "special_bonus_unique_faceless_void_2",
-        radiusTalentBonus = 140,
-        radiusTalentSlot = Enum.TalentTypes.TALENT_8,
-    },
-    -- Point dash; cast gate is CastRangeFallback (max travel), not AoE radius.
-    faceless_void_time_walk = { point = true, allowSingle = true },
-    -- Astral Step: API cast range is 0; gate on max_travel_distance, land past min_travel.
-    void_spirit_astral_step = {
-        point = true,
-        allowSingle = true,
-        defaultRadius = 170,
-        minTravel = 200,
-        overshoot = 120,
-    },
-    void_spirit_aether_remnant = { point = true, allowSingle = true, defaultRadius = 130 },
-    void_spirit_dissimilate = { defaultRadius = 520, noTarget = true, allowSingle = true },
-    void_spirit_resonant_pulse = { defaultRadius = 500, noTarget = true, allowSingle = true },
-    axe_berserkers_call = { radiusSpecial = "radius", defaultRadius = 315, noTarget = true, allowSingle = true },
-    earthshaker_echo_slam = { radiusSpecial = "echo_slam_damage_range", defaultRadius = 700, noTarget = true, allowSingle = true },
-    earthshaker_fissure = { radiusSpecial = "fissure_radius", defaultRadius = 225, point = true, allowSingle = true },
-    -- Scepter leap is point-cast; non-scepter stays self buff (live POINT still uses bestPosition).
-    earthshaker_enchant_totem = { point = true, allowSingle = true },
-    crystal_maiden_freezing_field = { radiusSpecial = "radius", defaultRadius = 810, noTarget = true, channel = true },
-    warlock_rain_of_chaos = { radiusSpecial = "aoe", defaultRadius = 600, point = true },
-    nevermore_requiem = { radiusSpecial = "requiem_radius", defaultRadius = 1000, noTarget = true },
-    -- path_width is the damaging AoE; cast length lives in CastRangeFallback.
-    jakiro_macropyre = { radiusSpecial = "path_width", defaultRadius = 500, point = true, channel = true },
-    lina_light_strike_array = { radiusSpecial = "light_strike_array_aoe", defaultRadius = 250, point = true },
-    invoker_sun_strike = { radiusSpecial = "area_of_effect", defaultRadius = 175, point = true },
-    invoker_emp = { defaultRadius = 675, point = true, predictionTime = 1.0 },
-    sniper_shrapnel = {
-        radiusSpecial = "radius",
-        defaultRadius = 475,
-        point = true,
-        debuffMods = { "modifier_sniper_shrapnel_slow", "modifier_sniper_shrapnel" },
-    },
-    -- Onslaught reports global/0 cast range in API; charge reaches up to 2000.
-    primal_beast_onslaught = { defaultRadius = 190, point = true, channel = true, allowSingle = true },
-    primal_beast_rock_throw = { defaultRadius = 225, point = true, allowSingle = true },
-    -- HeroKits wave-1 AoE / gap-close meta (radii from assets/data/npc_abilities.json).
-    centaur_hoof_stomp = { defaultRadius = 325, noTarget = true },
-    sandking_epicenter = { defaultRadius = 500, noTarget = true, channel = true },
-    sandking_burrowstrike = { defaultRadius = 150, point = true, allowSingle = true },
-    slardar_slithereen_crush = { defaultRadius = 325, noTarget = true },
-    rattletrap_battery_assault = { defaultRadius = 275, noTarget = true },
-    rattletrap_hookshot = { defaultRadius = 125, point = true, allowSingle = true },
-    mars_arena_of_blood = { defaultRadius = 550, point = true },
-    mars_spear = { defaultRadius = 125, point = true, allowSingle = true },
-    -- Cone / frontal slam: cast point within radius of self.
-    mars_gods_rebuke = { defaultRadius = 500, point = true, allowSingle = true },
-    skywrath_mage_mystic_flare = { defaultRadius = 170, point = true, allowSingle = true },
-    nyx_assassin_impale = { defaultRadius = 140, point = true, allowSingle = true },
-    witch_doctor_death_ward = { defaultRadius = 600, point = true, channel = true },
-    shadow_shaman_mass_serpent_ward = { defaultRadius = 150, point = true },
-    morphling_waveform = { defaultRadius = 200, point = true, allowSingle = true },
-    -- Point field: AS for allies + enemy miss. Cast under self/local, not on enemy.
-    arc_warden_magnetic_field = {
-        radiusSpecial = "radius",
-        defaultRadius = 300,
-        point = true,
-        positionPolicy = "selfOrLocal",
-        allowSingle = true,
-    },
-    -- Bushwhack roots only if a tree is inside trap_radius of the cast point.
-    hoodwink_bushwhack = { radiusSpecial = "trap_radius", defaultRadius = 265, point = true, allowSingle = true },
-    hoodwink_acorn_shot = { point = true, allowSingle = true },
-    pudge_rot = { radiusSpecial = "rot_radius", defaultRadius = 250, noTarget = true, allowSingle = true },
-    -- Map-wide NO_TARGET; sight_* values are post-cast vision, not hit radius.
-    zuus_thundergods_wrath = { noTarget = true, allowSingle = true, global = true },
+ControlAlly.Profiles.Heroes.npc_dota_hero_dawnbreaker = {
+	abilities = {
+		dawnbreaker_fire_wreath = {
+			policy = "point",
+			priority = 94,
+			radiusSpecial = "swipe_radius",
+			durationSpecial = "duration",
+			committedMotion = true,
+		},
+		dawnbreaker_celestial_hammer = { policy = "point", priority = 86, radiusSpecial = "projectile_radius" },
+		dawnbreaker_converge = { policy = "special", allowHidden = true, menuVisible = true },
+		dawnbreaker_solar_guardian = {
+			policy = "allyPoint",
+			priority = 126,
+			allyMode = "save",
+			allyHealthPct = 48,
+			urgent = true,
+		},
+		dawnbreaker_land = { policy = "special", allowHidden = true, menuVisible = true },
+	},
 }
 
-Core.Catalog.FriendlyBuffAbilities = {
-    oracle_fates_edict = true,
-    oracle_purifying_flames = true,
-    oracle_false_promise = true,
-    dazzle_shallow_grave = true,
-    dazzle_shadow_wave = true,
-    ogre_magi_bloodlust = true,
-    abaddon_aphotic_shield = true,
-    abaddon_borrowed_time = true,
-    treant_living_armor = true,
-    witch_doctor_voodoo_restoration = true,
-    omniknight_repel = true,
-    omniknight_guardian_angel = true,
-    chen_hand_of_god = true,
-    enchantress_enchant = true,
-    io_overcharge = true,
-    io_tether = true,
-    shadow_demon_disruption = true,
-    shadow_demon_purge = true,
+ControlAlly.Profiles.Heroes.npc_dota_hero_omniknight = {
+	abilities = {
+		omniknight_purification = { policy = "ally", priority = 104, allyMode = "heal", allyHealthPct = 76 },
+		omniknight_repel = {
+			policy = "ally",
+			priority = 100,
+			allyMode = "save",
+			allyHealthPct = 64,
+			allyModifiers = { "modifier_omniknight_repel" },
+		},
+		omniknight_martyr = { policy = "ally", priority = 112, allyMode = "save", urgent = true },
+		omniknight_hammer_of_purity = { policy = "enemy", priority = 78, attackModifier = true },
+		omniknight_guardian_angel = {
+			policy = "noTarget",
+			priority = 124,
+			alwaysNoTarget = true,
+			requiresRecentDamage = true,
+			urgent = true,
+		},
+	},
 }
 
-Core.Catalog.AbilityKindOverrides = {
-    ogre_magi_ignite = "lockedEnemy",
-    -- assets: NO_TARGET; Morph/live often reports POINT|UNIT|AOE -- CAST_POSITION only works.
-    earthshaker_enchant_totem = "bestPosition",
-    -- Keep bestPosition issue path; AbilityMeta.positionPolicy = selfOrLocal.
-    arc_warden_magnetic_field = "bestPosition",
-    -- Global UNIT_TARGET|POINT; AbilityCastRange=0 -- not bestPosition (walks to melee).
-    furion_wrath_of_nature = "lockedEnemy",
+ControlAlly.Profiles.Heroes.npc_dota_hero_pangolier = {
+	abilities = {
+		pangolier_swashbuckle = {
+			policy = "vector",
+			priority = 98,
+			radiusSpecial = "start_radius",
+			projectileSpeedSpecial = "dash_speed",
+			committedMotion = true,
+		},
+		pangolier_shield_crash = { policy = "noTarget", priority = 82, radiusSpecial = "radius" },
+		pangolier_gyroshell = { policy = "special", priority = 112, durationSpecial = "duration" },
+		pangolier_gyroshell_stop = { policy = "special", allowHidden = true },
+		pangolier_rollup = { policy = "noTarget", priority = 106, allowHidden = true, alwaysNoTarget = true },
+		pangolier_rollup_stop = { policy = "special", allowHidden = true },
+	},
 }
 
-Core.Catalog.HexAbilities = {
-    lion_voodoo = true,
-    shadow_shaman_voodoo = true,
-    item_sheepstick = true,
+ControlAlly.Profiles.Heroes.npc_dota_hero_marci = {
+	abilities = {
+		marci_grapple = { policy = "enemy", priority = 106, disable = true },
+		marci_companion_run = { policy = "special", priority = 92 },
+		marci_bodyguard = { policy = "ally", priority = 82, allyMode = "buff" },
+		marci_guardian = { policy = "ally", priority = 82, allyMode = "buff" },
+		marci_unleash = { policy = "noTarget", priority = 112, alwaysNoTarget = true },
+	},
 }
 
--- +250 Hex Radius talent (Lion): area point-cast radius when Hex is converted.
-Core.Catalog.HexAoeRadius = {
-    lion_voodoo = 250,
+ControlAlly.Profiles.Heroes.npc_dota_hero_razor = {
+	abilities = {
+		razor_plasma_field = { policy = "noTarget", priority = 82, radiusSpecial = "radius" },
+		razor_static_link = { policy = "enemy", priority = 102 },
+		razor_eye_of_the_storm = { policy = "noTarget", priority = 110, radiusSpecial = "radius" },
+	},
 }
 
-Core.Catalog.PriorityOverrides = {
-    sniper_take_aim = 985,
-    sniper_shrapnel = 775,
-    sniper_concussive_grenade = 770,
-    sniper_assassinate = 710,
-    lion_voodoo = 930,
-    shadow_shaman_voodoo = 930,
-    item_sheepstick = 925,
-    lion_impale = 780,
-    lion_finger_of_death = 700,
-    -- Primal Beast: open with Trample/Uproar, gap-close Onslaught, then Rock/Pulverize.
-    primal_beast_trample = 910,
-    primal_beast_uproar = 900,
-    primal_beast_onslaught = 870,
-    primal_beast_rock_throw = 760,
-    primal_beast_pulverize = 720,
-    arc_warden_magnetic_field = 720,
+ControlAlly.Profiles.Heroes.npc_dota_hero_beastmaster = {
+	abilities = {
+		beastmaster_wild_axes = { policy = "point", priority = 84, radiusSpecial = "radius" },
+		beastmaster_call_of_the_wild = { policy = "noTarget", priority = 62, alwaysNoTarget = true },
+		beastmaster_summon_raptor = { policy = "noTarget", priority = 68, alwaysNoTarget = true },
+		beastmaster_summon_razorback = { policy = "noTarget", priority = 68, alwaysNoTarget = true },
+		beastmaster_primal_roar = { policy = "enemy", priority = 124, disable = true, urgent = true },
+	},
 }
 
-Core.Catalog.CastRangeFallback = {
-    item_bloodthorn = 900,
-    item_orchid = 900,
-    item_rod_of_atos = 1100,
-    item_gungir = 1100,
-    -- assets AbilityCastRange=150; hull-aware IsEntityInRange handles melee contact.
-    item_abyssal_blade = 150,
-    item_heavens_halberd = 750,
-    item_nullifier = 900,
-    item_ethereal_blade = 800,
-    item_dagon = 640,
-    item_spirit_vessel = 750,
-    item_urn_of_shadows = 750,
-    item_harpoon = 700,
-    item_meteor_hammer = 600,
-    sniper_shrapnel = 1800,
-    sniper_assassinate = 3000,
-    invoker_cold_snap = 1000,
-    invoker_tornado = 2000,
-    invoker_chaos_meteor = 700,
-    invoker_sun_strike = 99999,
-    invoker_deafening_blast = 1000,
-    invoker_alacrity = 700,
-    invoker_emp = 950,
-    invoker_ice_wall = 300,
-    item_blink = 1200,
-    item_arcane_blink = 1400,
-    item_overwhelming_blink = 1200,
-    item_swift_blink = 1200,
-    lion_voodoo = 650,
-    lion_impale = 650,
-    lion_finger_of_death = 900,
-    item_sheepstick = 800,
-    primal_beast_onslaught = 2000,
-    primal_beast_rock_throw = 1800,
-    primal_beast_pulverize = 200,
-    -- Max travel / cast from npc_abilities AbilityValues (API often returns 0).
-    morphling_waveform = 925,
-    morphling_adaptive_strike_agi = 825,
-    morphling_replicate = 1000,
-    -- Global nuke; AbilityCastRange=0 -- without fallback combo_approach walks to 80 forever.
-    furion_wrath_of_nature = 99999,
-    faceless_void_time_walk = 800,
-    -- max_travel_distance L3; Ability.GetCastRange often returns 0 (no AbilityCastRange).
-    void_spirit_astral_step = 1000,
-    void_spirit_aether_remnant = 850,
-    mars_spear = 1200,
-    mars_gods_rebuke = 500,
-    magnataur_skewer = 1100,
-    sandking_burrowstrike = 775,
-    jakiro_macropyre = 1400,
-    earthshaker_fissure = 1600,
-    earthshaker_enchant_totem = 950,
-    pudge_meat_hook = 1300,
+ControlAlly.Profiles.Heroes.npc_dota_hero_shadow_shaman = {
+	abilities = {
+		shadow_shaman_ether_shock = { policy = "enemy", priority = 76 },
+		shadow_shaman_voodoo = { policy = "enemy", priority = 116, disable = true },
+		shadow_shaman_shackles = { policy = "enemy", priority = 110, disable = true },
+		shadow_shaman_mass_serpent_ward = { policy = "special", priority = 112, radiusSpecial = "spawn_radius" },
+		shadow_shaman_urnaconda = {
+			policy = "point",
+			priority = 94,
+			allowHidden = true,
+			menuVisible = true,
+		},
+	},
 }
 
-Core.Catalog.InvokerSteps = {
-    { q = 0, w = 2, e = 1, id = "invoker_alacrity", kind = "localHero", tag = "invoker_alacrity_ally" },
-    { q = 1, w = 0, e = 2, id = "invoker_forge_spirit", kind = "auto", tag = "invoker_forge_spirit" },
-    {
-        q = 3,
-        w = 0,
-        e = 0,
-        id = "invoker_cold_snap",
-        kind = "lockedEnemy",
-        tag = "invoker_cold_snap",
-        linkBreak = true,
-        skipMods = { "modifier_invoker_cold_snap" },
-    },
-    { q = 1, w = 2, e = 0, id = "invoker_tornado", kind = "auto", tag = "invoker_tornado" },
-    { q = 0, w = 3, e = 0, id = "invoker_emp", kind = "auto", tag = "invoker_emp" },
-    { q = 0, w = 1, e = 2, id = "invoker_chaos_meteor", kind = "bestPosition", tag = "invoker_meteor" },
-    { q = 0, w = 0, e = 3, id = "invoker_sun_strike", kind = "bestPosition", tag = "invoker_sun_strike" },
-    { q = 1, w = 1, e = 1, id = "invoker_deafening_blast", kind = "auto", tag = "invoker_deafening_blast" },
-    { q = 2, w = 0, e = 1, id = "invoker_ice_wall", kind = "auto", tag = "invoker_ice_wall" },
-    { q = 2, w = 1, e = 0, id = "invoker_ghost_walk", kind = "auto", tag = "invoker_ghost_walk" },
+ControlAlly.Profiles.Heroes.npc_dota_hero_dark_seer = {
+	abilities = {
+		dark_seer_vacuum = { policy = "point", priority = 104, disable = true, radiusSpecial = "radius" },
+		dark_seer_ion_shell = {
+			policy = "ally",
+			priority = 78,
+			allyMode = "buff",
+			allyModifiers = { "modifier_dark_seer_ion_shell" },
+		},
+		dark_seer_surge = {
+			policy = "ally",
+			priority = 88,
+			allyMode = "buff",
+			allyModifiers = { "modifier_dark_seer_surge" },
+		},
+		dark_seer_wall_of_replica = {
+			policy = "vector",
+			priority = 116,
+			vectorPerpendicular = true,
+			radiusSpecial = "width",
+		},
+	},
 }
 
-Core.Catalog.FriendlyOnlyAbilities = {
-    oracle_fates_edict = true,
-    oracle_purifying_flames = true,
-    oracle_false_promise = true,
-    dazzle_shallow_grave = true,
-    abaddon_aphotic_shield = true,
-    ogre_magi_bloodlust = true,
-    treant_living_armor = true,
-    omniknight_repel = true,
-    chen_hand_of_god = true,
-    io_overcharge = true,
-    io_tether = true,
-    shadow_demon_disruption = true,
+ControlAlly.Profiles.Heroes.npc_dota_hero_dark_willow = {
+	abilities = {
+		dark_willow_bramble_maze = { policy = "point", priority = 96, disable = true },
+		dark_willow_cursed_crown = { policy = "enemy", priority = 104, disable = true },
+		dark_willow_shadow_realm = { policy = "noTarget", priority = 84, alwaysNoTarget = true },
+		dark_willow_bedlam = { policy = "noTarget", priority = 102, radiusSpecial = "attack_radius" },
+		dark_willow_terrorize = { policy = "point", priority = 118, disable = true },
+	},
 }
 
-Core.Catalog.SupportSelfAbilities = {
-    "oracle_false_promise",
-    "oracle_fates_edict",
-    "oracle_purifying_flames",
-    "dazzle_shallow_grave",
-    "abaddon_aphotic_shield",
-    "abaddon_borrowed_time",
-    "ogre_magi_bloodlust",
-    "treant_living_armor",
-    "omniknight_repel",
-    "omniknight_guardian_angel",
-    "chen_hand_of_god",
-    "shadow_demon_disruption",
-    "io_overcharge",
-    "io_tether",
-}
-Core.Catalog.OwnerTriggeredAbilities = {
-    abaddon_borrowed_time = true,
-    io_overcharge = true,
-}
-Core.Catalog.SkipAbilities = {
-    crystal_maiden_freezing_field_stop = true,
-    -- Invoker orbs/invoke are driven by the planner; only invoked spells stay in Abilities.
-    invoker_quas = true,
-    invoker_wex = true,
-    invoker_exort = true,
-    invoker_invoke = true,
-    -- Charge release is cast only via Onslaught flow, not as a standalone combo ability.
-    primal_beast_onslaught_release = true,
-    -- Morph ult / Morph Replicate toggle: profile-owned (generic must not spam).
-    morphling_morph = true,
-    morphling_replicate = true,
-    morphling_morph_replicate = true,
-    -- Post-Time Walk escape; generic must not reverse an engage mid-combo.
-    faceless_void_time_walk_reverse = true,
-    -- Farm / reposition; never part of a kill combo.
-    furion_teleportation = true,
-    furion_force_of_nature = true,
-    -- Autocast orb attack; CAST_TARGET never goes on CD and soft-locks the queue.
-    drow_ranger_frost_arrows = true,
-    -- Passive.
-    drow_ranger_marksmanship = true,
-    -- Defensive active / eject; not part of the kill combo.
-    pudge_flesh_heap = true,
-    pudge_eject = true,
+ControlAlly.Profiles.Heroes.npc_dota_hero_warlock = {
+	abilities = {
+		warlock_fatal_bonds = { policy = "enemy", priority = 82 },
+		warlock_upheaval = { policy = "point", priority = 86, radiusSpecial = "aoe" },
+		warlock_rain_of_chaos = { policy = "point", priority = 126, disable = true, radiusSpecial = "aoe" },
+	},
 }
 
--- Confirmed once per bind normally; these may be re-queued while still castable.
-Core.Catalog.ReusableComboAbilities = {
-    morphling_adaptive_strike_agi = true,
-    nevermore_shadowraze1 = true,
-    nevermore_shadowraze2 = true,
-    nevermore_shadowraze3 = true,
+ControlAlly.Profiles.Heroes.npc_dota_hero_oracle = {
+	abilities = {
+		oracle_fortunes_end = { policy = "special" },
+		oracle_fates_edict = { policy = "special" },
+		oracle_purifying_flames = { policy = "special" },
+		oracle_false_promise = {
+			policy = "ally",
+			priority = 138,
+			allyMode = "save",
+			allyHealthPct = 34,
+			urgent = true,
+		},
+		oracle_rain_of_destiny = { policy = "point", priority = 78, radiusSpecial = "radius" },
+	},
 }
 
--- Release / end abilities: only queue while the parent spell is channelling.
-Core.Catalog.ChannelReleaseOf = {
-    hoodwink_sharpshooter_release = "hoodwink_sharpshooter",
+ControlAlly.Profiles.Heroes.npc_dota_hero_spirit_breaker = {
+	abilities = {
+		spirit_breaker_charge_of_darkness = {
+			policy = "enemy",
+			priority = 98,
+			global = true,
+			disable = true,
+			projectileSpeedSpecial = "movement_speed",
+			committedMotion = true,
+			motionModifiers = { "modifier_spirit_breaker_charge_of_darkness" },
+		},
+		spirit_breaker_bulldoze = { policy = "noTarget", priority = 94, alwaysNoTarget = true },
+		spirit_breaker_nether_strike = { policy = "enemy", priority = 120, disable = true },
+		spirit_breaker_planar_pocket = {
+			policy = "self",
+			priority = 92,
+			requiresRecentDamage = true,
+			allowHidden = true,
+			menuVisible = true,
+		},
+	},
 }
 
--- Self buffs: do not re-queue while the active modifier is present.
-Core.Catalog.SkipWhileSelfModifier = {
-    hoodwink_scurry = "modifier_hoodwink_scurry_active",
-    pudge_rot = "modifier_pudge_rot",
+ControlAlly.Profiles.Heroes.npc_dota_hero_zuus = {
+	abilities = {
+		zuus_arc_lightning = { policy = "enemy", priority = 70 },
+		zuus_lightning_bolt = { policy = "enemy", priority = 86, disable = true },
+		zuus_heavenly_jump = { policy = "noTarget", priority = 78, radiusSpecial = "range" },
+		zuus_cloud = { policy = "point", priority = 90, allowHidden = true, menuVisible = true },
+		zuus_thundergods_wrath = { policy = "special", priority = 110 },
+		zuus_lightning_hands = { policy = "toggle", priority = 62, toggleMode = "enemy", allowHidden = true },
+	},
 }
 
--- Point spells used to close distance; safe to drop once already in melee/ult range.
--- Do NOT list nukes (Lightning Bolt, etc.) — prune must not delete damage spells.
-Core.Catalog.GapCloserAbilities = {
-    pudge_meat_hook = true,
-    rattletrap_hookshot = true,
-    magnataur_skewer = true,
-    mirana_leap = true,
-    sandking_burrowstrike = true,
-    morphling_waveform = true,
-    ember_spirit_fire_remnant = true,
-    void_spirit_astral_step = true,
-    faceless_void_time_walk = true,
-    phoenix_icarus_dive = true,
-    spirit_breaker_charge_of_darkness = true,
-    huskar_life_break = true,
-    mars_spear = true,
-    bat_rider_flaming_lasso = true,
+ControlAlly.Profiles.Heroes.npc_dota_hero_winter_wyvern = {
+	abilities = {
+		winter_wyvern_arctic_burn = { policy = "noTarget", priority = 78, alwaysNoTarget = true },
+		winter_wyvern_cold_embrace = {
+			policy = "ally",
+			priority = 118,
+			allyMode = "save",
+			allyHealthPct = 30,
+			urgent = true,
+		},
+		winter_wyvern_splinter_blast = { policy = "special", priority = 84 },
+		winter_wyvern_winters_curse = { policy = "special", priority = 126, disable = true },
+	},
 }
 
--- Only queue while the locked enemy still has this modifier (e.g. Reel In needs Ensnare).
-Core.Catalog.RequiresEnemyModifier = {
-    naga_siren_reel_in = "modifier_naga_siren_ensnare",
+ControlAlly.Profiles.Heroes.npc_dota_hero_drow_ranger = {
+	abilities = {
+		drow_ranger_frost_arrows = { policy = "enemy", priority = 66, attackModifier = true, allowStacking = true },
+		drow_ranger_wave_of_silence = { policy = "point", priority = 100, disable = true, lineProjectile = true },
+		drow_ranger_glacier = { policy = "noTarget", priority = 78, alwaysNoTarget = true },
+		drow_ranger_multishot = { policy = "point", priority = 88, lineProjectile = true },
+	},
 }
 
-Core.Catalog.Shadowraze = {
-    { id = "nevermore_shadowraze1", range = 200 },
-    { id = "nevermore_shadowraze2", range = 450 },
-    { id = "nevermore_shadowraze3", range = 700 },
-}
-Core.Catalog.ShadowrazeRadius = 250
--- Align budget: prefer closing in; avoid backing out of a fight for a farther raze.
-Core.Catalog.ShadowrazeMaxClose = 140
-Core.Catalog.ShadowrazeMaxBack = 100
-
-Core.CanAlignShadowraze = function(dist, range)
-    if type(dist) ~= "number" or type(range) ~= "number" then
-        return false
-    end
-    local err = math.abs(dist - range)
-    if dist < range then
-        return err <= (Core.Catalog.ShadowrazeMaxBack or 100)
-    end
-    return err <= (Core.Catalog.ShadowrazeMaxClose or 140)
-end
-
-Core.PickBestShadowraze = function(dist)
-    if type(dist) ~= "number" or dist < 0 then
-        return nil
-    end
-    local best = nil
-    local bestScore = math.huge
-    for i = 1, #Core.Catalog.Shadowraze do
-        local raze = Core.Catalog.Shadowraze[i]
-        if Core.CanAlignShadowraze(dist, raze.range) then
-            local err = math.abs(dist - raze.range)
-            -- Prefer closing in over backing up.
-            if dist < raze.range then
-                err = err + 35
-            end
-            if err < bestScore then
-                bestScore = err
-                best = raze
-            end
-        end
-    end
-    return best
-end
-
--- Silence/root/disarm/amp: do not treat as hard CC for hex/sheep extend gating,
--- and do not park casts waiting for an extend window (cast through active stun/hex).
-Core.Catalog.SoftDisableAbilities = {
-    item_orchid = true,
-    item_bloodthorn = true,
-    item_rod_of_atos = true,
-    item_gungir = true,
-    item_heavens_halberd = true,
-    item_ethereal_blade = true,
+ControlAlly.Profiles.Heroes.npc_dota_hero_necrolyte = {
+	abilities = {
+		necrolyte_death_pulse = { policy = "noTarget", priority = 82, radiusSpecial = "area_of_effect" },
+		necrolyte_ghost_shroud = {
+			policy = "noTarget",
+			priority = 116,
+			defensiveHealthPct = 46,
+			requiresRecentDamage = true,
+			alwaysNoTarget = true,
+			urgent = true,
+		},
+		necrolyte_reapers_scythe = { policy = "special", priority = 126, preferLowHealth = true },
+		necrolyte_death_seeker = { policy = "enemy", priority = 96, allowHidden = true, menuVisible = true },
+	},
 }
 
-Core.Catalog.InvokerEndItems = {
-    { id = "item_sheepstick", targetPolicy = "enemy" },
-    { id = "item_ethereal_blade", targetPolicy = "enemy" },
-    { id = "item_lotus_orb", targetPolicy = "localHero" },
-}
-Core.Catalog.InvokerEndItemRoles = {
-    hex = Core.Catalog.InvokerEndItems[1],
-    ethereal = Core.Catalog.InvokerEndItems[2],
-    support = Core.Catalog.InvokerEndItems[3],
+ControlAlly.Profiles.Heroes.npc_dota_hero_doom_bringer = {
+	abilities = {
+		doom_bringer_scorched_earth = { policy = "noTarget", priority = 82, radiusSpecial = "radius" },
+		doom_bringer_infernal_blade = { policy = "enemy", priority = 86, attackModifier = true, disable = true },
+		doom_bringer_doom = { policy = "enemy", priority = 128, urgent = true },
+		doom_bringer_devour = { policy = "disabled" },
+	},
 }
 
-local Icons = {
-    enable = "\u{f00c}",
-    hero = "\u{f007}",
-    abilities = "\u{f890}",
-    items = "\u{e196}",
-    gear = "\u{f013}",
-    target = "\u{f05b}",
-    hits = "\u{f0c0}",
-    mana = "\u{f043}",
-    extend = "\u{f021}",
-    link = "\u{f127}",
-    draw = "\u{f2d0}",
-    bug = "\u{f188}",
+ControlAlly.Profiles.Heroes.npc_dota_hero_bounty_hunter = {
+	abilities = {
+		bounty_hunter_shuriken_toss = { policy = "enemy", priority = 84 },
+		bounty_hunter_jinada = { policy = "enemy", priority = 74, attackModifier = true },
+		bounty_hunter_wind_walk = { policy = "noTarget", priority = 88, alwaysNoTarget = true },
+		bounty_hunter_track = { policy = "enemy", priority = 100, targetModifiers = { "modifier_bounty_hunter_track" } },
+		bounty_hunter_wind_walk_ally = { policy = "ally", priority = 98, allyMode = "save", allowHidden = true },
+	},
 }
 
---#endregion
-
---#region State
-
-local Persistent = {
-    logger = nil,
-    overlayFont = nil,
-    menuReady = false,
-    ui = {},
-    builtin = {
-        comboKey = nil,
-        lastHeroMenuName = nil,
-        targetSearchRange = nil,
-        unitsSearchRange = nil,
-        targetStyle = nil,
-        moveToCursor = nil,
-    },
-}
-local UI = Persistent.ui
-local BuiltIn = Persistent.builtin
-
-local Runtime = {
-    lastUpdateAt = -math.huge,
-    lastAllyScanAt = -math.huge,
-    lastTargetResolveAt = -math.huge,
-    lastMultiSyncAt = -math.huge,
-    lastBuiltinSyncAt = -math.huge,
-    controllableAllies = {},
-    selectedPlayerId = nil,
-    sessionHero = nil,
-    localHero = nil,
-    localPlayer = nil,
-    localPlayerId = nil,
-    lockedEnemy = nil,
-    lockedEnemyScore = nil,
-    actionQueue = {},
-    pending = nil,
-    comboActive = false,
-    comboKeyHeldPrev = false,
-    comboForceResolve = false,
-    syncedHeroName = nil,
-    syncedAllyPlayerId = nil,
-    syncedAllyRosterSig = nil,
-    syncedInventorySig = nil,
-    lastMoveOrderAt = -math.huge,
-    lastAttackOrderAt = -math.huge,
-    lastAttackTarget = nil,
-    lastFollowOrderAt = -math.huge,
-    lastFollowPos = nil,
-    failedActions = {},
-    usedActions = {},
-    usedActionCharges = {},
-    sfUltBurstActive = false,
-    sfUltSetupId = nil,
-    debugVerboseAt = {},
-    shrapnelLastCastAt = 0,
-    shrapnelLastPos = nil,
-    shrapnelLastEnemy = nil,
-    nextComboAt = 0,
-    invokerComboEnemy = nil,
-    invokerLastInvokeAt = 0,
-    invokerAwaitSpell = nil,
-    comboReleaseAt = nil,
-    renderSnapshot = nil,
-    orderSequence = 0,
-    invokerFsm = { phase = "selectStep", spellId = nil },
-    combatSnapshot = nil,
-    catalogCache = nil,
-    lastCatalogRefreshAt = -math.huge,
-    snapshotInvalidated = true,
-    emptyPlanUntil = 0,
-    lastMovePos = nil,
-    debugTransitions = {},
-    comboTrace = {},
-    comboStartedAt = nil,
-    trampleOrbitAngle = nil,
-    lastTrampleOrbitAt = -math.huge,
-    morphSourceUnitName = nil,
-    morphAwaitReplicate = false,
-    morphWasReplicated = false,
-    morphFormPending = false,
-    morphAwaitReplicateAt = nil,
-    morphFormPendingAt = nil,
-    controlLostSince = nil,
+ControlAlly.Profiles.Heroes.npc_dota_hero_lich = {
+	abilities = {
+		lich_frost_nova = { policy = "enemy", priority = 84 },
+		lich_frost_shield = {
+			policy = "ally",
+			priority = 104,
+			allyMode = "save",
+			allyModifiers = { "modifier_lich_frost_shield" },
+		},
+		lich_sinister_gaze = { policy = "enemy", priority = 108, disable = true },
+		lich_chain_frost = { policy = "special", priority = 120 },
+		lich_ice_spire = { policy = "point", priority = 96, allowHidden = true, menuVisible = true },
+	},
 }
 
---#endregion
-
---#region Helpers
-
-local function TryCall(fn, ...)
-    if type(fn) ~= "function" then
-        return false, "expected a callable function"
-    end
-    return pcall(fn, ...)
-end
-
----@generic T
----@param fn fun(...): T
----@param ... any
----@return T|nil
-local function SafeValue(fn, ...)
-    local ok, value = TryCall(fn, ...)
-    if not ok then
-        return nil
-    end
-    return value
-end
-
-local function DbgWrite(message)
-    if Persistent.logger then
-        Persistent.logger:info(message)
-    end
-end
-
-local function IsDebugEnabled()
-    return Persistent.menuReady and UI.Debug and SafeValue(UI.Debug.Get, UI.Debug) == true
-end
-
-local function IsDebugVerbose()
-    return IsDebugEnabled() and UI.DebugVerbose and SafeValue(UI.DebugVerbose.Get, UI.DebugVerbose) == true
-end
-
-local function DbgVerbose(key, message, ...)
-    if not IsDebugVerbose() then
-        return
-    end
-
-    local now = GameRules and SafeValue(GameRules.GetGameTime) or 0
-    key = key or "default"
-    local lastAt = Runtime.debugVerboseAt[key] or -math.huge
-    if now - lastAt < DEBUG_VERBOSE_INTERVAL then
-        return
-    end
-    Runtime.debugVerboseAt[key] = now
-
-    if select("#", ...) > 0 then
-        message = string.format(message, ...)
-    end
-
-    DbgWrite((key == "event" and "[event] " or "[verbose] ") .. message)
-end
-
--- Unthrottled verbose: plan rebuilds, queue drops, hero-profile decisions.
-Core.DbgEvent = function(message, ...)
-    if not IsDebugVerbose() then
-        return
-    end
-    if select("#", ...) > 0 then
-        message = string.format(message, ...)
-    end
-    DbgWrite("[event] " .. message)
-end
-
-local function DbgTransition(key, state, message, ...)
-    if not IsDebugVerbose() or Runtime.debugTransitions[key] == state then
-        return
-    end
-    Runtime.debugTransitions[key] = state
-    DbgVerbose("transition_" .. key, message, ...)
-end
-
-local function DbgImportant(message, ...)
-    if not IsDebugEnabled() then
-        return
-    end
-
-    if select("#", ...) > 0 then
-        message = string.format(message, ...)
-    end
-
-    DbgWrite(message)
-end
-
-Core.FormatActionPreview = function(action)
-    if not action then
-        return "?"
-    end
-    local id = action.abilityId or action.tag or "?"
-    local kind = action.kind or "?"
-    local prio = type(action.priority) == "number" and action.priority or 0
-    return string.format("%s:%s@%d", id, kind, prio)
-end
-
-Core.FormatPlanPreview = function(queue, limit)
-    if not queue or #queue == 0 then
-        return ""
-    end
-    limit = type(limit) == "number" and limit or 8
-    local preview = {}
-    for i = 1, math.min(#queue, limit) do
-        preview[#preview + 1] = Core.FormatActionPreview(queue[i])
-    end
-    if #queue > limit then
-        preview[#preview + 1] = string.format("+%d", #queue - limit)
-    end
-    return table.concat(preview, ", ")
-end
-
-local function OrderTag(suffix)
-    return ORDER_PREFIX .. tostring(suffix)
-end
-
-local function IsOurOrder(data)
-    if not data then
-        return false
-    end
-    local id = data.identifier
-    return type(id) == "string" and id:sub(1, #ORDER_PREFIX) == ORDER_PREFIX
-end
-
-local function Dist2D(a, b)
-    if not a or not b then
-        return math.huge
-    end
-    return (b - a):Length2D()
-end
-
-local function HasAbilityBehaviorFlag(behavior, flag)
-    if type(behavior) ~= "number" or type(flag) ~= "number" then
-        return false
-    end
-    return (behavior & flag) ~= 0
-end
-
-local function GetAbilityId(ability)
-    if not ability then
-        return nil
-    end
-    local id = SafeValue(Ability.GetName, ability)
-    if type(id) ~= "string" or id == "" then
-        id = SafeValue(Ability.GetBaseName, ability)
-    end
-    return type(id) == "string" and id ~= "" and id or nil
-end
-
-local function NormalizeItemId(rawId)
-    if type(rawId) ~= "string" or rawId == "" then
-        return nil
-    end
-
-    local id = rawId:lower()
-    while id:sub(1, 5) == "item_" and id:sub(6, 10) == "item_" do
-        id = id:sub(6)
-    end
-    if id:sub(1, 5) ~= "item_" then
-        id = "item_" .. id
-    end
-    return id
-end
-
-local function GetItemId(item)
-    return NormalizeItemId(GetAbilityId(item))
-end
-
-local function IsLinkBreakItem(id)
-    if not id then
-        return false
-    end
-    for i = 1, #Core.Catalog.LinkbreakItems do
-        local popId = Core.Catalog.LinkbreakItems[i]
-        if popId == id then
-            return true
-        end
-        if popId == "item_dagon" and id:match("^item_dagon") then
-            return true
-        end
-    end
-    return false
-end
-
-local function MarkActionFailed(actionKey, now)
-    if actionKey then
-        Runtime.failedActions[actionKey] = now + FAIL_SKIP_DURATION
-    end
-end
-
-local function IsActionBlocked(actionKey, now)
-    local untilTime = Runtime.failedActions[actionKey]
-    return untilTime ~= nil and now < untilTime
-end
-
-local function MarkActionUsed(abilityId)
-    if not abilityId then
-        return
-    end
-    Runtime.usedActions[abilityId] = true
-    local ability = Runtime.pending and Runtime.pending.ability
-    if not ability or Runtime.pending.abilityId ~= abilityId then
-        Runtime.usedActionCharges[abilityId] = nil
-        return
-    end
-    -- Charge spells (Scurry, etc.) stay IsCastable with leftover charges; remember
-    -- post-cast charge count so ClearUsedActionsWhenReady does not immediately unmark.
-    local charges = SafeValue(Ability.GetCurrentCharges, ability)
-    local restore = SafeValue(Ability.ChargeRestoreTimeRemaining, ability)
-    if type(charges) == "number"
-        and (charges > 0 or (type(restore) == "number" and restore > 0)) then
-        Runtime.usedActionCharges[abilityId] = charges
-    else
-        Runtime.usedActionCharges[abilityId] = nil
-    end
-end
-
-local function IsActionUsed(abilityId)
-    return abilityId ~= nil and Runtime.usedActions[abilityId] == true
-end
-
-local function ShouldSkipComboItem(id)
-    if not id then
-        return true
-    end
-    if Core.Catalog.SkipItems[id] then
-        return true
-    end
-    if id:find("recipe", 1, true) then
-        return true
-    end
-    if id:find("ability_capture", 1, true) then
-        return true
-    end
-    if id:find("^item_ability_") then
-        return true
-    end
-    return false
-end
-
-local function IsKnownComboItem(id)
-    if id == "item_refresher" then
-        return true
-    end
-    if Core.Catalog.SelfItems[id] or Core.Catalog.SelfNoTargetItems[id] then
-        return true
-    end
-    if Core.Catalog.NeutralActiveItems and Core.Catalog.NeutralActiveItems[id] then
-        return true
-    end
-    if IsLinkBreakItem(id) then
-        return true
-    end
-    for i = 1, #Core.Catalog.BlinkItems do
-        if Core.Catalog.BlinkItems[i] == id then
-            return true
-        end
-    end
-    return false
-end
-
-local function IsRealHeroItem(ability, id)
-    if not ability or not id or id:sub(1, 5) ~= "item_" then
-        return false
-    end
-    if ShouldSkipComboItem(id) then
-        return false
-    end
-    if SafeValue(Ability.IsHidden, ability) then
-        return false
-    end
-
-    -- Menu/combo only care about activatable items (not pure passives like Cuirass/Daedalus).
-    if IsKnownComboItem(id) then
-        return true
-    end
-    local asset = Core.Catalog.GetAssetCastInfo(id)
-    if asset and asset.kind then
-        return true
-    end
-    local behavior = SafeValue(Ability.GetBehavior, ability, true)
-        or SafeValue(Ability.GetBehavior, ability, false)
-        or 0
-    return HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_NO_TARGET)
-        or HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_UNIT_TARGET)
-        or HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_POINT)
-        or HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_TOGGLE)
-end
-
-local function ActionTag(prefix, id)
-    if not id then
-        return prefix
-    end
-    return prefix .. id:gsub("^item_", "")
-end
-
-local function GetGameTime()
-    return SafeValue(GameRules.GetGameTime) or 0
-end
-
-local function SaveConfigInt(key, value)
-    SafeValue(Config.WriteInt, CONFIG_SECTION, key, value)
-end
-
-local function LoadConfigInt(key, defaultValue)
-    local sentinel = 2147483646
-    local value = SafeValue(Config.ReadInt, CONFIG_SECTION, key, sentinel)
-    if value == sentinel then
-        value = SafeValue(Config.ReadInt, CONFIG_SECTION_LEGACY, key, sentinel)
-        if type(value) == "number" and value ~= sentinel then
-            SaveConfigInt(key, value)
-        end
-    end
-    if type(value) ~= "number" or value == sentinel then
-        return defaultValue
-    end
-    return value
-end
-
--- Item toggles are scoped per ally hero (shared item ids like BKB must not bleed across allies).
-function Core.Settings.ItemToggleKey(heroName, itemId)
-    return "itm_" .. tostring(heroName) .. "_" .. tostring(itemId)
-end
-
-function Core.Settings.LoadItemToggle(heroName, itemId)
-    if type(itemId) ~= "string" or itemId == "" then
-        return true
-    end
-    if type(heroName) == "string" and heroName ~= "" then
-        local key = Core.Settings.ItemToggleKey(heroName, itemId)
-        local sentinel = 2147483646
-        local scoped = SafeValue(Config.ReadInt, CONFIG_SECTION, key, sentinel)
-        if type(scoped) == "number" and scoped ~= sentinel then
-            return scoped == 1
-        end
-        -- One-time migrate from the old global itm_<id> key.
-        local legacy = LoadConfigInt("itm_" .. itemId, 1)
-        SaveConfigInt(key, legacy)
-        return legacy == 1
-    end
-    return LoadConfigInt("itm_" .. itemId, 1) == 1
-end
-
-function Core.Settings.SaveItemToggle(heroName, itemId, enabled)
-    if type(itemId) ~= "string" or itemId == "" then
-        return
-    end
-    local value = enabled and 1 or 0
-    if type(heroName) == "string" and heroName ~= "" then
-        SaveConfigInt(Core.Settings.ItemToggleKey(heroName, itemId), value)
-        return
-    end
-    SaveConfigInt("itm_" .. itemId, value)
-end
-
-local function MenuIcon(widget, icon)
-    if widget and icon and widget.Icon then
-        SafeValue(widget.Icon, widget, icon)
-    end
-end
-
-local function L(en)
-    return en
-end
-
-local function IsValidHero(unit)
-    return unit
-        and SafeValue(Entity.IsAlive, unit)
-        and SafeValue(Entity.IsDormant, unit) ~= true
-        and SafeValue(NPC.IsIllusion, unit) ~= true
-end
-
-local function IsMagicImmune(unit)
-    if not IsValidHero(unit) then
-        return true
-    end
-    if SafeValue(NPC.HasState, unit, Enum.ModifierState.MODIFIER_STATE_MAGIC_IMMUNE) then
-        return true
-    end
-    for _, mod in ipairs(Core.Catalog.MagicImmuneModifiers) do
-        if SafeValue(NPC.HasModifier, unit, mod) then
-            return true
-        end
-    end
-    return false
-end
-
-local function HasAnyModifier(unit, mods)
-    if not unit or not mods then
-        return false
-    end
-    for i = 1, #mods do
-        if SafeValue(NPC.HasModifier, unit, mods[i]) then
-            return true
-        end
-    end
-    return false
-end
-
-local function GetModifierRemaining(mod, now)
-    now = now or GetGameTime()
-
-    local dieTime = SafeValue(Modifier.GetDieTime, mod)
-    if type(dieTime) == "number" and dieTime > now then
-        return dieTime - now
-    end
-
-    local duration = SafeValue(Modifier.GetDuration, mod)
-    local created = SafeValue(Modifier.GetCreationTime, mod)
-    if type(duration) == "number" and duration > 0 and type(created) == "number" and created > 0 then
-        local remaining = duration - (now - created)
-        if remaining > 0 then
-            return remaining
-        end
-    end
-
-    local lastApplied = SafeValue(Modifier.GetLastAppliedTime, mod)
-    if type(duration) == "number" and duration > 0 and type(lastApplied) == "number" and lastApplied > 0 then
-        local remaining = duration - (now - lastApplied)
-        if remaining > 0 then
-            return remaining
-        end
-    end
-
-    return nil
-end
-
-local function GetActiveDisableRemaining(unit, abilityId, now)
-    local mods = Core.Catalog.DisableModifiers[abilityId]
-    if not unit or not mods then
-        return nil
-    end
-
-    local best = nil
-    for i = 1, #mods do
-        if SafeValue(NPC.HasModifier, unit, mods[i]) then
-            local mod = SafeValue(NPC.GetModifier, unit, mods[i])
-            if mod then
-                local remaining = GetModifierRemaining(mod, now)
-                if remaining and (not best or remaining > best) then
-                    best = remaining
-                end
-            end
-        end
-    end
-
-    return best
-end
-
--- Best remaining hard CC (hex/stun) across known disable modifiers.
--- Soft disables (silence/root/disarm) are excluded so sheep/hex can still land.
-local function GetHardCcRemaining(unit, now)
-    if not unit then
-        return nil
-    end
-    now = now or GetGameTime()
-    local best = nil
-    for abilityId, mods in pairs(Core.Catalog.DisableModifiers) do
-        if type(mods) == "table" and not Core.Catalog.SoftDisableAbilities[abilityId] then
-            for i = 1, #mods do
-                local modName = mods[i]
-                if SafeValue(NPC.HasModifier, unit, modName) then
-                    local mod = SafeValue(NPC.GetModifier, unit, modName)
-                    if mod then
-                        local remaining = GetModifierRemaining(mod, now)
-                        if remaining and (not best or remaining > best) then
-                            best = remaining
-                        end
-                    end
-                end
-            end
-        end
-    end
-    return best
-end
-
-local function GetHeroDisplayName(unitName)
-    if not unitName then
-        return "Unknown"
-    end
-    if GameLocalizer and GameLocalizer.FindNPC then
-        local localized = SafeValue(GameLocalizer.FindNPC, unitName)
-        if type(localized) == "string" and localized ~= "" then
-            return localized
-        end
-    end
-    local short = unitName:gsub("^npc_dota_hero_", ""):gsub("_", " ")
-    return short:sub(1, 1):upper() .. short:sub(2)
-end
-
-local function GetAbilityIconPath(abilityId)
-    if not abilityId then
-        return ""
-    end
-    if abilityId:sub(1, 5) == "item_" then
-        return "panorama/images/items/" .. abilityId:gsub("item_", "") .. "_png.vtex_c"
-    end
-    return "panorama/images/spellicons/" .. abilityId .. "_png.vtex_c"
-end
-
-Core.AllyWidgetId = function(playerId)
-    return "ally_" .. tostring(playerId)
-end
-
-Core.ParseAllyWidgetId = function(itemId)
-    if type(itemId) ~= "string" then
-        return nil
-    end
-    local id = itemId:match("^ally_(%-?%d+)$")
-    return id and tonumber(id) or nil
-end
-
-Core.GetHeroIconPath = function(unitName)
-    if not unitName or unitName == "" then
-        return ""
-    end
-    return "panorama/images/heroes/" .. unitName .. "_png.vtex_c"
-end
-
-Core.GetSelectedAllyPlayerIdFromUI = function()
-    if not UI.AllyHero or not UI.AllyHero.ListEnabled then
-        return nil
-    end
-    local enabled = SafeValue(UI.AllyHero.ListEnabled, UI.AllyHero)
-    if type(enabled) ~= "table" then
-        return nil
-    end
-    for i = 1, #enabled do
-        local playerId = Core.ParseAllyWidgetId(enabled[i])
-        if type(playerId) == "number" then
-            return playerId
-        end
-    end
-    return nil
-end
-
-local function CanAct(unit)
-    if not IsValidHero(unit) then
-        return false
-    end
-    return SafeValue(NPC.IsStunned, unit) ~= true
-        and SafeValue(NPC.IsSilenced, unit) ~= true
-end
-
--- Static AbilityBehavior from assets/data/cast_catalog.lua (on Core to avoid local-limit).
-do
-    local ok, mod = pcall(require, "assets.data.cast_catalog")
-    if ok and type(mod) == "table" then
-        Core.Catalog.AssetCast = mod
-    end
-    ok, mod = pcall(require, "assets.data.hero_kits")
-    if ok and type(mod) == "table" then
-        Core.Catalog.HeroKitsGenerated = mod
-    end
-end
-
-Core.Catalog.GetAssetCastInfo = function(abilityId)
-    local catalog = Core.Catalog.AssetCast
-    if not catalog or type(abilityId) ~= "string" then
-        return nil
-    end
-    if abilityId:sub(1, 5) == "item_" then
-        return catalog.items and catalog.items[abilityId] or nil
-    end
-    return catalog.abilities and catalog.abilities[abilityId] or nil
-end
-
-local function GetCastRange(unit, ability)
-    if not ability then
-        return 0
-    end
-    local range = SafeValue(Ability.GetCastRange, ability) or 0
-    if range <= 0 then
-        local id = GetAbilityId(ability)
-        if id then
-            range = Core.Catalog.CastRangeFallback[id]
-            if not range and id:match("^item_dagon") then
-                range = Core.Catalog.CastRangeFallback.item_dagon
-            end
-            if not range then
-                local asset = Core.Catalog.GetAssetCastInfo(id)
-                if asset then
-                    range = asset.castRange or asset.scepterRange
-                end
-            end
-            if not range and id:find("blink", 1, true) then
-                range = id:find("arcane", 1, true) and 1400 or 1200
-            end
-        end
-    end
-    range = range or 0
-    -- True global (KV cast range 0) or still-unknown after fallbacks: never treat as
-    -- "walk to 80". Prefer cast-attempt + fail over melee approach deadlock.
-    if range <= 0 then
-        return GLOBAL_CAST_RANGE
-    end
-    return range + (SafeValue(NPC.GetCastRangeBonus, unit) or 0)
-end
-
--- On Core to avoid Lua local-limit; mirrors GLOBAL_CAST_RANGE sentinel.
-Core.IsUnboundedCastRange = function(range)
-    return type(range) ~= "number" or range <= 0 or range >= GLOBAL_CAST_RANGE
-end
-
-local function GetAttackRange(unit)
-    if not unit then
-        return 150
-    end
-    local base = SafeValue(NPC.GetAttackRange, unit) or 150
-    local bonus = SafeValue(NPC.GetAttackRangeBonus, unit) or 0
-    return base + bonus
-end
-
-local function IsRangedAttacker(unit)
-    return SafeValue(NPC.IsRanged, unit) == true
-end
-
-local function IsWithinRange2D(fromPos, toPos, range)
-    if not fromPos or not toPos then
-        return false
-    end
-    if type(range) ~= "number" or range <= 0 then
-        return false
-    end
-    return Dist2D(fromPos, toPos) <= range + RANGE_TOLERANCE
-end
-
-local function FormatRangeContext(ctx)
-    if not IsDebugVerbose() then
-        return ""
-    end
-    if not ctx or not ctx.controlled then
-        return "ctx=nil"
-    end
-
-    local unit = ctx.controlled
-    local unitName = SafeValue(NPC.GetUnitName, unit) or "?"
-    local ranged = IsRangedAttacker(unit)
-    local atkBase = SafeValue(NPC.GetAttackRange, unit) or 0
-    local atkBonus = SafeValue(NPC.GetAttackRangeBonus, unit) or 0
-    local atkTotal = GetAttackRange(unit)
-    local myPos = SafeValue(Entity.GetAbsOrigin, unit)
-    local running = SafeValue(NPC.IsRunning, unit)
-    local attacking = SafeValue(NPC.IsAttacking, unit)
-
-    local parts = {
-        string.format("unit=%s", unitName),
-        string.format("ranged=%s", tostring(ranged)),
-        string.format("atk=%d(base=%d+bonus=%d)", atkTotal, atkBase, atkBonus),
-        string.format("running=%s attacking=%s", tostring(running), tostring(attacking)),
-        string.format("queue=%d", #Runtime.actionQueue),
-        string.format("pending=%s", Runtime.pending and (Runtime.pending.tag or Runtime.pending.kind or "?") or "-"),
-    }
-
-    if ctx.enemy and myPos then
-        local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-        if enemyPos then
-            local dist = Dist2D(myPos, enemyPos)
-            parts[#parts + 1] = string.format(
-                "enemy=%s dist=%.0f inAtk=%s",
-                GetHeroDisplayName(SafeValue(NPC.GetUnitName, ctx.enemy)) or "?",
-                dist,
-                tostring(IsWithinRange2D(myPos, enemyPos, atkTotal))
-            )
-        end
-    elseif Runtime.lockedEnemy and myPos then
-        local enemyPos = SafeValue(Entity.GetAbsOrigin, Runtime.lockedEnemy)
-        if enemyPos then
-            local dist = Dist2D(myPos, enemyPos)
-            parts[#parts + 1] = string.format(
-                "lock=%s dist=%.0f inAtk=%s",
-                GetHeroDisplayName(SafeValue(NPC.GetUnitName, Runtime.lockedEnemy)) or "?",
-                dist,
-                tostring(IsWithinRange2D(myPos, enemyPos, atkTotal))
-            )
-        end
-    end
-
-    parts[#parts + 1] = string.format("combo=%s", tostring(Runtime.comboActive))
-
-    if type(ctx.mana) == "number" then
-        parts[#parts + 1] = string.format("mana=%.0f", ctx.mana)
-    end
-
-    if Runtime.lockedEnemy and ctx.enemy then
-        parts[#parts + 1] = string.format(
-            "lockSame=%s",
-            tostring(Runtime.lockedEnemy == ctx.enemy)
-        )
-    end
-
-    return table.concat(parts, " | ")
-end
-
-local function GetManaPct(unit)
-    local maxMana = SafeValue(NPC.GetMaxMana, unit) or 0
-    if maxMana <= 0 then
-        return 100
-    end
-    return ((SafeValue(NPC.GetMana, unit) or 0) / maxMana) * 100
-end
-
-local function GetScreenXY(point)
-    if point == nil or type(point) == "number" then
-        return nil, nil
-    end
-
-    local x = point.x
-    local y = point.y
-    if type(x) == "number" and type(y) == "number" then
-        return x, y
-    end
-
-    return nil, nil
-end
-
-local function WorldToScreen(world)
-    if not Render or not Render.WorldToScreen or not world then
-        return nil, nil, false
-    end
-
-    local ok, a, b, c = TryCall(Render.WorldToScreen, world)
-    if not ok then
-        return nil, nil, false
-    end
-
-    if type(a) == "number" and type(b) == "number" then
-        return a, b, c ~= false
-    end
-
-    if a ~= nil then
-        local x, y = GetScreenXY(a)
-        return x, y, b ~= false
-    end
-
-    return nil, nil, false
-end
-
-local function GetCursorPosXY()
-    if not Input or not Input.GetCursorPos then
-        return nil, nil
-    end
-
-    local ok, a, b = TryCall(Input.GetCursorPos)
-    if not ok then
-        return nil, nil
-    end
-
-    if type(a) == "number" and type(b) == "number" then
-        return a, b
-    end
-
-    return GetScreenXY(a)
-end
-
-local function TargetNeedsLinkBreak(target)
-    return target and SafeValue(NPC.IsLinkensProtected, target) == true
-end
-
---#endregion
-
---#region Orders
-
-function Core.OrderGateway.Issue(player, orderType, target, pos, ability, issuerUnit, identifier)
-    if not player or not issuerUnit then
-        return false
-    end
-
-    pos = pos or SafeValue(Entity.GetAbsOrigin, issuerUnit) or Vector(0, 0, 0)
-
-    if Player and Player.PrepareUnitOrders then
-        local ok = TryCall(
-            Player.PrepareUnitOrders,
-            player,
-            orderType,
-            target,
-            pos,
-            ability,
-            ORDER_ISSUER,
-            issuerUnit,
-            false,
-            false,
-            ability ~= nil,
-            true,
-            identifier,
-            false
-        )
-        if ok then
-            if orderType ~= O_MOVE then
-                Runtime.lastMovePos = nil
-            end
-            if IsDebugVerbose() then
-                local myPos = SafeValue(Entity.GetAbsOrigin, issuerUnit)
-                local moveDist = myPos and pos and Dist2D(myPos, pos) or -1
-                DbgVerbose("event",
-                    "order | %s id=%s moveDist=%.0f ability=%s",
-                    orderType == O_ATTACK and "ATTACK"
-                        or orderType == O_MOVE and "MOVE"
-                        or orderType == O_CAST_TARGET and "CAST_TARGET"
-                        or orderType == O_CAST_POSITION and "CAST_POSITION"
-                        or orderType == O_CAST_NO_TARGET and "CAST_NO_TARGET"
-                        or tostring(orderType),
-                    identifier or "?",
-                    moveDist,
-                    ability and (GetAbilityId(ability) or "?") or "-"
-                )
-            end
-            return true
-        end
-    end
-
-    return false
-end
-
-local function GetAbilityBehaviorFlags(ability)
-    local live = SafeValue(Ability.GetBehavior, ability, false)
-    if type(live) == "number" then
-        return live
-    end
-    local static = SafeValue(Ability.GetBehavior, ability, true)
-    return type(static) == "number" and static or 0
-end
-
-local function AbilityNeedsPointCast(ability, abilityId)
-    if not ability then
-        return false
-    end
-    local behavior = GetAbilityBehaviorFlags(ability)
-    local hasPoint = HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_POINT)
-    local hasUnit = HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_UNIT_TARGET)
-    -- Enchant Totem live form is POINT|UNIT|AOE; only CAST_POSITION executes.
-    if abilityId == "earthshaker_enchant_totem" and hasPoint then
-        return true
-    end
-    -- Lion/SS Hex +25 talent: unit-target becomes area/point-targeted.
-    if Core.Catalog.HexAbilities[abilityId] and hasPoint and not hasUnit then
-        return true
-    end
-    if hasPoint and not hasUnit then
-        return true
-    end
-    return false
-end
-
--- Defined after AOE helpers; used by CastDisableOnEnemy for talent hex.
-local FindHexPointCastPosition
-
-local function CastOnTarget(ctx, ability, target, tag, identifier)
-    local pos = SafeValue(Entity.GetAbsOrigin, target) or SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-    return Core.OrderGateway.Issue(
-        ctx.player,
-        O_CAST_TARGET,
-        target,
-        pos,
-        ability,
-        ctx.controlled,
-        identifier or OrderTag(tag)
-    )
-end
-
-local function CastAtPosition(ctx, ability, pos, tag, identifier)
-    return Core.OrderGateway.Issue(
-        ctx.player,
-        O_CAST_POSITION,
-        nil,
-        pos,
-        ability,
-        ctx.controlled,
-        identifier or OrderTag(tag)
-    )
-end
-
-local function CastDisableOnEnemy(ctx, ability, abilityId, target, tag, identifier)
-    if AbilityNeedsPointCast(ability, abilityId) then
-        local pos = FindHexPointCastPosition
-            and FindHexPointCastPosition(ctx, ability, abilityId, target)
-            or SafeValue(Entity.GetAbsOrigin, target)
-        if not pos then
-            return false
-        end
-        DbgImportant("point cast | %s", abilityId or tag or "?")
-        return CastAtPosition(ctx, ability, pos, tag, identifier)
-    end
-    return CastOnTarget(ctx, ability, target, tag, identifier)
-end
-
-local function CastNoTarget(ctx, ability, tag, identifier)
-    local pos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-    if Player and Player.PrepareUnitOrders then
-        return Core.OrderGateway.Issue(
-            ctx.player,
-            O_CAST_NO_TARGET,
-            nil,
-            pos,
-            ability,
-            ctx.controlled,
-            identifier or OrderTag(tag)
-        )
-    end
-    return false
-end
-
---#endregion
-
---#region Inventory scan
-
-local function CollectHeroAbilities(hero)
-    local out = {}
-    local seen = {}
-
-    for index = 0, FALLBACK_ABILITY_SLOTS - 1 do
-        local ability = SafeValue(NPC.GetAbilityByIndex, hero, index)
-        if ability then
-            local id = GetAbilityId(ability)
-                if id and not seen[id] then
-                    seen[id] = true
-                    if id:sub(1, 14) ~= "invoker_empty"
-                        and not Core.Catalog.SkipAbilities[id]
-                        and SafeValue(Ability.IsHidden, ability) ~= true
-                    and SafeValue(Ability.IsPassive, ability, true) ~= true
-                    and SafeValue(Ability.IsAttributes, ability) ~= true
-                    and id:sub(1, 5) ~= "item_" then
-                    out[#out + 1] = { ability = ability, id = id }
-                end
-            end
-        end
-    end
-
-    table.sort(out, function(a, b)
-        local ua = SafeValue(Ability.IsUltimate, a.ability) and 1 or 0
-        local ub = SafeValue(Ability.IsUltimate, b.ability) and 1 or 0
-        if ua ~= ub then
-            return ua > ub
-        end
-        return a.id < b.id
-    end)
-
-    return out
-end
-
-local function CollectHeroItems(hero)
-    local out = {}
-    local seenIds = {}
-    local seenHandles = {}
-
-    local function AddItem(item)
-        if not item or seenHandles[item] then
-            return
-        end
-        seenHandles[item] = true
-
-        local id = GetItemId(item)
-        if not id or not IsRealHeroItem(item, id) or seenIds[id] then
-            return
-        end
-
-        seenIds[id] = true
-        out[#out + 1] = { item = item, id = id }
-    end
-
-    for index = 0, FALLBACK_ITEM_SLOTS - 1 do
-        AddItem(SafeValue(NPC.GetItemByIndex, hero, index))
-    end
-
-    for _, id in ipairs(Core.Catalog.LinkbreakItems) do
-        if not seenIds[id] then
-            AddItem(SafeValue(NPC.GetItem, hero, id, true))
-        end
-    end
-
-    for _, id in ipairs(Core.Catalog.BlinkItems) do
-        if not seenIds[id] then
-            AddItem(SafeValue(NPC.GetItem, hero, id, true))
-        end
-    end
-    if not seenIds.item_refresher then
-        AddItem(SafeValue(NPC.GetItem, hero, "item_refresher", true))
-    end
-
-    -- Neutrals may live only in slot 16; also resolve by name like blinks/linkbreaks.
-    local neutrals = Core.Catalog.NeutralActiveItems
-    if type(neutrals) == "table" then
-        for id in pairs(neutrals) do
-            if type(id) == "string" and not seenIds[id] then
-                AddItem(SafeValue(NPC.GetItem, hero, id, true))
-            end
-        end
-    end
-
-    table.sort(out, function(a, b)
-        return a.id < b.id
-    end)
-
-    return out
-end
-
-local function GetInventorySignature(hero)
-    local parts = {}
-    for _, entry in ipairs(CollectHeroItems(hero)) do
-        parts[#parts + 1] = "i:" .. entry.id
-    end
-    for _, entry in ipairs(CollectHeroAbilities(hero)) do
-        parts[#parts + 1] = "a:" .. entry.id
-    end
-    return table.concat(parts, ",")
-end
-
-local function FindAbilityEntry(hero, abilityId)
-    local snapshot = Runtime.combatSnapshot
-    if snapshot and snapshot.controlled == hero and snapshot.abilitiesById then
-        local cached = snapshot.abilitiesById[abilityId]
-        if cached then
-            return cached
-        end
-    end
-    for _, entry in ipairs(CollectHeroAbilities(hero)) do
-        if entry.id == abilityId then
-            return entry.ability
-        end
-    end
-    return SafeValue(NPC.GetAbility, hero, abilityId)
-end
-
-local function FindInvokerBarSpell(hero, abilityId)
-    if not hero or not abilityId then
-        return nil
-    end
-    local snapshot = Runtime.combatSnapshot
-    if snapshot and snapshot.controlled == hero and snapshot.abilitiesById then
-        local cached = snapshot.abilitiesById[abilityId]
-        if cached and SafeValue(Ability.IsHidden, cached) ~= true then
-            return cached
-        end
-    end
-    for index = 0, FALLBACK_ABILITY_SLOTS - 1 do
-        local ability = SafeValue(NPC.GetAbilityByIndex, hero, index)
-        if ability then
-            local id = GetAbilityId(ability)
-            if id == abilityId and SafeValue(Ability.IsHidden, ability) ~= true then
-                return ability
-            end
-        end
-    end
-    return nil
-end
-
-local function FindItemEntry(hero, itemId)
-    local snapshot = Runtime.combatSnapshot
-    if snapshot and snapshot.controlled == hero and snapshot.itemsById then
-        local cached = snapshot.itemsById[itemId]
-        if cached then
-            return cached
-        end
-    end
-    local item = SafeValue(NPC.GetItem, hero, itemId, true)
-    if item then
-        return item
-    end
-    for _, entry in ipairs(CollectHeroItems(hero)) do
-        if entry.id == itemId then
-            return entry.item
-        end
-    end
-    return nil
-end
-
--- usedActions blocks re-queue within one cast cycle; once CD is up again, allow reuse
--- while the combo bind stays held (do not wait for bind release / EndSession).
--- Charge abilities: only clear after a charge restores (charges rose), not while leftover
--- charges keep IsCastable true.
-local function ClearUsedActionsWhenReady(ctx)
-    if not ctx or not ctx.controlled then
-        return
-    end
-    local mana = ctx.mana or 0
-    for abilityId, used in pairs(Runtime.usedActions) do
-        if used == true and type(abilityId) == "string" then
-            local ability = FindAbilityEntry(ctx.controlled, abilityId)
-            if not ability and abilityId:sub(1, 5) == "item_" then
-                ability = FindItemEntry(ctx.controlled, abilityId)
-            end
-            if not ability then
-                Runtime.usedActions[abilityId] = nil
-                Runtime.usedActionCharges[abilityId] = nil
-            else
-                local usedCharges = Runtime.usedActionCharges[abilityId]
-                local charges = SafeValue(Ability.GetCurrentCharges, ability)
-                if type(usedCharges) == "number" and type(charges) == "number" then
-                    if charges > usedCharges then
-                        Runtime.usedActions[abilityId] = nil
-                        Runtime.usedActionCharges[abilityId] = nil
-                    end
-                elseif SafeValue(Ability.IsCastable, ability, mana) then
-                    -- Toggles are always castable; clearing used re-queues and flips them.
-                    -- Keep used for the whole bind (EndSession clears).
-                    local beh = SafeValue(Ability.GetBehavior, ability, true)
-                        or SafeValue(Ability.GetBehavior, ability, false) or 0
-                    if HasAbilityBehaviorFlag(beh, BEH.DOTA_ABILITY_BEHAVIOR_TOGGLE) then
-                        goto continue_clear_used
-                    end
-                    local skipMod = Core.Catalog.SkipWhileSelfModifier[abilityId]
-                    if skipMod and SafeValue(NPC.HasModifier, ctx.controlled, skipMod) == true then
-                        goto continue_clear_used
-                    end
-                    Runtime.usedActions[abilityId] = nil
-                    Runtime.usedActionCharges[abilityId] = nil
-                end
-            end
-        end
-        ::continue_clear_used::
-    end
-end
-
-local function GetBlink(hero)
-    for _, id in ipairs(Core.Catalog.BlinkItems) do
-        if IsActionUsed(id) then
-            goto continue_blink_item
-        end
-        local blink = SafeValue(NPC.GetItem, hero, id, true)
-        if blink then
-            return blink, id
-        end
-        ::continue_blink_item::
-    end
-    return nil, nil
-end
-
---#endregion
-
---#region Classifier
-
-local function ClassifyAbilityPolicy(ability, abilityId)
-    local kindOverride = Core.Catalog.AbilityKindOverrides[abilityId]
-    if kindOverride then
-        return kindOverride, Core.Catalog.AbilityMeta[abilityId]
-    end
-
-    local meta = Core.Catalog.AbilityMeta[abilityId]
-    local asset = Core.Catalog.GetAssetCastInfo(abilityId)
-    local behavior = GetAbilityBehaviorFlags(ability)
-    local liveHasPoint = HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_POINT)
-    local liveHasNoTarget = HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_NO_TARGET)
-
-    -- Asset KV kind first. Live POINT without NO_TARGET (Morph Totem / Aghs leap) overrides
-    -- static noTarget when we have point meta or asset hasScepter leap.
-    if asset and asset.kind then
-        if asset.kind == "noTarget"
-            and liveHasPoint
-            and not liveHasNoTarget
-            and (asset.hasScepter or (meta and meta.point))
-        then
-            return "bestPosition", meta
-        end
-        return asset.kind, meta
-    end
-
-    local team = SafeValue(Ability.GetTargetTeam, ability, false)
-        or SafeValue(Ability.GetTargetTeam, ability, true)
-        or TT.DOTA_UNIT_TARGET_TEAM_NONE
-
-    -- Live POINT wins over static NO_TARGET (Enchant Totem Morph/Aghs leap bits).
-    if liveHasPoint
-        and not liveHasNoTarget
-        and meta
-        and meta.point then
-        return "bestPosition", meta
-    end
-
-    if HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_NO_TARGET) then
-        return "noTarget", meta
-    end
-
-    -- Talent-converted Hex is point-targeted; keep it as lockedEnemy so disable
-    -- gating still applies, and cast path switches to CAST_POSITION.
-    if Core.Catalog.HexAbilities[abilityId] then
-        return "lockedEnemy", meta
-    end
-
-    if Core.Catalog.FriendlyOnlyAbilities[abilityId]
-        or Core.Catalog.FriendlyBuffAbilities[abilityId] == true
-        or team == TT.DOTA_UNIT_TARGET_TEAM_FRIENDLY then
-        return "localHero"
-    end
-
-    if HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_UNIT_TARGET) then
-        if team == TT.DOTA_UNIT_TARGET_TEAM_ENEMY or team == TT.DOTA_UNIT_TARGET_TEAM_BOTH then
-            return "lockedEnemy"
-        end
-        if team == TT.DOTA_UNIT_TARGET_TEAM_FRIENDLY then
-            return "localHero"
-        end
-    end
-
-    if meta then
-        return "bestPosition", meta
-    end
-
-    if HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_POINT)
-        or HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_AOE) then
-        return "bestPosition", meta
-    end
-
-    return nil
-end
-
-local function ClassifyItemPolicy(item, itemId)
-    if ShouldSkipComboItem(itemId) then
-        return nil
-    end
-    if itemId == "item_refresher" then
-        return "noTarget"
-    end
-    if Core.Catalog.SelfNoTargetItems[itemId] then
-        return "noTarget"
-    end
-    local asset = Core.Catalog.GetAssetCastInfo(itemId)
-    if asset and asset.kind then
-        if itemId:find("blink", 1, true) then
-            return "bestPosition"
-        end
-        if IsLinkBreakItem(itemId) and asset.kind == "lockedEnemy" then
-            return "linkbreak"
-        end
-        return asset.kind
-    end
-    local behavior = item and (
-        SafeValue(Ability.GetBehavior, item, true)
-        or SafeValue(Ability.GetBehavior, item, false)
-    ) or 0
-    local team = item and (
-        SafeValue(Ability.GetTargetTeam, item, true)
-        or SafeValue(Ability.GetTargetTeam, item, false)
-    ) or TT.DOTA_UNIT_TARGET_TEAM_NONE
-    if HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_NO_TARGET) then
-        return "noTarget"
-    end
-    if IsLinkBreakItem(itemId) then
-        return "linkbreak"
-    end
-    if Core.Catalog.SelfItems[itemId] then
-        return "localHero"
-    end
-    if itemId:find("blink", 1, true) then
-        return "bestPosition"
-    end
-    if HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_UNIT_TARGET) then
-        if team == TT.DOTA_UNIT_TARGET_TEAM_FRIENDLY then
-            return "localHero"
-        end
-        if team == TT.DOTA_UNIT_TARGET_TEAM_ENEMY or team == TT.DOTA_UNIT_TARGET_TEAM_BOTH then
-            return "lockedEnemy"
-        end
-        return nil
-    end
-    if HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_POINT) then
-        return "bestPosition"
-    end
-    return nil
-end
-
-local function GetAoeRadius(ability, abilityId, meta)
-    meta = meta or Core.Catalog.AbilityMeta[abilityId]
-    if not meta then
-        return 0
-    end
-    -- Ability.GetLevelSpecialValueFor is contradictory in the 1.2.3 stubs.
-    -- Keep core planning on the verified catalog fallback until runtime proves it.
-    local radius = meta.defaultRadius or 0
-    if meta.radiusTalent and type(meta.radiusTalentBonus) == "number" and ability then
-        local owner = SafeValue(Ability.GetOwner, ability)
-        if owner and Core.HeroHasLearnedTalent(owner, meta.radiusTalent, meta.radiusTalentSlot) then
-            radius = radius + meta.radiusTalentBonus
-        end
-    end
-    return radius
-end
-
--- Talent learned? Prefer ability level; optional Enum.TalentTypes slot as fallback.
-function Core.HeroHasLearnedTalent(hero, talentId, talentSlot)
-    if not hero or type(talentId) ~= "string" then
-        return false
-    end
-    local talent = SafeValue(NPC.GetAbility, hero, talentId)
-    if talent then
-        local level = SafeValue(Ability.GetLevel, talent)
-        if type(level) == "number" and level > 0 then
-            return true
-        end
-    end
-    if talentSlot ~= nil then
-        return SafeValue(Hero.TalentIsLearned, hero, talentSlot) == true
-    end
-    return false
-end
-
-local function IsAbilityEnabled(abilityId)
-    local snapshot = Runtime.combatSnapshot
-    if snapshot and snapshot.enabledAbilitiesById
-        and snapshot.enabledAbilitiesById[abilityId] ~= nil then
-        return snapshot.enabledAbilitiesById[abilityId]
-    end
-    if not UI.Abilities or not UI.Abilities.Get then
-        return true
-    end
-    local listed = SafeValue(UI.Abilities.List, UI.Abilities)
-    if type(listed) ~= "table" or #listed == 0 then
-        return true
-    end
-    return UI.Abilities:Get(abilityId) == true
-end
-
-local function IsItemEnabled(itemId)
-    local snapshot = Runtime.combatSnapshot
-    if snapshot and snapshot.enabledItemsById
-        and snapshot.enabledItemsById[itemId] ~= nil then
-        return snapshot.enabledItemsById[itemId]
-    end
-    if not UI.Items or not UI.Items.Get then
-        return true
-    end
-    local listed = SafeValue(UI.Items.List, UI.Items)
-    if type(listed) ~= "table" or #listed == 0 then
-        return true
-    end
-    return UI.Items:Get(itemId) == true
-end
-
-local function LocalHeroNeedsHelp(localHero)
-    if not IsValidHero(localHero) then
-        return false
-    end
-    if HasAnyModifier(localHero, Core.Catalog.LocalBuffModifiers) then
-        return true
-    end
-    if HasAnyModifier(localHero, Core.Catalog.DispellableModifiers) then
-        return true
-    end
-    local hp = SafeValue(Entity.GetHealth, localHero) or 0
-    local maxHp = SafeValue(Entity.GetMaxHealth, localHero) or 1
-    if maxHp > 0 and (hp / maxHp) < 0.45 then
-        return true
-    end
-    return SafeValue(NPC.IsSilenced, localHero) == true
-        or SafeValue(NPC.HasState, localHero, Enum.ModifierState.MODIFIER_STATE_ROOTED) == true
-end
-
---#endregion
-
---#region AOE / cluster
-
-local function GetEnemiesNear(origin, radius, controlled)
-    if not origin or not controlled then
-        return {}
-    end
-    local teamNum = SafeValue(Entity.GetTeamNum, controlled)
-    if teamNum == nil then
-        return {}
-    end
-    return SafeValue(Heroes.InRadius, origin, radius, teamNum, TEAM_ENEMY, true, true) or {}
-end
-
--- Static + temp trees (Acorn / Iron Branch / Furion) inside radius of a world position.
-Core.HasTreesNear = function(pos, radius)
-    if not pos or type(radius) ~= "number" or radius <= 0 then
-        return false
-    end
-    local trees = SafeValue(Trees.InRadius, pos, radius, true) or {}
-    if type(trees) == "table" and #trees > 0 then
-        return true
-    end
-    local temps = SafeValue(TempTrees.InRadius, pos, radius) or {}
-    return type(temps) == "table" and #temps > 0
-end
-
--- Allied heroes near origin; excludes `controlled` (Void is immune to his Chronosphere).
--- On Core to avoid the chunk local/upvalue limit.
-function Core.GetAlliesNear(origin, radius, controlled)
-    if not origin or not controlled then
-        return {}
-    end
-    local teamNum = SafeValue(Entity.GetTeamNum, controlled)
-    if teamNum == nil then
-        return {}
-    end
-    local raw = SafeValue(
-        Heroes.InRadius,
-        origin,
-        radius,
-        teamNum,
-        Enum.TeamType.TEAM_FRIEND,
-        true,
-        true
-    ) or {}
-    local out = {}
-    for i = 1, #raw do
-        local ally = raw[i]
-        if ally ~= controlled and IsValidHero(ally) then
-            out[#out + 1] = ally
-        end
-    end
-    return out
-end
-
--- Centroid of allied heroes near origin (excludes controlled). Nil when none found.
-function Core.GetAllyCentroidNear(origin, radius, controlled)
-    local allies = Core.GetAlliesNear(origin, radius, controlled)
-    if #allies == 0 then
-        return nil
-    end
-    local sx, sy, sz, n = 0, 0, 0, 0
-    for i = 1, #allies do
-        local pos = SafeValue(Entity.GetAbsOrigin, allies[i])
-        if pos then
-            sx = sx + pos.x
-            sy = sy + pos.y
-            sz = sz + pos.z
-            n = n + 1
-        end
-    end
-    if n == 0 then
-        return nil
-    end
-    return Vector(sx / n, sy / n, sz / n)
-end
-
-local function CountHitsAt(origin, entries, radius)
-    local count = 0
-    for i = 1, #entries do
-        local entry = entries[i]
-        local pos = IsValidHero(entry) and SafeValue(Entity.GetAbsOrigin, entry) or entry
-        if pos and Dist2D(origin, pos) <= radius then
-            count = count + 1
-        end
-    end
-    return count
-end
-
--- Optional `allies`: prefer centers that freeze 0 teammates (Chronosphere, etc.).
-local function FindBestAoePosition(origin, enemies, radius, minHits, predictionTime, allies)
-    minHits = minHits or 1
-    local bestPos = nil
-    local bestHits = 0
-    local bestAllyHits = math.huge
-    local positions = {}
-    local allyPositions = {}
-
-    if #enemies == 0 then
-        return nil, 0
-    end
-
-    for i = 1, #enemies do
-        local enemy = enemies[i]
-        if IsValidHero(enemy) and not IsMagicImmune(enemy) then
-            local pos = SafeValue(Entity.GetAbsOrigin, enemy)
-            if pos then
-                if predictionTime and predictionTime > 0 and SafeValue(NPC.IsRunning, enemy) then
-                    local rotation = SafeValue(Entity.GetRotation, enemy)
-                    local forward = rotation and rotation:GetForward()
-                    local speed = SafeValue(NPC.GetMoveSpeed, enemy) or 0
-                    if forward and speed > 0 then
-                        pos = Vector(
-                            pos.x + forward.x * speed * predictionTime,
-                            pos.y + forward.y * speed * predictionTime,
-                            pos.z
-                        )
-                    end
-                end
-                positions[#positions + 1] = pos
-            end
-        end
-    end
-
-    if allies then
-        for i = 1, #allies do
-            local ally = allies[i]
-            local pos = IsValidHero(ally) and SafeValue(Entity.GetAbsOrigin, ally) or nil
-            if pos then
-                allyPositions[#allyPositions + 1] = pos
-            end
-        end
-    end
-
-    -- Slightly larger clear radius so allies can stand just outside and attack in.
-    -- Extra pad for hull / talent AoE growth not fully reflected in catalog.
-    local allyClear = (#allyPositions > 0) and (radius + 80) or radius
-
-    local function consider(pos)
-        if not pos then
-            return
-        end
-        local hits = CountHitsAt(pos, positions, radius)
-        if hits <= 0 then
-            return
-        end
-        local allyHits = (#allyPositions > 0) and CountHitsAt(pos, allyPositions, allyClear) or 0
-        if allyHits < bestAllyHits
-            or (allyHits == bestAllyHits and hits > bestHits)
-            or (allyHits == bestAllyHits and hits == bestHits and origin and bestPos
-                and Dist2D(origin, pos) < Dist2D(origin, bestPos)) then
-            bestAllyHits = allyHits
-            bestHits = hits
-            bestPos = pos
-        end
-    end
-
-    for i = 1, #positions do
-        consider(positions[i])
-    end
-
-    for i = 1, #positions do
-        local aPos = positions[i]
-        for j = i + 1, #positions do
-            local bPos = positions[j]
-            local mid = Vector(
-                (aPos.x + bPos.x) * 0.5,
-                (aPos.y + bPos.y) * 0.5,
-                (aPos.z + bPos.z) * 0.5
-            )
-            consider(mid)
-
-            local dx = bPos.x - aPos.x
-            local dy = bPos.y - aPos.y
-            local distance = math.sqrt(dx * dx + dy * dy)
-            if distance > 0.001 and distance <= radius * 2 then
-                local height = math.sqrt(math.max(0, radius * radius - distance * distance * 0.25))
-                local nx = -dy / distance
-                local ny = dx / distance
-                consider(Vector(mid.x + nx * height, mid.y + ny * height, mid.z))
-                consider(Vector(mid.x - nx * height, mid.y - ny * height, mid.z))
-            end
-        end
-    end
-
-    -- Push candidate centers away from nearby allies so enemies stay in and teammates out.
-    if #allyPositions > 0 then
-        for i = 1, #positions do
-            local ePos = positions[i]
-            local nearest = nil
-            local nearestDist = math.huge
-            for j = 1, #allyPositions do
-                local d = Dist2D(ePos, allyPositions[j])
-                if d < nearestDist then
-                    nearestDist = d
-                    nearest = allyPositions[j]
-                end
-            end
-            if nearest and nearestDist < allyClear * 2 then
-                local dx = ePos.x - nearest.x
-                local dy = ePos.y - nearest.y
-                local len = math.sqrt(dx * dx + dy * dy)
-                if len > 0.001 then
-                    local ux, uy = dx / len, dy / len
-                    -- Need Dist(center, ally) > allyClear and Dist(center, enemy) <= radius.
-                    local needT = allyClear - nearestDist
-                    if needT < 0 then
-                        needT = 0
-                    end
-                    if needT <= radius then
-                        consider(Vector(ePos.x + ux * needT, ePos.y + uy * needT, ePos.z))
-                        local t2 = math.min(radius * 0.92, needT + 90)
-                        consider(Vector(ePos.x + ux * t2, ePos.y + uy * t2, ePos.z))
-                    end
-                end
-            end
-        end
-    end
-
-    if not bestPos or bestHits < minHits then
-        return nil, bestHits
-    end
-
-    return bestPos, bestHits
-end
-
-local function FindBlinkPositionForAoe(controlled, enemies, radius, minHits, allies)
-    local blink, blinkId = GetBlink(controlled)
-    if not blink or not blinkId then
-        return nil, nil, 0
-    end
-    if IsActionBlocked(blinkId, GetGameTime()) then
-        return nil, nil, 0
-    end
-
-    local mana = SafeValue(NPC.GetMana, controlled) or 0
-    if not SafeValue(Ability.IsCastable, blink, mana) then
-        return nil, nil, 0
-    end
-
-    local myPos = SafeValue(Entity.GetAbsOrigin, controlled)
-    if not myPos then
-        return nil, nil, 0
-    end
-
-    local blinkRange = GetCastRange(controlled, blink)
-    local scanRadius = blinkRange + radius + SCAN_RADIUS_BUFFER
-    local allEnemies = GetEnemiesNear(myPos, scanRadius, controlled)
-    if #allEnemies == 0 then
-        allEnemies = enemies
-    end
-
-    local bestPos, bestHits = FindBestAoePosition(myPos, allEnemies, radius, minHits, nil, allies)
-    if not bestPos or Dist2D(myPos, bestPos) > blinkRange then
-        return nil, blink, bestHits
-    end
-
-    return bestPos, blink, bestHits
-end
-
--- Land near a single enemy for unit-target initiation (e.g. Pulverize).
-local function FindBlinkLandNearEnemy(controlled, enemy, landDist)
-    local blink, blinkId = GetBlink(controlled)
-    if not blink or not blinkId then
-        return nil, nil, nil
-    end
-    if IsActionUsed(blinkId) or IsActionBlocked(blinkId, GetGameTime()) then
-        return nil, nil, nil
-    end
-
-    local mana = SafeValue(NPC.GetMana, controlled) or 0
-    if not SafeValue(Ability.IsCastable, blink, mana) then
-        return nil, nil, nil
-    end
-
-    local myPos = SafeValue(Entity.GetAbsOrigin, controlled)
-    local enemyPos = enemy and SafeValue(Entity.GetAbsOrigin, enemy)
-    if not myPos or not enemyPos then
-        return nil, nil, nil
-    end
-
-    local dist = Dist2D(myPos, enemyPos)
-    local wantLand = type(landDist) == "number" and landDist or 140
-    if dist <= wantLand + 40 then
-        return nil, blink, blinkId
-    end
-
-    local blinkRange = GetCastRange(controlled, blink)
-    if blinkRange <= 0 then
-        blinkRange = 1200
-    end
-
-    local landPos = enemyPos:Extend2D(myPos, wantLand)
-    local need = Dist2D(myPos, landPos)
-    if need > blinkRange then
-        landPos = myPos:Extend2D(enemyPos, blinkRange - 25)
-    end
-
-    return landPos, blink, blinkId
-end
-
--- Gap-close first: blink toward locked enemy when still far.
--- opts.landPos: optional fixed land (e.g. Mars ally-side wall pin); still clamped to blink range.
-local function TryAppendInitiateBlink(ctx, actions, opts)
-    opts = opts or {}
-    if not ctx or not ctx.controlled or not ctx.enemy or not actions then
-        return false
-    end
-
-    local minDist = type(opts.minDist) == "number" and opts.minDist or 450
-    local landDist = type(opts.landDist) == "number" and opts.landDist or 140
-    local priority = type(opts.priority) == "number" and opts.priority or 980
-
-    local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-    local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-    if not myPos or not enemyPos then
-        return false
-    end
-    local dist = Dist2D(myPos, enemyPos)
-    if dist < minDist then
-        DbgVerbose("initiate_blink_skip",
-            "initiate_blink | skip tooClose dist=%.0f min=%.0f landWant=%.0f | %s",
-            dist,
-            minDist,
-            landDist,
-            FormatRangeContext(ctx)
-        )
-        return false
-    end
-
-    local landPos, blink, blinkId
-    if opts.landPos then
-        blink, blinkId = GetBlink(ctx.controlled)
-        if blink and blinkId then
-            if IsActionUsed(blinkId) or IsActionBlocked(blinkId, GetGameTime()) then
-                blink, blinkId, landPos = nil, nil, nil
-            else
-                local mana = SafeValue(NPC.GetMana, ctx.controlled) or 0
-                if not SafeValue(Ability.IsCastable, blink, mana) then
-                    blink, blinkId, landPos = nil, nil, nil
-                else
-                    landPos = opts.landPos
-                    local blinkRange = GetCastRange(ctx.controlled, blink)
-                    if blinkRange <= 0 then
-                        blinkRange = 1200
-                    end
-                    if Dist2D(myPos, landPos) > blinkRange then
-                        landPos = myPos:Extend2D(landPos, blinkRange - 25)
-                    end
-                    if Dist2D(myPos, landPos) <= 40 then
-                        landPos = nil
-                    end
-                end
-            end
-        end
-    else
-        landPos, blink, blinkId = FindBlinkLandNearEnemy(ctx.controlled, ctx.enemy, landDist)
-    end
-    if not blink or not landPos or not blinkId then
-        DbgVerbose("initiate_blink_skip",
-            "initiate_blink | skip noLand dist=%.0f landWant=%.0f | %s",
-            dist,
-            landDist,
-            FormatRangeContext(ctx)
-        )
-        return false
-    end
-    if not IsItemEnabled(blinkId) then
-        DbgVerbose("initiate_blink_skip",
-            "initiate_blink | skip disabled id=%s | %s",
-            blinkId,
-            FormatRangeContext(ctx)
-        )
-        return false
-    end
-
-    actions[#actions + 1] = {
-        kind = "bestPosition",
-        ability = blink,
-        abilityId = blinkId,
-        position = landPos,
-        -- Keep the precomputed land point. Default dynamicAoe re-resolve treats blink
-        -- like an AoE spell (no radius) and silently drops it from the queue.
-        positionAt = ctx.now,
-        positionTtl = 2.0,
-        positionMaxRange = GetCastRange(ctx.controlled, blink),
-        positionPolicy = "fixed",
-        priority = priority,
-        tag = opts.tag or "initiate_blink",
-    }
-    Core.DbgEvent(
-        "initiate_blink | queue id=%s dist=%.0f -> land=%.0f prio=%d | %s",
-        blinkId,
-        dist,
-        landDist,
-        priority,
-        FormatRangeContext(ctx)
-    )
-    return true
-end
-
--- Mars: Arena/Spear/blink aligned so Spear pins on the ally-side Arena wall.
--- Push dir = enemy -> ally centroid (fallback LocalHero, then Mars).
--- Defined after TryAppendInitiateBlink so the local is in scope.
-function Core.BuildMarsPlan(ctx, actions)
-    if not ctx or not ctx.controlled or not ctx.enemy or not actions then
-        return
-    end
-
-    local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-    local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-    if not myPos or not enemyPos then
-        return
-    end
-
-    local allyRadius = 1600
-    local pushTarget = Core.GetAllyCentroidNear(enemyPos, allyRadius, ctx.controlled)
-    if not pushTarget and ctx.localHero and ctx.localHero ~= ctx.controlled then
-        pushTarget = SafeValue(Entity.GetAbsOrigin, ctx.localHero)
-    end
-    if not pushTarget then
-        pushTarget = myPos
-    end
-
-    local dx = pushTarget.x - enemyPos.x
-    local dy = pushTarget.y - enemyPos.y
-    local len = math.sqrt(dx * dx + dy * dy)
-    if len < 32 then
-        dx = myPos.x - enemyPos.x
-        dy = myPos.y - enemyPos.y
-        len = math.sqrt(dx * dx + dy * dy)
-    end
-    if len < 1 then
-        dx, dy, len = 1, 0, 1
-    end
-    local ux, uy = dx / len, dy / len
-
-    local arenaBias = 220
-    local landDist = 200
-    local spearAimDist = 400
-    local arenaCenter = Vector(
-        enemyPos.x - ux * arenaBias,
-        enemyPos.y - uy * arenaBias,
-        enemyPos.z
-    )
-    local blinkLand = Vector(
-        enemyPos.x - ux * landDist,
-        enemyPos.y - uy * landDist,
-        enemyPos.z
-    )
-    local spearAim = Vector(
-        enemyPos.x + ux * spearAimDist,
-        enemyPos.y + uy * spearAimDist,
-        enemyPos.z
-    )
-
-    TryAppendInitiateBlink(ctx, actions, {
-        minDist = 450,
-        landDist = landDist,
-        landPos = blinkLand,
-        priority = 980,
-        tag = "mars_initiate_blink",
-    })
-
-    local function queueFixed(abilityId, position, priority)
-        if not IsAbilityEnabled(abilityId) or IsActionUsed(abilityId)
-            or IsActionBlocked(abilityId, ctx.now) then
-            return
-        end
-        local ability = FindAbilityEntry(ctx.controlled, abilityId)
-        if not ability or not SafeValue(Ability.IsCastable, ability, ctx.mana) then
-            return
-        end
-        actions[#actions + 1] = {
-            kind = "bestPosition",
-            ability = ability,
-            abilityId = abilityId,
-            position = position,
-            positionAt = ctx.now,
-            positionTtl = 2.0,
-            positionMaxRange = GetCastRange(ctx.controlled, ability),
-            positionPolicy = "fixed",
-            meta = Core.Catalog.AbilityMeta[abilityId],
-            allowSingle = true,
-            priority = priority,
-            tag = "mars_" .. abilityId,
-        }
-    end
-
-    queueFixed("mars_arena_of_blood", arenaCenter, 890)
-    queueFixed("mars_spear", spearAim, 870)
-
-    if IsAbilityEnabled("mars_gods_rebuke") and not IsActionUsed("mars_gods_rebuke")
-        and not IsActionBlocked("mars_gods_rebuke", ctx.now) then
-        local rebuke = FindAbilityEntry(ctx.controlled, "mars_gods_rebuke")
-        if rebuke and SafeValue(Ability.IsCastable, rebuke, ctx.mana) then
-            actions[#actions + 1] = {
-                kind = "bestPosition",
-                ability = rebuke,
-                abilityId = "mars_gods_rebuke",
-                meta = Core.Catalog.AbilityMeta.mars_gods_rebuke,
-                allowSingle = true,
-                priority = 740,
-                tag = "mars_gods_rebuke",
-            }
-        end
-    end
-end
-
---#endregion
-
---#region Target resolver
-
-local function CanTargetEnemy(enemy, controlled)
-    return IsValidHero(enemy)
-        and SafeValue(Entity.IsSameTeam, enemy, controlled) ~= true
-        and SafeValue(NPC.IsVisible, enemy) ~= false
-        and not IsMagicImmune(enemy)
-end
-
-local function GetHexAoeRadius(abilityId)
-    if not abilityId then
-        return 0
-    end
-    return Core.Catalog.HexAoeRadius[abilityId] or 0
-end
-
-FindHexPointCastPosition = function(ctx, ability, abilityId, preferTarget)
-    local aoeRadius = GetHexAoeRadius(abilityId)
-    local preferPos = preferTarget and SafeValue(Entity.GetAbsOrigin, preferTarget) or nil
-    local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-    if not myPos then
-        return preferPos
-    end
-    if aoeRadius <= 0 then
-        return preferPos
-    end
-
-    local castRange = GetCastRange(ctx.controlled, ability)
-    -- Unbounded / global: do not scan the whole map for hex clusters.
-    if Core.IsUnboundedCastRange(castRange) then
-        return preferPos
-    end
-
-    local scan = GetEnemiesNear(myPos, castRange + aoeRadius, ctx.controlled)
-    local candidates = {}
-    for i = 1, #scan do
-        local enemy = scan[i]
-        if CanTargetEnemy(enemy, ctx.controlled) then
-            candidates[#candidates + 1] = enemy
-        end
-    end
-
-    local minCluster = UI.MinClusterHits and SafeValue(UI.MinClusterHits.Get, UI.MinClusterHits) or 2
-    local bestPos, bestHits = FindBestAoePosition(myPos, candidates, aoeRadius, 1, 0)
-    if not bestPos then
-        return preferPos
-    end
-
-    local function inCastRange(pos)
-        return pos and Dist2D(myPos, pos) <= castRange + RANGE_TOLERANCE
-    end
-
-    -- Prefer a cluster that still covers the locked enemy when one is locked.
-    if preferPos then
-        local coversPreferred = Dist2D(bestPos, preferPos) <= aoeRadius
-        if not coversPreferred or (bestHits < minCluster and #candidates >= minCluster) then
-            local nearPreferred = GetEnemiesNear(preferPos, aoeRadius * 2, ctx.controlled)
-            local clustered = {}
-            for i = 1, #nearPreferred do
-                local enemy = nearPreferred[i]
-                if CanTargetEnemy(enemy, ctx.controlled) then
-                    clustered[#clustered + 1] = enemy
-                end
-            end
-            local altPos, altHits = FindBestAoePosition(preferPos, clustered, aoeRadius, 1, 0)
-            if altPos and inCastRange(altPos) and Dist2D(altPos, preferPos) <= aoeRadius then
-                if altHits >= bestHits or coversPreferred == false then
-                    bestPos, bestHits = altPos, altHits
-                end
-            elseif inCastRange(preferPos) then
-                bestPos, bestHits = preferPos, CountHitsAt(preferPos, clustered, aoeRadius)
-            end
-        end
-    end
-
-    if not inCastRange(bestPos) then
-        return inCastRange(preferPos) and preferPos or nil
-    end
-
-    if IsDebugVerbose() and bestHits > 1 then
-        DbgVerbose("event", "hex aoe | hits=%d radius=%d | %s",
-            bestHits, aoeRadius, abilityId or "?")
-    end
-    return bestPos
-end
-
-local function InvalidateLostTarget(controlled)
-    if Runtime.lockedEnemy and not CanTargetEnemy(Runtime.lockedEnemy, controlled) then
-        local pending = Runtime.pending
-        local holdChanneled = false
-        if pending and pending.ability then
-            local chBehavior = SafeValue(Ability.GetBehavior, pending.ability, true)
-                or SafeValue(Ability.GetBehavior, pending.ability, false) or 0
-            -- Once a channelled cast is in flight, only ConfirmAction / timeout may clear it.
-            -- Clearing here races the end-of-channel frame and lets follow cancel Dismember.
-            if HasAbilityBehaviorFlag(chBehavior, BEH.DOTA_ABILITY_BEHAVIOR_CHANNELLED) then
-                holdChanneled = true
-            end
-        end
-        if not holdChanneled then
-            Runtime.lockedEnemy = nil
-            Runtime.lockedEnemyScore = nil
-            Runtime.actionQueue = {}
-            if pending and (pending.kind == "lockedEnemy" or pending.kind == "linkbreak") then
-                Runtime.pending = nil
-            end
-        else
-            -- Drop the lock/queue but keep pending so movement stays blocked.
-            Runtime.lockedEnemy = nil
-            Runtime.lockedEnemyScore = nil
-            Runtime.actionQueue = {}
-        end
-    end
-end
-
-local function GetTargetSearchRadius()
-    local widget = BuiltIn.unitsSearchRange or BuiltIn.targetSearchRange
-    if widget and widget.Get then
-        local value = SafeValue(widget.Get, widget)
-        if type(value) == "number" and value > 0 then
-            return value
-        end
-    end
-    return 1600
-end
-
-local function GetTargetStyleMode()
-    -- ControlAlly Target Mode is the script authority; BuiltIn Style is only a fallback.
-    if UI.TargetMode and UI.TargetMode.Get then
-        local idx = SafeValue(UI.TargetMode.Get, UI.TargetMode)
-        if type(idx) == "number" then
-            return idx == TARGET_STYLE_SCORE and TARGET_STYLE_SCORE or TARGET_STYLE_CURSOR
-        end
-    end
-
-    local widget = BuiltIn.targetStyle
-    if widget and widget.Get and widget.List then
-        local idx = SafeValue(widget.Get, widget) or 0
-        local items = SafeValue(widget.List, widget)
-        if type(items) == "table" and items[idx + 1] then
-            local label = string.lower(tostring(items[idx + 1]))
-            if label:find("cursor", 1, true) then
-                return TARGET_STYLE_CURSOR
-            end
-            if label:find("score", 1, true) or label:find("smart", 1, true) or label:find("auto", 1, true) then
-                return TARGET_STYLE_SCORE
-            end
-        end
-        return idx == 0 and TARGET_STYLE_CURSOR or TARGET_STYLE_SCORE
-    end
-
-    return TARGET_STYLE_CURSOR
-end
-
-local function GetMovementEnemy(ctx)
-    if not ctx or not ctx.controlled then
-        return nil
-    end
-    if ctx.enemy and CanTargetEnemy(ctx.enemy, ctx.controlled) then
-        return ctx.enemy
-    end
-    if Runtime.lockedEnemy and CanTargetEnemy(Runtime.lockedEnemy, ctx.controlled) then
-        return Runtime.lockedEnemy
-    end
-    return nil
-end
-
-local function ShouldFollowCursor(ctx)
-    local widget = BuiltIn.moveToCursor
-    if widget and widget.Get and SafeValue(widget.Get, widget) == false then
-        return false
-    end
-    if Runtime.comboActive then
-        if ctx and GetMovementEnemy(ctx) then
-            return false
-        end
-        return true
-    end
-    return true
-end
-
-local function WithMovementEnemy(ctx, fn)
-    if not ctx or type(fn) ~= "function" then
-        return false
-    end
-    local enemy = GetMovementEnemy(ctx)
-    if not enemy then
-        return false
-    end
-    local prev = ctx.enemy
-    ctx.enemy = enemy
-    local ok = fn(ctx)
-    ctx.enemy = prev
-    return ok
-end
-
-local function ScoreEnemy(enemy, controlled, clusterRadius, minCluster)
-    if not CanTargetEnemy(enemy, controlled) then
-        return -math.huge
-    end
-
-    local score = 1000
-    if SafeValue(NPC.IsHero, enemy) then
-        score = score + 500
-    end
-
-    local myPos = SafeValue(Entity.GetAbsOrigin, controlled)
-    local enemyPos = SafeValue(Entity.GetAbsOrigin, enemy)
-    if myPos and enemyPos then
-        local dist = Dist2D(myPos, enemyPos)
-        score = score - dist * 0.35
-    end
-
-    if TargetNeedsLinkBreak(enemy) then
-        score = score - 200
-    end
-    if IsMagicImmune(enemy) then
-        score = score - 5000
-    end
-
-    if clusterRadius and clusterRadius > 0 and enemyPos then
-        local nearby = GetEnemiesNear(enemyPos, clusterRadius * 1.5, controlled)
-        local hits = CountHitsAt(enemyPos, nearby, clusterRadius)
-        if hits >= (minCluster or 2) then
-            score = score + hits * 400
-        end
-    end
-
-    return score
-end
-
-local function ResolveTargetByCursor(controlled, enemies, searchRadius)
-    local myPos = SafeValue(Entity.GetAbsOrigin, controlled)
-    local cursorWorld = Input and SafeValue(Input.GetWorldCursorPos) or nil
-    local best = nil
-    local bestDist = math.huge
-
-    -- Prefer world distance to cursor (100-300). Screen fallback only if world pos missing.
-    local cx, cy = nil, nil
-    if not cursorWorld then
-        if not Input or not Input.GetCursorPos or not Render then
-            return nil
-        end
-        cx, cy = GetCursorPosXY()
-        if not cx or not cy then
-            return nil
-        end
-    end
-
-    for i = 1, #enemies do
-        local enemy = enemies[i]
-        if CanTargetEnemy(enemy, controlled) then
-            local pos = SafeValue(Entity.GetAbsOrigin, enemy)
-            if pos then
-                if myPos and searchRadius and Dist2D(myPos, pos) > searchRadius then
-                    goto continue_cursor
-                end
-                local dist
-                if cursorWorld then
-                    dist = Dist2D(cursorWorld, pos)
-                    if dist > CURSOR_WORLD_PICK_MAX then
-                        goto continue_cursor
-                    end
-                else
-                    local sx, sy, visible = WorldToScreen(pos)
-                    if not (sx and sy and visible) then
-                        goto continue_cursor
-                    end
-                    local dx = sx - cx
-                    local dy = sy - cy
-                    dist = math.sqrt(dx * dx + dy * dy)
-                    if dist > CURSOR_MAX_SCREEN_DIST then
-                        goto continue_cursor
-                    end
-                end
-                if dist < bestDist then
-                    bestDist = dist
-                    best = enemy
-                end
-            end
-            ::continue_cursor::
-        end
-    end
-
-    -- Prefer a tight hover (<= min) when several heroes sit in the 300 ring.
-    if best and cursorWorld and bestDist > CURSOR_WORLD_PICK_MIN then
-        local tight = nil
-        local tightDist = math.huge
-        for i = 1, #enemies do
-            local enemy = enemies[i]
-            if CanTargetEnemy(enemy, controlled) then
-                local pos = SafeValue(Entity.GetAbsOrigin, enemy)
-                if pos then
-                    local d = Dist2D(cursorWorld, pos)
-                    if d <= CURSOR_WORLD_PICK_MIN and d < tightDist then
-                        tightDist = d
-                        tight = enemy
-                    end
-                end
-            end
-        end
-        if tight then
-            return tight
-        end
-    end
-
-    return best
-end
-
-local function CursorPickWithinWorldRadius(controlled, candidate)
-    if not candidate or not CanTargetEnemy(candidate, controlled) then
-        return nil
-    end
-    local cursorWorld = Input and SafeValue(Input.GetWorldCursorPos) or nil
-    local enemyPos = SafeValue(Entity.GetAbsOrigin, candidate)
-    if not cursorWorld or not enemyPos then
-        return nil
-    end
-    if Dist2D(cursorWorld, enemyPos) <= CURSOR_WORLD_PICK_MAX then
-        return candidate
-    end
-    return nil
-end
-
-local function ResolveTargetByNearest(controlled, searchRadius, allowFar)
-    local teamNum = SafeValue(Entity.GetTeamNum, controlled)
-    if not (Input and Input.GetNearestHeroToCursor and teamNum) then
-        return nil
-    end
-    local enemy = SafeValue(Input.GetNearestHeroToCursor, teamNum, TEAM_ENEMY)
-    if not enemy or not CanTargetEnemy(enemy, controlled) then
-        return nil
-    end
-    -- Require cursor world proximity (never accept a max-search-radius pick).
-    if not CursorPickWithinWorldRadius(controlled, enemy) then
-        return nil
-    end
-    if allowFar then
-        return enemy
-    end
-    local myPos = SafeValue(Entity.GetAbsOrigin, controlled)
-    local enemyPos = SafeValue(Entity.GetAbsOrigin, enemy)
-    if myPos and enemyPos and Dist2D(myPos, enemyPos) <= searchRadius then
-        return enemy
-    end
-    return nil
-end
-
-local function ResolveTargetByScore(controlled, enemies, clusterRadius, minCluster)
-    local best = nil
-    local bestScore = -math.huge
-
-    for i = 1, #enemies do
-        local enemy = enemies[i]
-        local score = ScoreEnemy(enemy, controlled, clusterRadius, minCluster)
-        if score > bestScore then
-            bestScore = score
-            best = enemy
-        end
-    end
-
-    return best, bestScore
-end
-
-local function ResolveLockedEnemy(ctx, force)
-    local now = ctx.now
-    local controlled = ctx.controlled
-    local styleMode = GetTargetStyleMode()
-
-    InvalidateLostTarget(controlled)
-
-    local searchRadius = GetTargetSearchRadius()
-    local myPos = SafeValue(Entity.GetAbsOrigin, controlled)
-    local minCluster = UI.MinClusterHits and SafeValue(UI.MinClusterHits.Get, UI.MinClusterHits) or 2
-    local clusterRadius = 450
-
-    -- Cursor intent overrides sticky lock in both modes (HUD under mouse = combat target).
-    if myPos then
-        local enemies = GetEnemiesNear(myPos, searchRadius, controlled)
-        if #enemies == 0 then
-            local localHero = Runtime.localHero or SafeValue(Heroes.GetLocal)
-            if localHero then
-                local lhPos = SafeValue(Entity.GetAbsOrigin, localHero)
-                if lhPos then
-                    enemies = GetEnemiesNear(lhPos, searchRadius, controlled)
-                end
-            end
-        end
-        if #enemies > 0 then
-            local cursorPick = ResolveTargetByCursor(controlled, enemies, searchRadius)
-                or ResolveTargetByNearest(controlled, searchRadius, false)
-            if cursorPick and Runtime.lockedEnemy ~= cursorPick then
-                local score = ScoreEnemy(cursorPick, controlled, clusterRadius, minCluster)
-                if Runtime.lockedEnemy and IsDebugEnabled() then
-                    DbgImportant(
-                        "target switch | %s -> %s",
-                        GetHeroDisplayName(SafeValue(NPC.GetUnitName, Runtime.lockedEnemy)) or "?",
-                        GetHeroDisplayName(SafeValue(NPC.GetUnitName, cursorPick)) or "?"
-                    )
-                end
-                Runtime.lockedEnemy = cursorPick
-                Runtime.lockedEnemyScore = score
-                Runtime.lastTargetResolveAt = now
-                Runtime.actionQueue = {}
-                if Runtime.pending
-                    and Runtime.pending.target
-                    and Runtime.pending.target ~= cursorPick
-                    and (Runtime.pending.kind == "lockedEnemy"
-                        or Runtime.pending.kind == "linkbreak"
-                        or Runtime.pending.kind == "bestPosition")
-                then
-                    Runtime.pending = nil
-                end
-                return cursorPick, score
-            end
-        end
-    end
-
-    -- Score mode: sticky lock while combo is held and target stays in range.
-    -- Cursor mode: re-resolve on interval so the lock follows the cursor.
-    if styleMode == TARGET_STYLE_SCORE
-        and Runtime.comboActive
-        and Runtime.lockedEnemy
-        and CanTargetEnemy(Runtime.lockedEnemy, controlled)
-    then
-        local enemyPos = SafeValue(Entity.GetAbsOrigin, Runtime.lockedEnemy)
-        if myPos and enemyPos and Dist2D(myPos, enemyPos) <= searchRadius + SCAN_RADIUS_BUFFER then
-            if not force and now - Runtime.lastTargetResolveAt < TARGET_RESOLVE_INTERVAL then
-                return Runtime.lockedEnemy, Runtime.lockedEnemyScore
-            end
-            Runtime.lastTargetResolveAt = now
-            return Runtime.lockedEnemy, Runtime.lockedEnemyScore
-        end
-    end
-
-    if not force and Runtime.lockedEnemy and now - Runtime.lastTargetResolveAt < TARGET_RESOLVE_INTERVAL then
-        if CanTargetEnemy(Runtime.lockedEnemy, controlled) then
-            return Runtime.lockedEnemy, Runtime.lockedEnemyScore
-        end
-    end
-
-    Runtime.lastTargetResolveAt = now
-
-    if not myPos then
-        Runtime.lockedEnemy = nil
-        Runtime.lockedEnemyScore = nil
-        return nil, nil
-    end
-
-    local enemies = GetEnemiesNear(myPos, searchRadius, controlled)
-    if #enemies == 0 then
-        local localHero = Runtime.localHero or SafeValue(Heroes.GetLocal)
-        if localHero then
-            local lhPos = SafeValue(Entity.GetAbsOrigin, localHero)
-            if lhPos then
-                enemies = GetEnemiesNear(lhPos, searchRadius, controlled)
-            end
-        end
-    end
-    if #enemies == 0 then
-        if Runtime.lockedEnemy and CanTargetEnemy(Runtime.lockedEnemy, controlled) then
-            return Runtime.lockedEnemy, Runtime.lockedEnemyScore
-        end
-        Runtime.lockedEnemy = nil
-        Runtime.lockedEnemyScore = nil
-        Runtime.actionQueue = {}
-        return nil, nil
-    end
-
-    local picked, score
-    if styleMode == TARGET_STYLE_SCORE then
-        picked, score = ResolveTargetByScore(controlled, enemies, clusterRadius, minCluster)
-    else
-        -- Cursor: only lock/switch when a hero is within 100-300 of the world cursor.
-        -- Do not fall back to nearest-to-self (that felt like max search-radius targeting).
-        picked = ResolveTargetByCursor(controlled, enemies, searchRadius)
-            or ResolveTargetByNearest(controlled, searchRadius, false)
-        if not picked then
-            if Runtime.lockedEnemy and CanTargetEnemy(Runtime.lockedEnemy, controlled) then
-                return Runtime.lockedEnemy, Runtime.lockedEnemyScore
-            end
-            Runtime.lockedEnemy = nil
-            Runtime.lockedEnemyScore = nil
-            return nil, nil
-        end
-        score = ScoreEnemy(picked, controlled, clusterRadius, minCluster)
-    end
-
-    if not picked or not CanTargetEnemy(picked, controlled) then
-        Runtime.lockedEnemy = nil
-        Runtime.lockedEnemyScore = nil
-        return nil, nil
-    end
-
-    if styleMode == TARGET_STYLE_SCORE
-        and Runtime.lockedEnemy
-        and picked
-        and Runtime.lockedEnemy ~= picked
-    then
-        local oldScore = Runtime.lockedEnemyScore or ScoreEnemy(Runtime.lockedEnemy, controlled, clusterRadius, minCluster)
-        local newScore = score or -math.huge
-        if oldScore + TARGET_LOCK_BONUS >= newScore and CanTargetEnemy(Runtime.lockedEnemy, controlled) then
-            return Runtime.lockedEnemy, oldScore
-        end
-    end
-
-    Runtime.lockedEnemy = picked
-    Runtime.lockedEnemyScore = score
-    return picked, score
-end
-
-local function EnsureCtxEnemy(ctx)
-    if not ctx or not ctx.controlled then
-        return
-    end
-    if ctx.enemy and CanTargetEnemy(ctx.enemy, ctx.controlled) then
-        return
-    end
-
-    local enemy = GetMovementEnemy(ctx)
-    if enemy then
-        ctx.enemy = enemy
-        return
-    end
-
-    if Runtime.comboActive then
-        local picked = ResolveLockedEnemy(ctx, true)
-        if picked then
-            ctx.enemy = picked
-        end
-    end
-end
-
---#endregion
-
---#region Ally discovery
-
-local function RefreshControllableAllies(now)
-    if now - Runtime.lastAllyScanAt < ALLY_SCAN_INTERVAL then
-        return
-    end
-    Runtime.lastAllyScanAt = now
-
-    local localPlayer = SafeValue(Players.GetLocal)
-    if not localPlayer then
-        return
-    end
-
-    Runtime.localPlayer = localPlayer
-    Runtime.localPlayerId = SafeValue(Player.GetPlayerID, localPlayer)
-    Runtime.localHero = SafeValue(Heroes.GetLocal)
-
-    local allies = {}
-    local rosterParts = {}
-    local allPlayers = SafeValue(Players.GetAll) or {}
-
-    for i = 1, #allPlayers do
-        local pl = allPlayers[i]
-        local playerId = SafeValue(Player.GetPlayerID, pl)
-        local hero = SafeValue(Player.GetAssignedHero, pl)
-        if hero
-            and Runtime.localHero
-            and hero ~= Runtime.localHero
-            and IsValidHero(hero)
-            and SafeValue(Entity.IsSameTeam, hero, Runtime.localHero)
-            and Runtime.localPlayerId
-            and SafeValue(Entity.IsControllableByPlayer, hero, Runtime.localPlayerId) then
-            local unitName = SafeValue(NPC.GetUnitName, hero) or "unknown"
-            local display = GetHeroDisplayName(unitName)
-            local slot = type(playerId) == "number" and (playerId + 1) or i
-            local label = string.format("%s (P%d)", display, slot)
-            allies[#allies + 1] = {
-                player = pl,
-                playerId = playerId,
-                hero = hero,
-                unitName = unitName,
-                label = label,
-            }
-            rosterParts[#rosterParts + 1] = Core.AllyWidgetId(playerId) .. ":" .. unitName
-        end
-    end
-
-    -- During Morph/transform the ally can briefly leave the controllable list.
-    -- Keep the previous sticky entry so ResolveControlledHero does not jump allies.
-    if Runtime.comboActive and type(Runtime.selectedPlayerId) == "number" then
-        local stillListed = false
-        for i = 1, #allies do
-            if allies[i].playerId == Runtime.selectedPlayerId then
-                stillListed = true
-                break
-            end
-        end
-        if not stillListed then
-            local prev = nil
-            for i = 1, #Runtime.controllableAllies do
-                local entry = Runtime.controllableAllies[i]
-                if entry and entry.playerId == Runtime.selectedPlayerId then
-                    prev = entry
-                    break
-                end
-            end
-            if prev then
-                allies[#allies + 1] = prev
-            else
-                return
-            end
-        end
-    end
-
-    table.sort(allies, function(a, b)
-        return (a.playerId or 0) < (b.playerId or 0)
-    end)
-    rosterParts = {}
-    for i = 1, #allies do
-        local entry = allies[i]
-        rosterParts[#rosterParts + 1] = Core.AllyWidgetId(entry.playerId)
-            .. ":"
-            .. tostring(entry.unitName or "")
-    end
-
-    Runtime.controllableAllies = allies
-
-    if UI.AllyHero and UI.AllyHero.Update then
-        local savedId = LoadConfigInt("ally_player_id", -1)
-        if type(Runtime.selectedPlayerId) == "number" then
-            savedId = Runtime.selectedPlayerId
-        end
-
-        local selectedId = nil
-        if savedId >= 0 then
-            for i = 1, #allies do
-                if allies[i].playerId == savedId then
-                    selectedId = savedId
-                    break
-                end
-            end
-        end
-        if selectedId == nil and allies[1] then
-            selectedId = allies[1].playerId
-        end
-
-        table.sort(rosterParts)
-        local identitySig = table.concat(rosterParts, "|")
-        if identitySig ~= Runtime.syncedAllyRosterSig then
-            Runtime.syncedAllyRosterSig = identitySig
-            local items = {}
-            local tips = {}
-            for i = 1, #allies do
-                local entry = allies[i]
-                local itemId = Core.AllyWidgetId(entry.playerId)
-                items[#items + 1] = {
-                    itemId,
-                    Core.GetHeroIconPath(entry.unitName),
-                    entry.playerId == selectedId,
-                }
-                tips[itemId] = entry.label
-            end
-            if #items == 0 then
-                items[1] = { "none", "", false }
-                tips.none = L("No controllable ally")
-            end
-            -- expanded=false avoids reopen animation on roster rebuild.
-            SafeValue(UI.AllyHero.Update, UI.AllyHero, items, false, false)
-            if UI.AllyHero.UpdateToolTips then
-                SafeValue(UI.AllyHero.UpdateToolTips, UI.AllyHero, tips)
-            end
-        elseif selectedId ~= nil and UI.AllyHero.Set then
-            local uiSelected = Core.GetSelectedAllyPlayerIdFromUI()
-            if uiSelected ~= selectedId then
-                SafeValue(UI.AllyHero.Set, UI.AllyHero, Core.AllyWidgetId(selectedId), true)
-            end
-        end
-    end
-end
-
-local function ResolveAllyEntryByPlayerId(playerId)
-    if playerId == nil then
-        return nil
-    end
-    for i = 1, #Runtime.controllableAllies do
-        local entry = Runtime.controllableAllies[i]
-        if entry and entry.playerId == playerId then
-            return entry
-        end
-    end
-    return nil
-end
-
-local function RefreshAllyEntryHero(entry)
-    if not entry then
-        return nil
-    end
-    if entry.player then
-        local live = SafeValue(Player.GetAssignedHero, entry.player)
-        if live then
-            entry.hero = live
-            local name = SafeValue(NPC.GetUnitName, live)
-            if name then
-                entry.unitName = name
-            end
-        end
-    end
-    return entry.hero
-end
-
-local function ResolveControlledHero()
-    if #Runtime.controllableAllies == 0 then
-        return nil
-    end
-
-    local uiPlayerId = Core.GetSelectedAllyPlayerIdFromUI()
-    local uiEntry = ResolveAllyEntryByPlayerId(uiPlayerId)
-
-    -- Sticky slot: never jump to another ally when the selected hero flickers (Morph / transform).
-    local preferredId = Runtime.selectedPlayerId
-    if preferredId == nil then
-        preferredId = uiPlayerId
-    end
-
-    local entry = ResolveAllyEntryByPlayerId(preferredId) or uiEntry
-    if not entry then
-        return nil
-    end
-
-    local hero = RefreshAllyEntryHero(entry)
-    if hero and SafeValue(NPC.IsIllusion, hero) == true then
-        -- Scepter Morph illusion is controllable but must not steal the combo session.
-        hero = nil
-    end
-
-    if not hero or SafeValue(Entity.IsDormant, hero) == true then
-        if Runtime.comboActive or Runtime.sessionHero then
-            return nil
-        end
-        -- Menu idle only: fall back to first listed ally.
-        entry = Runtime.controllableAllies[1]
-        hero = RefreshAllyEntryHero(entry)
-        if hero and SafeValue(NPC.IsIllusion, hero) == true then
-            hero = nil
-        end
-    end
-
-    if not entry or not hero then
-        return nil
-    end
-
-    if type(entry.playerId) == "number" and Runtime.selectedPlayerId ~= entry.playerId then
-        SaveConfigInt("ally_player_id", entry.playerId)
-    end
-    Runtime.selectedPlayerId = entry.playerId
-    return hero
-end
-
---#endregion
-
---#region Multiselect sync
-
-local function SyncAbilityItemWidgets(hero, force)
-    if not hero then
-        return
-    end
-
-    local playerId = Runtime.selectedPlayerId
-    local sig = GetInventorySignature(hero)
-    if not force
-        and playerId == Runtime.syncedAllyPlayerId
-        and sig == Runtime.syncedInventorySig then
-        return
-    end
-    if sig ~= Runtime.syncedInventorySig then
-        Runtime.snapshotInvalidated = true
-        Runtime.catalogCache = nil
-    end
-
-    Runtime.syncedAllyPlayerId = playerId
-    Runtime.syncedInventorySig = sig
-    Runtime.syncedHeroName = SafeValue(NPC.GetUnitName, hero)
-
-    if UI.Abilities and UI.Abilities.Update then
-        local abilityItems = {}
-        for _, entry in ipairs(CollectHeroAbilities(hero)) do
-            abilityItems[#abilityItems + 1] = {
-                entry.id,
-                GetAbilityIconPath(entry.id),
-                LoadConfigInt("abl_" .. entry.id, 1) == 1,
-            }
-        end
-        if #abilityItems == 0 then
-            abilityItems[1] = { "none", "", false }
-        end
-        SafeValue(UI.Abilities.Update, UI.Abilities, abilityItems, true, false)
-        local seenIds = {}
-        for i = 1, #abilityItems do
-            seenIds[abilityItems[i][1]] = true
-        end
-        if Runtime.syncedHeroName == "npc_dota_hero_invoker" then
-            for i = 1, #Core.Catalog.InvokerSteps do
-                local spellId = Core.Catalog.InvokerSteps[i].id
-                if not seenIds[spellId] then
-                    abilityItems[#abilityItems + 1] = {
-                        spellId,
-                        GetAbilityIconPath(spellId),
-                        LoadConfigInt("abl_" .. spellId, 1) == 1,
-                    }
-                    seenIds[spellId] = true
-                end
-            end
-            SafeValue(UI.Abilities.Update, UI.Abilities, abilityItems, true, false)
-        elseif Runtime.syncedHeroName == "npc_dota_hero_morphling" then
-            -- Ult is SkipAbilities (profile-cast); still expose a toggle in Abilities.
-            local morphUltIds = { "morphling_replicate", "morphling_morph" }
-            local added = false
-            for i = 1, #morphUltIds do
-                local spellId = morphUltIds[i]
-                if not seenIds[spellId] and SafeValue(NPC.GetAbility, hero, spellId) then
-                    abilityItems[#abilityItems + 1] = {
-                        spellId,
-                        GetAbilityIconPath(spellId),
-                        LoadConfigInt("abl_" .. spellId, 1) == 1,
-                    }
-                    seenIds[spellId] = true
-                    added = true
-                end
-            end
-            if added then
-                SafeValue(UI.Abilities.Update, UI.Abilities, abilityItems, true, false)
-            end
-        end
-    end
-
-    if UI.Items and UI.Items.Update then
-        local itemWidgets = {}
-        local heroName = Runtime.syncedHeroName
-        for _, entry in ipairs(CollectHeroItems(hero)) do
-            itemWidgets[#itemWidgets + 1] = {
-                entry.id,
-                GetAbilityIconPath(entry.id),
-                Core.Settings.LoadItemToggle(heroName, entry.id),
-            }
-        end
-        local widgetSeen = {}
-        for wi = 1, #itemWidgets do
-            widgetSeen[itemWidgets[wi][1]] = true
-        end
-        for _, ensureId in ipairs(Core.Catalog.LinkbreakItems) do
-            if not widgetSeen[ensureId] and SafeValue(NPC.GetItem, hero, ensureId, true) then
-                itemWidgets[#itemWidgets + 1] = {
-                    ensureId,
-                    GetAbilityIconPath(ensureId),
-                    Core.Settings.LoadItemToggle(heroName, ensureId),
-                }
-                widgetSeen[ensureId] = true
-            end
-        end
-        if #itemWidgets == 0 then
-            itemWidgets[1] = { "none", "", false }
-        end
-        SafeValue(UI.Items.Update, UI.Items, itemWidgets, true, false)
-    end
-end
-
---#endregion
-
---#region Hero profiles
-
-local function ShouldCastDisable(ctx, enemy, abilityId, ability)
-    if not enemy then
-        return false
-    end
-
-    -- Soft/amp items (orchid, ethereal, …): cast through hard CC; never wait/extend.
-    if Core.Catalog.SoftDisableAbilities[abilityId] then
-        local ownRemaining = GetActiveDisableRemaining(enemy, abilityId, ctx.now)
-        if ownRemaining and ownRemaining > 0 then
-            local extendEnabled = UI.ExtendDisables and SafeValue(UI.ExtendDisables.Get, UI.ExtendDisables)
-            if not extendEnabled then
-                return false
-            end
-            local castPoint = SafeValue(Ability.GetCastPoint, ability, true) or 0.2
-            return ownRemaining <= castPoint + EXTEND_BUFFER
-        end
-        return true
-    end
-
-    local remaining = GetActiveDisableRemaining(enemy, abilityId, ctx.now)
-    if not remaining then
-        remaining = GetHardCcRemaining(enemy, ctx.now)
-    end
-    if not remaining or remaining <= 0 then
-        -- Unknown duration but still hard-CC'd: wait instead of stacking hex on stun.
-        if SafeValue(NPC.HasState, enemy, Enum.ModifierState.MODIFIER_STATE_HEXED)
-            or SafeValue(NPC.IsStunned, enemy) then
-            return false
-        end
-        return true
-    end
-
-    local extendEnabled = UI.ExtendDisables and SafeValue(UI.ExtendDisables.Get, UI.ExtendDisables)
-    if not extendEnabled then
-        return false
-    end
-
-    local castPoint = SafeValue(Ability.GetCastPoint, ability, true) or 0.2
-    return remaining <= castPoint + EXTEND_BUFFER
-end
-
--- Invoker plans one spell at a time; parking on cold_snap for CC-extend stalls EMP/meteor.
-function Core.InvokerShouldDeferDisable(ctx, abilityId, ability)
-    if not ctx or not ctx.enemy or not abilityId or not ability then
-        return false
-    end
-    if not Core.Catalog.DisableModifiers[abilityId]
-        and not Core.Catalog.HexAbilities[abilityId] then
-        return false
-    end
-    if Core.Catalog.SoftDisableAbilities[abilityId] then
-        return false
-    end
-    return not ShouldCastDisable(ctx, ctx.enemy, abilityId, ability)
-end
-
-local function BuildGenericAoeUltPlan(ctx, actions, abilityId)
-    if not IsAbilityEnabled(abilityId) then
-        return
-    end
-
-    if IsActionUsed(abilityId) or IsActionBlocked(abilityId, ctx.now) then
-        return
-    end
-
-    local ability = FindAbilityEntry(ctx.controlled, abilityId)
-    if not ability then
-        return
-    end
-    if not SafeValue(Ability.IsCastable, ability, ctx.mana) then
-        return
-    end
-
-    local meta = Core.Catalog.AbilityMeta[abilityId]
-    local radius = GetAoeRadius(ability, abilityId, meta)
-    -- Global NO_TARGET ults (Zeus Wrath): no local AoE — cast on lock during combo.
-    if meta and meta.noTarget and (meta.global == true or radius <= 0) then
-        if Runtime.comboActive and ctx.enemy then
-            actions[#actions + 1] = {
-                kind = "noTarget",
-                ability = ability,
-                abilityId = abilityId,
-                priority = 860,
-                tag = abilityId,
-            }
-        end
-        return
-    end
-    local minHits = UI.MinClusterHits and SafeValue(UI.MinClusterHits.Get, UI.MinClusterHits) or 2
-    -- Combo on a locked target: allow single-hero AOE when that enemy is already in radius.
-    if Runtime.comboActive and ctx.enemy and (meta == nil or meta.allowSingle ~= false) then
-        local myCheck = ctx.snapshot and ctx.snapshot.positions.controlled
-            or SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-        local enemyCheck = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-        if myCheck and enemyCheck and Dist2D(myCheck, enemyCheck) <= radius then
-            minHits = 1
-        end
-    end
-    local myPos = ctx.snapshot and ctx.snapshot.positions.controlled
-        or SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-    local enemies = GetEnemiesNear(myPos, radius + 900, ctx.controlled)
-    local allies = nil
-    if meta and meta.avoidAllies then
-        allies = Core.GetAlliesNear(myPos, radius + 900, ctx.controlled)
-    end
-    local blinkPlanned = nil
-
-    local blinkPos, blink = FindBlinkPositionForAoe(ctx.controlled, enemies, radius, minHits, allies)
-    if blink and blinkPos then
-        local blinkId = GetAbilityId(blink)
-        if blinkId and not IsActionUsed(blinkId) and not IsActionBlocked(blinkId, ctx.now)
-            and SafeValue(Ability.IsCastable, blink, ctx.mana) then
-            actions[#actions + 1] = {
-                kind = "bestPosition",
-                ability = blink,
-                abilityId = blinkId,
-                position = blinkPos,
-                positionTtl = 0.12,
-                resolverAbility = ability,
-                resolverAbilityId = abilityId,
-                meta = meta,
-                requiredHits = minHits,
-                positionMaxRange = GetCastRange(ctx.controlled, blink),
-                priority = 860,
-                tag = abilityId .. "_blink",
-            }
-            blinkPlanned = blinkId
-        end
-    end
-
-    if meta and meta.noTarget then
-        local hits = CountHitsAt(myPos, enemies, radius)
-        local lockedInRadius = false
-        if ctx.enemy then
-            local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-            lockedInRadius = enemyPos ~= nil and Dist2D(myPos, enemyPos) <= radius
-        end
-        -- Combo with a locked hero: never fire Call/Stomp on creep clusters far from the lock.
-        local comboOk = true
-        if Runtime.comboActive and ctx.enemy then
-            comboOk = lockedInRadius or blinkPlanned ~= nil
-        end
-        if comboOk and (hits >= minHits or blinkPlanned or (Runtime.comboActive and lockedInRadius and minHits <= 1)) then
-            actions[#actions + 1] = {
-                kind = "noTarget",
-                ability = ability,
-                abilityId = abilityId,
-                priority = 840,
-                tag = abilityId,
-                requiredHits = minHits,
-                aoeRadius = radius,
-                requiresAction = blinkPlanned,
-            }
-        end
-        return
-    end
-
-    local pos, hits = FindBestAoePosition(myPos, enemies, radius, minHits, nil, allies)
-    if pos and hits >= minHits then
-        actions[#actions + 1] = {
-            kind = "bestPosition",
-            ability = ability,
-            abilityId = abilityId,
-            position = pos,
-            priority = 840,
-            tag = abilityId,
-            minHits = hits,
-            requiredHits = minHits,
-            requiresAction = blinkPlanned,
-            meta = meta,
-        }
-    end
-end
-
-local function BuildChanneledDisablePlan(ctx, actions, abilityId)
-    if not IsAbilityEnabled(abilityId) or not ctx.enemy then
-        return
-    end
-    local ability = FindAbilityEntry(ctx.controlled, abilityId)
-    if not ability or not SafeValue(Ability.IsCastable, ability, ctx.mana) then
-        return
-    end
-    if not ShouldCastDisable(ctx, ctx.enemy, abilityId, ability) then
-        return
-    end
-    actions[#actions + 1] = {
-        kind = "lockedEnemy",
-        ability = ability,
-        abilityId = abilityId,
-        priority = 780,
-        tag = abilityId,
-    }
-end
-
-local function GetModifierStacks(unit, modName)
-    if not unit or not modName then
-        return 0
-    end
-    local mod = SafeValue(NPC.GetModifier, unit, modName)
-    if not mod then
-        return 0
-    end
-    return SafeValue(Modifier.GetStackCount, mod) or 0
-end
-
-local function IsPrimalBeastTrampling(controlled)
-    return controlled
-        and SafeValue(NPC.HasModifier, controlled, "modifier_primal_beast_trample") == true
-end
-
--- Trample while moving; Uproar needs stacks; Onslaught gap-closes before Pulverize.
-local function BuildPrimalBeastPlan(ctx, actions)
-    if not ctx.enemy or not ctx.controlled then
-        return
-    end
-
-    local trampling = IsPrimalBeastTrampling(ctx.controlled)
-    if trampling then
-        MarkActionUsed("primal_beast_trample")
-    end
-
-    local uproarStacks = GetModifierStacks(ctx.controlled, "modifier_primal_beast_uproar")
-    if uproarStacks <= 0 then
-        MarkActionUsed("primal_beast_uproar")
-    end
-
-    local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-    local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-    local dist = myPos and enemyPos and Dist2D(myPos, enemyPos) or 0
-
-    -- #1 initiate: blink in, else shard Rock Throw when still far.
-    local rockAsInitiate = false
-    local initiated = TryAppendInitiateBlink(ctx, actions, {
-        minDist = 450,
-        landDist = 140,
-        priority = 980,
-        tag = "primal_beast_initiate_blink",
-    })
-    if not initiated
-        and dist >= 450
-        and IsAbilityEnabled("primal_beast_rock_throw")
-        and not IsActionUsed("primal_beast_rock_throw")
-        and not IsActionBlocked("primal_beast_rock_throw", ctx.now)
-    then
-        local rock = FindAbilityEntry(ctx.controlled, "primal_beast_rock_throw")
-        if rock and SafeValue(Ability.IsCastable, rock, ctx.mana) then
-            actions[#actions + 1] = {
-                kind = "bestPosition",
-                ability = rock,
-                abilityId = "primal_beast_rock_throw",
-                meta = Core.Catalog.AbilityMeta.primal_beast_rock_throw,
-                allowSingle = true,
-                priority = 975,
-                tag = "primal_beast_initiate_rock",
-            }
-            rockAsInitiate = true
-        end
-    end
-
-    if IsAbilityEnabled("primal_beast_trample") and not IsActionUsed("primal_beast_trample")
-        and not IsActionBlocked("primal_beast_trample", ctx.now) then
-        local trample = FindAbilityEntry(ctx.controlled, "primal_beast_trample")
-        if trample and SafeValue(Ability.IsCastable, trample, ctx.mana) then
-            actions[#actions + 1] = {
-                kind = "noTarget",
-                ability = trample,
-                abilityId = "primal_beast_trample",
-                priority = 910,
-                tag = "ability_primal_beast_trample",
-            }
-        end
-    end
-
-    if IsAbilityEnabled("primal_beast_uproar") and not IsActionUsed("primal_beast_uproar")
-        and not IsActionBlocked("primal_beast_uproar", ctx.now)
-        and uproarStacks > 0 then
-        local uproar = FindAbilityEntry(ctx.controlled, "primal_beast_uproar")
-        if uproar and SafeValue(Ability.IsCastable, uproar, ctx.mana) then
-            actions[#actions + 1] = {
-                kind = "noTarget",
-                ability = uproar,
-                abilityId = "primal_beast_uproar",
-                priority = 900,
-                tag = "ability_primal_beast_uproar",
-            }
-        end
-    end
-
-    if IsAbilityEnabled("primal_beast_onslaught") and not IsActionUsed("primal_beast_onslaught")
-        and not IsActionBlocked("primal_beast_onslaught", ctx.now) then
-        local onslaught = FindAbilityEntry(ctx.controlled, "primal_beast_onslaught")
-        if onslaught and SafeValue(Ability.IsCastable, onslaught, ctx.mana) then
-            actions[#actions + 1] = {
-                kind = "bestPosition",
-                ability = onslaught,
-                abilityId = "primal_beast_onslaught",
-                meta = Core.Catalog.AbilityMeta.primal_beast_onslaught,
-                allowSingle = true,
-                priority = 870,
-                tag = "ability_primal_beast_onslaught",
-            }
-        end
-    end
-
-    -- Rock as normal nuke when it was not the initiate gap-close.
-    if not rockAsInitiate
-        and IsAbilityEnabled("primal_beast_rock_throw")
-        and not IsActionUsed("primal_beast_rock_throw")
-        and not IsActionBlocked("primal_beast_rock_throw", ctx.now)
-    then
-        local rock = FindAbilityEntry(ctx.controlled, "primal_beast_rock_throw")
-        if rock and SafeValue(Ability.IsCastable, rock, ctx.mana) then
-            actions[#actions + 1] = {
-                kind = "bestPosition",
-                ability = rock,
-                abilityId = "primal_beast_rock_throw",
-                meta = Core.Catalog.AbilityMeta.primal_beast_rock_throw,
-                allowSingle = true,
-                priority = 760,
-                tag = "ability_primal_beast_rock_throw",
-            }
-        end
-    end
-
-    -- Pulverize after Trample; blink-for-ult only as ProcessCombo fallback.
-    if not trampling
-        and IsAbilityEnabled("primal_beast_pulverize")
-        and not IsActionUsed("primal_beast_pulverize")
-        and not IsActionBlocked("primal_beast_pulverize", ctx.now) then
-        local ult = FindAbilityEntry(ctx.controlled, "primal_beast_pulverize")
-        if ult and SafeValue(Ability.IsCastable, ult, ctx.mana) then
-            actions[#actions + 1] = {
-                kind = "lockedEnemy",
-                ability = ult,
-                abilityId = "primal_beast_pulverize",
-                priority = 720,
-                tag = "ability_primal_beast_pulverize",
-            }
-        end
-    end
-end
-
-local MORPH_AGI_SHIFT_IDS = {
-    "morphling_morph_agi",
-    "morphling_attribute_shift_agility",
-}
-local MORPH_STR_SHIFT_IDS = {
-    "morphling_morph_str",
-    "morphling_attribute_shift_strength",
-}
-local MORPH_ULT_IDS = {
-    "morphling_replicate",
-    "morphling_morph",
-}
-local MORPH_REPLICATE_MOD = "modifier_morphling_replicate"
-
-local function FindFirstAbilityByIds(hero, ids)
-    for i = 1, #ids do
-        local ability = FindAbilityEntry(hero, ids[i])
-        if ability then
-            return ability, ids[i]
-        end
-    end
-    return nil, nil
-end
-
-local function IsMorphlingReplicated(hero)
-    return hero and SafeValue(NPC.HasModifier, hero, MORPH_REPLICATE_MOD) == true
-end
-
-local function InferMorphSourceUnitName(controlled)
-    if not controlled then
-        return nil
-    end
-    local abilities = CollectHeroAbilities(controlled)
-    if #abilities == 0 then
-        return nil
-    end
-    local scores = {}
-    local kits = Core.Catalog.HeroKits
-    if type(kits) ~= "table" then
-        return nil
-    end
-    for unitName, kit in pairs(kits) do
-        local steps = kit and kit.steps
-        if type(steps) == "table" then
-            for si = 1, #steps do
-                local stepId = steps[si] and steps[si].id
-                if stepId then
-                    for ai = 1, #abilities do
-                        if abilities[ai].id == stepId then
-                            scores[unitName] = (scores[unitName] or 0) + 1
-                        end
-                    end
-                end
-            end
-        end
-    end
-    local bestName, bestScore = nil, 0
-    for unitName, score in pairs(scores) do
-        if score > bestScore then
-            bestName = unitName
-            bestScore = score
-        end
-    end
-    return bestName
-end
-
-local function ResolveMorphSourceUnitName(ctx)
-    if Runtime.morphSourceUnitName then
-        return Runtime.morphSourceUnitName
-    end
-    local inferred = InferMorphSourceUnitName(ctx and ctx.controlled)
-    if inferred then
-        Runtime.morphSourceUnitName = inferred
-        return inferred
-    end
-    if ctx and ctx.enemy then
-        return SafeValue(NPC.GetUnitName, ctx.enemy)
-    end
-    return nil
-end
-
-local function MorphWaveformLandPos(controlled, enemy)
-    local myPos = SafeValue(Entity.GetAbsOrigin, controlled)
-    local enemyPos = enemy and SafeValue(Entity.GetAbsOrigin, enemy)
-    if not myPos or not enemyPos then
-        return nil
-    end
-    local dist = Dist2D(myPos, enemyPos)
-    if dist < 1 then
-        return enemyPos
-    end
-    -- Surf through the target so Waveform actually closes and deals path damage.
-    local overshoot = 120
-    local castRange = 925
-    local waveform = FindAbilityEntry(controlled, "morphling_waveform")
-    if waveform then
-        local ranged = GetCastRange(controlled, waveform)
-        if ranged and ranged > 0 then
-            castRange = ranged
-        end
-    end
-    local travel = math.min(castRange, dist + overshoot)
-    return myPos:Extend2D(enemyPos, travel)
-end
-
--- Native form: Waveform -> Ethereal -> Adaptive -> Morph.
--- Morphed form: steal target kit/profile; generic planner casts remaining stolen spells.
-local function BuildMorphlingPlan(ctx, actions)
-    if not ctx.controlled then
-        return
-    end
-
-    if IsMorphlingReplicated(ctx.controlled) then
-        Runtime.morphAwaitReplicate = false
-        Runtime.morphFormPending = false
-        Runtime.morphFormPendingAt = nil
-        Runtime.morphWasReplicated = true
-        if IsItemEnabled("item_ethereal_blade")
-            and not IsActionUsed("item_ethereal_blade")
-            and not IsActionBlocked("item_ethereal_blade", ctx.now)
-            and ctx.enemy
-        then
-            local eblade = FindItemEntry(ctx.controlled, "item_ethereal_blade")
-            if eblade and SafeValue(Ability.IsCastable, eblade, ctx.mana) then
-                actions[#actions + 1] = {
-                    kind = "lockedEnemy",
-                    ability = eblade,
-                    abilityId = "item_ethereal_blade",
-                    priority = 915,
-                    tag = "morph_ethereal",
-                }
-            end
-        end
-        -- Stolen kit/profile is layered in BuildActionPlan while replicate is active.
-        return
-    end
-
-    -- Keep Morph source while the Morph timer is still up (native <-> stolen toggle window).
-    local morphWindow = SafeValue(NPC.HasModifier, ctx.controlled, "modifier_morphling_replicate_manager") == true
-    if Runtime.morphWasReplicated
-        and not Runtime.morphAwaitReplicate
-        and not Runtime.morphFormPending
-        and not morphWindow
-    then
-        Runtime.morphWasReplicated = false
-        Runtime.morphSourceUnitName = nil
-    end
-
-    if not ctx.enemy then
-        return
-    end
-
-    local morphToggle = FindAbilityEntry(ctx.controlled, "morphling_morph_replicate")
-    if morphToggle and SafeValue(Ability.IsHidden, morphToggle) == true then
-        morphToggle = nil
-    end
-    if not morphToggle then
-        for index = 0, FALLBACK_ABILITY_SLOTS - 1 do
-            local ability = SafeValue(NPC.GetAbilityByIndex, ctx.controlled, index)
-            if ability and SafeValue(Ability.IsHidden, ability) ~= true then
-                local id = GetAbilityId(ability)
-                if id == "morphling_morph_replicate" then
-                    morphToggle = ability
-                    break
-                end
-            end
-        end
-    end
-
-    -- Scepter alt-cast Morph spawns an illusion; absorb via Morph Replicate to take form.
-    if Runtime.morphAwaitReplicate then
-        Runtime.usedActions["morphling_morph_replicate"] = nil
-        Runtime.failedActions["morphling_morph_replicate"] = nil
-        if morphToggle and SafeValue(Ability.IsCastable, morphToggle, ctx.mana) then
-            actions[#actions + 1] = {
-                kind = "noTarget",
-                ability = morphToggle,
-                abilityId = "morphling_morph_replicate",
-                priority = 990,
-                tag = "morph_absorb_replicate",
-            }
-        else
-            local waited = Runtime.morphAwaitReplicateAt
-                and (ctx.now - Runtime.morphAwaitReplicateAt) or 0
-            -- Illusion dead / absorb unavailable: stop blocking the combo forever.
-            if waited > 2.5 then
-                DbgImportant("morph absorb timeout | waited=%.2f clear await", waited)
-                Runtime.morphAwaitReplicate = false
-                Runtime.morphAwaitReplicateAt = nil
-            end
-        end
-        return
-    end
-
-    -- Direct Morph / toggle confirmed; wait for stolen-form modifier.
-    if Runtime.morphFormPending then
-        local pendingAge = Runtime.morphFormPendingAt
-            and (ctx.now - Runtime.morphFormPendingAt) or 0
-        if pendingAge > 1.5 and morphWindow then
-            -- Stuck pending while already in native Morph window (manual toggle-out).
-            Runtime.morphFormPending = false
-            Runtime.morphFormPendingAt = nil
-        else
-            return
-        end
-    end
-
-    -- Morph timer still active on native model: Morph Replicate toggles back into the enemy.
-    -- This is not a fresh Morph cast -- morphling_replicate stays on CD for the window.
-    if morphWindow then
-        Runtime.usedActions["morphling_morph_replicate"] = nil
-        Runtime.failedActions["morphling_morph_replicate"] = nil
-        if morphToggle and SafeValue(Ability.IsCastable, morphToggle, ctx.mana) then
-            actions[#actions + 1] = {
-                kind = "noTarget",
-                ability = morphToggle,
-                abilityId = "morphling_morph_replicate",
-                priority = 990,
-                tag = "morph_toggle_reenter",
-            }
-            return
-        end
-    end
-
-    local hp = SafeValue(NPC.GetHealth, ctx.controlled) or 0
-    local maxHp = SafeValue(NPC.GetMaxHealth, ctx.controlled) or 1
-    local hpPct = maxHp > 0 and (hp / maxHp) * 100 or 100
-    local agi = SafeValue(Hero.GetAgilityTotal, ctx.controlled) or 0
-    local str = SafeValue(Hero.GetStrengthTotal, ctx.controlled) or 0
-
-    -- Prefer AGI shift for Adaptive damage when not desperately low / already AGI-maxed.
-    if hpPct >= 32 and agi < str * 1.5 then
-        local shiftingAgi = SafeValue(NPC.HasModifier, ctx.controlled, "modifier_morphling_morph_agi") == true
-        if not shiftingAgi then
-            local shift, shiftId = FindFirstAbilityByIds(ctx.controlled, MORPH_AGI_SHIFT_IDS)
-            if shift and IsAbilityEnabled(shiftId)
-                and not IsActionUsed(shiftId)
-                and not IsActionBlocked(shiftId, ctx.now)
-                and SafeValue(Ability.IsCastable, shift, ctx.mana)
-            then
-                local toggled = SafeValue(Ability.GetToggleState, shift)
-                if toggled ~= true then
-                    actions[#actions + 1] = {
-                        kind = "noTarget",
-                        ability = shift,
-                        abilityId = shiftId,
-                        priority = 985,
-                        tag = "morph_shift_agi",
-                    }
-                end
-            end
-        end
-    elseif hpPct < 28 then
-        local shiftingStr = SafeValue(NPC.HasModifier, ctx.controlled, "modifier_morphling_morph_str") == true
-        if not shiftingStr then
-            local shift, shiftId = FindFirstAbilityByIds(ctx.controlled, MORPH_STR_SHIFT_IDS)
-            if shift and IsAbilityEnabled(shiftId)
-                and not IsActionUsed(shiftId)
-                and not IsActionBlocked(shiftId, ctx.now)
-                and SafeValue(Ability.IsCastable, shift, ctx.mana)
-            then
-                local toggled = SafeValue(Ability.GetToggleState, shift)
-                if toggled ~= true then
-                    actions[#actions + 1] = {
-                        kind = "noTarget",
-                        ability = shift,
-                        abilityId = shiftId,
-                        priority = 985,
-                        tag = "morph_shift_str",
-                    }
-                end
-            end
-        end
-    end
-
-    local waveform = FindAbilityEntry(ctx.controlled, "morphling_waveform")
-    local waveformReady = waveform
-        and IsAbilityEnabled("morphling_waveform")
-        and not IsActionUsed("morphling_waveform")
-        and not IsActionBlocked("morphling_waveform", ctx.now)
-        and SafeValue(Ability.IsCastable, waveform, ctx.mana)
-
-    -- Blink only when Waveform cannot initiate.
-    if not waveformReady then
-        TryAppendInitiateBlink(ctx, actions, {
-            minDist = 500,
-            landDist = 250,
-            priority = 980,
-            tag = "morphling_initiate_blink",
-        })
-    end
-
-    if waveformReady then
-        local land = MorphWaveformLandPos(ctx.controlled, ctx.enemy)
-        actions[#actions + 1] = {
-            kind = "bestPosition",
-            ability = waveform,
-            abilityId = "morphling_waveform",
-            meta = Core.Catalog.AbilityMeta.morphling_waveform,
-            allowSingle = true,
-            position = land,
-            positionTtl = 0.15,
-            positionMaxRange = GetCastRange(ctx.controlled, waveform),
-            priority = 970,
-            tag = "ability_morphling_waveform",
-        }
-    end
-
-    if IsItemEnabled("item_ethereal_blade")
-        and not IsActionUsed("item_ethereal_blade")
-        and not IsActionBlocked("item_ethereal_blade", ctx.now)
-    then
-        local eblade = FindItemEntry(ctx.controlled, "item_ethereal_blade")
-        if eblade and SafeValue(Ability.IsCastable, eblade, ctx.mana) then
-            actions[#actions + 1] = {
-                kind = "lockedEnemy",
-                ability = eblade,
-                abilityId = "item_ethereal_blade",
-                priority = 915,
-                tag = "morph_ethereal",
-            }
-        end
-    end
-
-    -- Adaptive Strike (AGI) -- STR variant no longer exists in npc_abilities.
-    local strikeId = "morphling_adaptive_strike_agi"
-    if IsAbilityEnabled(strikeId)
-        and not IsActionBlocked(strikeId, ctx.now)
-    then
-        local strike = FindAbilityEntry(ctx.controlled, strikeId)
-        if strike and SafeValue(Ability.IsCastable, strike, ctx.mana) then
-            Runtime.usedActions[strikeId] = nil
-            actions[#actions + 1] = {
-                kind = "lockedEnemy",
-                ability = strike,
-                abilityId = strikeId,
-                priority = 900,
-                tag = "ability_" .. strikeId,
-            }
-        end
-    end
-
-    -- Morph after dump Adaptive / gap-close so stolen spells take over the bar.
-    local morphUlt, morphUltId = FindFirstAbilityByIds(ctx.controlled, MORPH_ULT_IDS)
-    if morphUlt and morphUltId
-        and IsAbilityEnabled(morphUltId)
-        and not IsActionUsed(morphUltId)
-        and not IsActionBlocked(morphUltId, ctx.now)
-        and SafeValue(Ability.IsCastable, morphUlt, ctx.mana)
-    then
-        actions[#actions + 1] = {
-            kind = "lockedEnemy",
-            ability = morphUlt,
-            abilityId = morphUltId,
-            priority = 860,
-            tag = "ability_" .. morphUltId,
-        }
-    end
-end
-
-Core.Catalog.NevermoreUltSetup = {
-    { id = "item_abyssal_blade", priority = 760 },
-    { id = "item_sheepstick", priority = 755 },
-}
-Core.Catalog.NevermoreUltSetupIds = {
-    item_abyssal_blade = true,
-    item_sheepstick = true,
-}
-Core.Catalog.NevermoreFeastId = "nevermore_frenzy"
-Core.Catalog.NevermoreFeastMod = "modifier_nevermore_frenzy"
-Core.Catalog.NevermoreFeastCastTalent = "special_bonus_unique_nevermore_frenzy_castspeed"
-
--- L25 left: Feast of Souls +30% cast speed (needed to land Requiem under Abyssal).
-Core.HasNevermoreFeastCastSpeedTalent = function(hero)
-    if not hero then
-        return false
-    end
-    local talent = SafeValue(NPC.GetAbility, hero, Core.Catalog.NevermoreFeastCastTalent)
-    if talent then
-        local level = SafeValue(Ability.GetLevel, talent)
-        if type(level) == "number" and level > 0 then
-            return true
-        end
-    end
-    -- Ability16 on Nevermore = TALENT_7 (25 left).
-    return SafeValue(Hero.TalentIsLearned, hero, Enum.TalentTypes.TALENT_7) == true
-end
-
-Core.BuildNevermorePlan = function(ctx, actions)
-    if not ctx or not ctx.controlled or not ctx.enemy or not actions then
-        Runtime.sfUltBurstActive = false
-        Runtime.sfUltSetupId = nil
-        return
-    end
-
-    local myPos = ctx.snapshot and ctx.snapshot.positions.controlled
-        or SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-    local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-    if not myPos or not enemyPos then
-        Runtime.sfUltBurstActive = false
-        Runtime.sfUltSetupId = nil
-        return
-    end
-    local dist = Dist2D(myPos, enemyPos)
-
-    local blinkQueued = false
-    for i = 1, #actions do
-        local a = actions[i]
-        if a and ((a.tag == "initiate_blink")
-            or (a.abilityId and a.abilityId:find("blink", 1, true)))
-        then
-            blinkQueued = true
-            break
-        end
-    end
-
-    -- Ult burst: blink -> land -> (Feast?) -> abyssal|hex -> Requiem -> refresher.
-    -- Abyssal only with L25 Feast cast-speed talent; otherwise prefer hex (longer disable).
-    -- Feast is post-blink only (never while blink is still queued).
-    local requiemId = "nevermore_requiem"
-    local requiemMaxDist = 280
-    local requiemNote = "skip"
-    local requiemReady = false
-    local setupNote = "-"
-    local feastNote = "-"
-    local refreshNote = "-"
-    local hasCastTalent = Core.HasNevermoreFeastCastSpeedTalent(ctx.controlled)
-
-    if not IsAbilityEnabled(requiemId) then
-        requiemNote = "disabled"
-    elseif IsActionUsed(requiemId) then
-        requiemNote = "used"
-    elseif IsActionBlocked(requiemId, ctx.now) then
-        requiemNote = "blocked"
-    else
-        local requiem = FindAbilityEntry(ctx.controlled, requiemId)
-        if not requiem then
-            requiemNote = "missing"
-        elseif not SafeValue(Ability.IsCastable, requiem, ctx.mana) then
-            requiemNote = "notCastable"
-        else
-            requiemReady = true
-        end
-    end
-
-    local inUltPocket = dist <= requiemMaxDist
-    local waitingBlink = blinkQueued and not inUltPocket
-    local ultSoon = requiemReady and (inUltPocket or blinkQueued)
-    Runtime.sfUltBurstActive = ultSoon == true
-    Runtime.sfUltSetupId = nil
-
-    -- While blink is still in flight, queue ONLY blink. Setup/Feast/Requiem must
-    -- replan after land -- otherwise the stale [abyssal, requiem] queue skips Feast.
-    if waitingBlink then
-        setupNote = "defer:postBlink"
-        feastNote = "defer:postBlink"
-        if requiemReady then
-            requiemNote = "defer:postBlink"
-        end
-    elseif ultSoon then
-        -- With talent: abyssal first. Without: hex first (abyssal window is too tight).
-        local setups = hasCastTalent
-            and Core.Catalog.NevermoreUltSetup
-            or {
-                Core.Catalog.NevermoreUltSetup[2],
-                Core.Catalog.NevermoreUltSetup[1],
-            }
-        for si = 1, #setups do
-            local setup = setups[si]
-            local setupId = setup.id
-            if setupId == "item_abyssal_blade" and not hasCastTalent then
-                goto continue_sf_setup
-            end
-            if IsItemEnabled(setupId)
-                and not IsActionUsed(setupId)
-                and not IsActionBlocked(setupId, ctx.now)
-            then
-                local item = FindItemEntry(ctx.controlled, setupId)
-                if item
-                    and SafeValue(Ability.IsCastable, item, ctx.mana)
-                    and ShouldCastDisable(ctx, ctx.enemy, setupId, item)
-                then
-                    Runtime.sfUltSetupId = setupId
-                    actions[#actions + 1] = {
-                        kind = "lockedEnemy",
-                        ability = item,
-                        abilityId = setupId,
-                        priority = setup.priority,
-                        tag = "sf_ult_setup_" .. setupId,
-                    }
-                    setupNote = string.format("%s@%d", setupId, setup.priority)
-
-                    -- Feast only with L25 cast-speed talent, post-blink / in pocket,
-                    -- immediately before Abyssal->Requiem.
-                    if setupId == "item_abyssal_blade" and hasCastTalent then
-                        local feastId = Core.Catalog.NevermoreFeastId
-                        local feastMod = Core.Catalog.NevermoreFeastMod
-                        if SafeValue(NPC.HasModifier, ctx.controlled, feastMod) == true then
-                            feastNote = "active"
-                        elseif IsActionUsed(feastId) or IsActionBlocked(feastId, ctx.now) then
-                            feastNote = "used"
-                        else
-                            local feast = FindAbilityEntry(ctx.controlled, feastId)
-                            if not feast then
-                                feastNote = "missing"
-                            elseif not SafeValue(Ability.IsCastable, feast, ctx.mana) then
-                                feastNote = "notCastable"
-                            else
-                                actions[#actions + 1] = {
-                                    kind = "noTarget",
-                                    ability = feast,
-                                    abilityId = feastId,
-                                    priority = 770,
-                                    tag = "sf_ult_feast",
-                                }
-                                feastNote = "queue@770"
-                            end
-                        end
-                    end
-                    break
-                end
-            end
-            ::continue_sf_setup::
-        end
-        if setupNote == "-" then
-            setupNote = "noneReady"
-        end
-    end
-
-    -- Queue Requiem only when already in pocket (after blink or walk-in).
-    if requiemReady and not waitingBlink then
-        if not inUltPocket then
-            requiemNote = string.format("tooFar dist=%.0f>%.0f", dist, requiemMaxDist)
-        else
-            local requiem = FindAbilityEntry(ctx.controlled, requiemId)
-            if requiem then
-                actions[#actions + 1] = {
-                    kind = "noTarget",
-                    ability = requiem,
-                    abilityId = requiemId,
-                    priority = 745,
-                    tag = "ability_" .. requiemId,
-                }
-                requiemNote = "queue@745"
-            end
-        end
-    end
-
-    -- After Requiem: refresh immediately so blink/hex/ult can chain again.
-    if IsActionUsed(requiemId)
-        and IsItemEnabled("item_refresher")
-        and not IsActionUsed("item_refresher")
-        and not IsActionBlocked("item_refresher", ctx.now)
-    then
-        local refresher = FindItemEntry(ctx.controlled, "item_refresher")
-        if refresher and SafeValue(Ability.IsCastable, refresher, ctx.mana) then
-            actions[#actions + 1] = {
-                kind = "noTarget",
-                ability = refresher,
-                abilityId = "item_refresher",
-                priority = 700,
-                tag = "item_refresher_sf_ult_chain",
-            }
-            refreshNote = "queue@700"
-        else
-            refreshNote = "notCastable"
-        end
-    end
-
-    local pick = Core.PickBestShadowraze(dist)
-    local razeNote = "noneInBand"
-    local queuedRaze = false
-    local holdRazes = ultSoon or refreshNote:find("queue", 1, true)
-    if blinkQueued then
-        razeNote = "defer:blinkQueued"
-    elseif holdRazes then
-        razeNote = ultSoon and "defer:ultBurst" or "defer:refresh"
-    elseif not pick then
-        DbgVerbose("sf_plan",
-            "sf_plan | dist=%.0f requiem=%s setup=%s feast=%s talent=%s refresh=%s raze=%s | %s",
-            dist, requiemNote, setupNote, feastNote, tostring(hasCastTalent),
-            refreshNote, razeNote, FormatRangeContext(ctx))
-        return
-    elseif not IsAbilityEnabled(pick.id) then
-        razeNote = pick.id .. ":disabled"
-    elseif IsActionUsed(pick.id) then
-        razeNote = pick.id .. ":used"
-    elseif IsActionBlocked(pick.id, ctx.now) then
-        razeNote = pick.id .. ":blocked"
-    else
-        local raze = FindAbilityEntry(ctx.controlled, pick.id)
-        if not raze then
-            razeNote = pick.id .. ":missing"
-        elseif not SafeValue(Ability.IsCastable, raze, ctx.mana) then
-            razeNote = pick.id .. ":notCastable"
-        else
-            actions[#actions + 1] = {
-                kind = "noTarget",
-                ability = raze,
-                abilityId = pick.id,
-                razeRange = pick.range,
-                targetPolicy = "lockedEnemy",
-                priority = 690,
-                tag = "kit_" .. pick.id,
-            }
-            razeNote = string.format("%s:queue@690 want=%.0f", pick.id, pick.range)
-            queuedRaze = true
-        end
-    end
-
-    local msg = string.format(
-        "sf_plan | dist=%.0f requiem=%s setup=%s feast=%s talent=%s refresh=%s raze=%s | %s",
-        dist, requiemNote, setupNote, feastNote, tostring(hasCastTalent),
-        refreshNote, razeNote, FormatRangeContext(ctx)
-    )
-    if requiemNote:find("queue", 1, true)
-        or setupNote:find("@", 1, true)
-        or feastNote:find("queue", 1, true)
-        or refreshNote:find("queue", 1, true)
-        or queuedRaze
-    then
-        Core.DbgEvent("%s", msg)
-    else
-        DbgVerbose("sf_plan", "%s", msg)
-    end
-end
-
-local function BuildSupportSelfPlan(ctx, actions)
-    for _, id in ipairs(Core.Catalog.SupportSelfAbilities) do
-        if IsAbilityEnabled(id) then
-            local ability = FindAbilityEntry(ctx.controlled, id)
-            if ability and SafeValue(Ability.IsCastable, ability, ctx.mana) then
-                local policy = ClassifyAbilityPolicy(ability, id)
-                local shouldUse = LocalHeroNeedsHelp(ctx.localHero)
-                if Core.Catalog.OwnerTriggeredAbilities[id] then
-                    shouldUse = LocalHeroNeedsHelp(ctx.controlled)
-                end
-                if shouldUse then
-                    actions[#actions + 1] = {
-                        kind = policy == "noTarget" and "noTarget" or "localHero",
-                        ability = ability,
-                        abilityId = id,
-                        priority = 980 - (#actions),
-                        tag = "support_" .. id,
-                    }
-                end
-            end
-        end
-    end
-end
-
-local function AppendKitAbility(ctx, actions, step)
-    if not step then
-        return
-    end
-    local builder = step.builder
-    if builder == "supportSelf" then
-        BuildSupportSelfPlan(ctx, actions)
-        return
-    end
-
-    local abilityId = step.id
-    if not abilityId then
-        return
-    end
-    if builder == "aoeUlt" then
-        BuildGenericAoeUltPlan(ctx, actions, abilityId)
-        return
-    end
-    if builder == "channeledDisable" then
-        BuildChanneledDisablePlan(ctx, actions, abilityId)
-        return
-    end
-
-    if not IsAbilityEnabled(abilityId) or IsActionUsed(abilityId)
-        or IsActionBlocked(abilityId, ctx.now) then
-        return
-    end
-    local skipMod = Core.Catalog.SkipWhileSelfModifier[abilityId]
-    if skipMod and ctx.controlled
-        and SafeValue(NPC.HasModifier, ctx.controlled, skipMod) then
-        return
-    end
-    local needEnemyMod = Core.Catalog.RequiresEnemyModifier[abilityId]
-    if needEnemyMod then
-        if not ctx.enemy
-            or not SafeValue(NPC.HasModifier, ctx.enemy, needEnemyMod) then
-            return
-        end
-    end
-    local channelParent = Core.Catalog.ChannelReleaseOf[abilityId]
-    if channelParent then
-        local parent = FindAbilityEntry(ctx.controlled, channelParent)
-        local channelling = parent and (
-            SafeValue(Ability.IsChannelling, parent)
-            or (
-                SafeValue(NPC.IsChannellingAbility, ctx.controlled)
-                and SafeValue(NPC.GetChannellingAbility, ctx.controlled) == parent
-            )
-        )
-        if not channelling then
-            return
-        end
-        -- Let the channel wind up / other casts dump before releasing a weak shot.
-        local since = SafeValue(Ability.SecondsSinceLastUse, parent)
-        if type(since) == "number" and since >= 0 and since < 0.85 then
-            return
-        end
-    end
-    local ability = FindAbilityEntry(ctx.controlled, abilityId)
-    if not ability or not SafeValue(Ability.IsCastable, ability, ctx.mana) then
-        return
-    end
-
-    local priority = type(step.priority) == "number" and step.priority or 700
-    -- Hoodwink: Bushwhack needs a tree in trap radius. If none, plant Acorn on the
-    -- lock first, then Bushwhack once a tree exists (or Acorn is already spent/blocked).
-    if abilityId == "hoodwink_acorn_shot" or abilityId == "hoodwink_bushwhack" then
-        local enemyPos = ctx.enemy and SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-        local trapR = 265
-        local bushMeta = Core.Catalog.AbilityMeta.hoodwink_bushwhack
-        if bushMeta and type(bushMeta.defaultRadius) == "number" then
-            trapR = bushMeta.defaultRadius
-        end
-        local hasTree = enemyPos ~= nil and Core.HasTreesNear(enemyPos, trapR)
-        if abilityId == "hoodwink_acorn_shot" then
-            priority = hasTree and 880 or 920
-        else
-            if not hasTree and not IsActionUsed("hoodwink_acorn_shot") then
-                local acorn = FindAbilityEntry(ctx.controlled, "hoodwink_acorn_shot")
-                local acornReady = acorn
-                    and IsAbilityEnabled("hoodwink_acorn_shot")
-                    and not IsActionBlocked("hoodwink_acorn_shot", ctx.now)
-                    and SafeValue(Ability.IsCastable, acorn, ctx.mana)
-                if acornReady then
-                    return
-                end
-            end
-            priority = hasTree and 900 or 860
-        end
-    end
-    -- Curse scales with trees near the lock; never solo-fire before a lock / Sprout setup.
-    if abilityId == "furion_curse_of_the_forest" then
-        if not ctx.enemy then
-            return
-        end
-        local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-        local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-        -- AbilityValues.range = 900: heroes farther than this are unaffected.
-        if myPos and enemyPos and Dist2D(myPos, enemyPos) > 900 then
-            return
-        end
-        local hasTree = enemyPos ~= nil and Core.HasTreesNear(enemyPos, 275)
-        if not hasTree and not IsActionUsed("furion_sprout") then
-            local sprout = FindAbilityEntry(ctx.controlled, "furion_sprout")
-            local sproutReady = sprout
-                and IsAbilityEnabled("furion_sprout")
-                and not IsActionBlocked("furion_sprout", ctx.now)
-                and SafeValue(Ability.IsCastable, sprout, ctx.mana)
-            if sproutReady then
-                return
-            end
-        end
-    end
-    local meta = Core.Catalog.AbilityMeta[abilityId]
-    if builder == "lockedEnemy" then
-        if not ctx.enemy then
-            return
-        end
-        if (Core.Catalog.DisableModifiers[abilityId] or Core.Catalog.HexAbilities[abilityId])
-            and not ShouldCastDisable(ctx, ctx.enemy, abilityId, ability) then
-            return
-        end
-        actions[#actions + 1] = {
-            kind = "lockedEnemy",
-            ability = ability,
-            abilityId = abilityId,
-            priority = priority,
-            tag = "kit_" .. abilityId,
-        }
-    elseif builder == "noTarget" then
-        -- Live POINT/UNIT overrides static NO_TARGET (Enchant Totem: CAST_NO_TARGET never
-        -- executes while liveBeh has POINT). Prefer CAST_POSITION when POINT is set.
-        local liveBeh = GetAbilityBehaviorFlags(ability)
-        local hasPoint = HasAbilityBehaviorFlag(liveBeh, BEH.DOTA_ABILITY_BEHAVIOR_POINT)
-        local hasUnit = HasAbilityBehaviorFlag(liveBeh, BEH.DOTA_ABILITY_BEHAVIOR_UNIT_TARGET)
-        local liveNoTarget = HasAbilityBehaviorFlag(liveBeh, BEH.DOTA_ABILITY_BEHAVIOR_NO_TARGET)
-        if hasPoint and not liveNoTarget then
-            if not ctx.enemy then
-                return
-            end
-            actions[#actions + 1] = {
-                kind = "bestPosition",
-                ability = ability,
-                abilityId = abilityId,
-                meta = meta or { point = true, allowSingle = true },
-                allowSingle = true,
-                priority = priority,
-                tag = "kit_" .. abilityId,
-            }
-            return
-        end
-        if hasUnit and not liveNoTarget and not hasPoint then
-            if not ctx.enemy then
-                return
-            end
-            actions[#actions + 1] = {
-                kind = "lockedEnemy",
-                ability = ability,
-                abilityId = abilityId,
-                priority = priority,
-                tag = "kit_" .. abilityId,
-            }
-            return
-        end
-        -- Toggle (Rot): only turn ON once, and only when an enemy is in AoE.
-        if HasAbilityBehaviorFlag(liveBeh, BEH.DOTA_ABILITY_BEHAVIOR_TOGGLE) then
-            if SafeValue(Ability.GetToggleState, ability) == true then
-                MarkActionUsed(abilityId)
-                return
-            end
-            if not ctx.enemy then
-                return
-            end
-            local aoeRadius = GetAoeRadius(ability, abilityId, meta)
-            if aoeRadius and aoeRadius > 0 then
-                local myPos = ctx.snapshot and ctx.snapshot.positions.controlled
-                    or SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-                local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-                if myPos and enemyPos and Dist2D(myPos, enemyPos) > aoeRadius + 40 then
-                    return
-                end
-            end
-        elseif Runtime.comboActive and not ctx.enemy then
-            return
-        end
-        actions[#actions + 1] = {
-            kind = "noTarget",
-            ability = ability,
-            abilityId = abilityId,
-            priority = priority,
-            tag = "kit_" .. abilityId,
-        }
-    elseif builder == "bestPosition" then
-        if not ctx.enemy then
-            return
-        end
-        -- Already in Dismember / melee range: Hook only delays the ult.
-        if abilityId == "pudge_meat_hook" then
-            local myPos = ctx.snapshot and ctx.snapshot.positions.controlled
-                or SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-            local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-            if myPos and enemyPos and Dist2D(myPos, enemyPos) <= 300 then
-                return
-            end
-        end
-        actions[#actions + 1] = {
-            kind = "bestPosition",
-            ability = ability,
-            abilityId = abilityId,
-            meta = meta,
-            allowSingle = true,
-            priority = priority,
-            tag = "kit_" .. abilityId,
-        }
-    end
-end
-
-local function ApplyHeroKit(ctx, actions, kit)
-    if not kit or not ctx or not actions then
-        return
-    end
-    if kit.initiate and kit.initiate.blink then
-        TryAppendInitiateBlink(ctx, actions, kit.initiate)
-    end
-    local steps = kit.steps
-    if type(steps) ~= "table" then
-        return
-    end
-    for i = 1, #steps do
-        AppendKitAbility(ctx, actions, steps[i])
-    end
-end
-
--- Declarative combo recipes for simple/medium heroes (see ApplyHeroKit).
--- Hand overrides win over assets/data/hero_kits.lua (merged below).
-Core.Catalog.HeroKitsManual = {
-    npc_dota_hero_axe = {
-        initiate = { blink = true, landDist = 120, minDist = 400, priority = 980 },
-        steps = {
-            { id = "axe_berserkers_call", builder = "aoeUlt" },
-            { id = "axe_battle_hunger", builder = "lockedEnemy", priority = 700 },
-        },
-    },
-    npc_dota_hero_tidehunter = {
-        initiate = { blink = true, landDist = 200, minDist = 500, priority = 980 },
-        steps = {
-            { id = "tidehunter_ravage", builder = "aoeUlt" },
-            { id = "tidehunter_gush", builder = "lockedEnemy", priority = 720 },
-        },
-    },
-    npc_dota_hero_magnataur = {
-        initiate = { blink = true, landDist = 150, minDist = 450, priority = 980 },
-        steps = {
-            { id = "magnataur_reverse_polarity", builder = "aoeUlt" },
-            { id = "magnataur_skewer", builder = "bestPosition", priority = 780 },
-            { id = "magnataur_shockwave", builder = "bestPosition", priority = 700 },
-        },
-    },
-    npc_dota_hero_earthshaker = {
-        initiate = { blink = true, landDist = 180, minDist = 450, priority = 980 },
-        steps = {
-            { id = "earthshaker_echo_slam", builder = "aoeUlt" },
-            { id = "earthshaker_fissure", builder = "aoeUlt" },
-            { id = "earthshaker_enchant_totem", builder = "bestPosition", priority = 720 },
-        },
-    },
-    npc_dota_hero_enigma = {
-        initiate = { blink = true, landDist = 200, minDist = 500, priority = 980 },
-        steps = {
-            { id = "enigma_black_hole", builder = "aoeUlt" },
-            { id = "enigma_malefice", builder = "lockedEnemy", priority = 760 },
-        },
-    },
-    npc_dota_hero_faceless_void = {
-        initiate = { blink = true, landDist = 200, minDist = 500, priority = 980 },
-        steps = {
-            -- Time Walk first (860) then Chronosphere (840) when both ready.
-            { id = "faceless_void_time_walk", builder = "bestPosition", priority = 860 },
-            { id = "faceless_void_chronosphere", builder = "aoeUlt" },
-        },
-    },
-    npc_dota_hero_void_spirit = {
-        -- Prefer Astral Step for mid-range; blink only when farther than max travel.
-        initiate = { blink = true, landDist = 200, minDist = 950, priority = 980 },
-        steps = {
-            { id = "void_spirit_astral_step", builder = "bestPosition", priority = 900 },
-            { id = "void_spirit_dissimilate", builder = "aoeUlt" },
-            { id = "void_spirit_resonant_pulse", builder = "aoeUlt" },
-            { id = "void_spirit_aether_remnant", builder = "bestPosition", priority = 780 },
-        },
-    },
-    npc_dota_hero_centaur = {
-        initiate = { blink = true, landDist = 120, minDist = 400, priority = 980 },
-        steps = {
-            { id = "centaur_hoof_stomp", builder = "aoeUlt" },
-            { id = "centaur_double_edge", builder = "lockedEnemy", priority = 740 },
-        },
-    },
-    npc_dota_hero_sand_king = {
-        initiate = { blink = true, landDist = 180, minDist = 450, priority = 980 },
-        steps = {
-            { id = "sandking_burrowstrike", builder = "bestPosition", priority = 900 },
-            { id = "sandking_epicenter", builder = "aoeUlt" },
-            { id = "sandking_sand_storm", builder = "noTarget", priority = 720 },
-        },
-    },
-    npc_dota_hero_slardar = {
-        initiate = { blink = true, landDist = 120, minDist = 400, priority = 980 },
-        steps = {
-            { id = "slardar_slithereen_crush", builder = "aoeUlt" },
-            { id = "slardar_sprint", builder = "noTarget", priority = 860 },
-            { id = "slardar_amplify_damage", builder = "lockedEnemy", priority = 700 },
-        },
-    },
-    npc_dota_hero_rattletrap = {
-        initiate = { blink = true, landDist = 150, minDist = 500, priority = 980 },
-        steps = {
-            { id = "rattletrap_hookshot", builder = "bestPosition", priority = 900 },
-            { id = "rattletrap_battery_assault", builder = "aoeUlt" },
-            { id = "rattletrap_power_cogs", builder = "noTarget", priority = 760 },
-        },
-    },
-    -- Mars lives in HeroProfiles (Core.BuildMarsPlan) for ally-centroid wall pin.
-    npc_dota_hero_legion_commander = {
-        initiate = { blink = true, landDist = 100, minDist = 350, priority = 980 },
-        steps = {
-            { id = "legion_commander_press_the_attack", builder = "noTarget", priority = 860 },
-            { id = "legion_commander_duel", builder = "channeledDisable" },
-            { id = "legion_commander_overwhelming_odds", builder = "bestPosition", priority = 720 },
-        },
-    },
-    npc_dota_hero_batrider = {
-        initiate = { blink = true, landDist = 120, minDist = 400, priority = 980 },
-        steps = {
-            { id = "batrider_flaming_lasso", builder = "channeledDisable" },
-            { id = "batrider_firefly", builder = "noTarget", priority = 860 },
-            { id = "batrider_sticky_napalm", builder = "bestPosition", priority = 720 },
-        },
-    },
-    npc_dota_hero_beastmaster = {
-        initiate = { blink = true, landDist = 140, minDist = 400, priority = 980 },
-        steps = {
-            { id = "beastmaster_primal_roar", builder = "channeledDisable" },
-            { id = "beastmaster_wild_axes", builder = "bestPosition", priority = 740 },
-        },
-    },
-    npc_dota_hero_lion = {
-        initiate = { blink = true, landDist = 140, minDist = 500, priority = 980 },
-        steps = {
-            { id = "lion_voodoo", builder = "lockedEnemy", priority = 930 },
-            { id = "lion_impale", builder = "bestPosition", priority = 780 },
-            { id = "lion_finger_of_death", builder = "lockedEnemy", priority = 700 },
-        },
-    },
-    npc_dota_hero_shadow_shaman = {
-        initiate = { blink = true, landDist = 140, minDist = 500, priority = 980 },
-        steps = {
-            { id = "shadow_shaman_voodoo", builder = "lockedEnemy", priority = 930 },
-            { id = "shadow_shaman_shackles", builder = "channeledDisable" },
-            { id = "shadow_shaman_mass_serpent_ward", builder = "aoeUlt" },
-        },
-    },
-    npc_dota_hero_bane = {
-        initiate = { blink = true, landDist = 120, minDist = 450, priority = 980 },
-        steps = {
-            { id = "bane_fiends_grip", builder = "channeledDisable" },
-            { id = "bane_nightmare", builder = "channeledDisable" },
-            { id = "bane_brain_sap", builder = "lockedEnemy", priority = 740 },
-        },
-    },
-    npc_dota_hero_crystal_maiden = {
-        initiate = { blink = true, landDist = 200, minDist = 500, priority = 980 },
-        steps = {
-            { id = "crystal_maiden_frostbite", builder = "lockedEnemy", priority = 860 },
-            { id = "crystal_maiden_freezing_field", builder = "aoeUlt" },
-            { id = "crystal_maiden_crystal_nova", builder = "bestPosition", priority = 720 },
-        },
-    },
-    npc_dota_hero_witch_doctor = {
-        initiate = { blink = true, landDist = 180, minDist = 450, priority = 980 },
-        steps = {
-            { builder = "supportSelf" },
-            { id = "witch_doctor_paralyzing_cask", builder = "lockedEnemy", priority = 860 },
-            { id = "witch_doctor_maledict", builder = "bestPosition", priority = 780 },
-            { id = "witch_doctor_death_ward", builder = "aoeUlt" },
-        },
-    },
-    npc_dota_hero_lich = {
-        initiate = { blink = true, landDist = 160, minDist = 500, priority = 980 },
-        steps = {
-            { id = "lich_sinister_gaze", builder = "channeledDisable" },
-            { id = "lich_chain_frost", builder = "lockedEnemy", priority = 840 },
-            { id = "lich_frost_nova", builder = "bestPosition", priority = 720 },
-        },
-    },
-    npc_dota_hero_warlock = {
-        initiate = { blink = true, landDist = 200, minDist = 500, priority = 980 },
-        steps = {
-            { id = "warlock_fatal_bonds", builder = "lockedEnemy", priority = 860 },
-            { id = "warlock_shadow_word", builder = "lockedEnemy", priority = 780 },
-            { id = "warlock_rain_of_chaos", builder = "aoeUlt" },
-        },
-    },
-    npc_dota_hero_nyx_assassin = {
-        initiate = { blink = true, landDist = 140, minDist = 450, priority = 980 },
-        steps = {
-            { id = "nyx_assassin_impale", builder = "bestPosition", priority = 880 },
-            { id = "nyx_assassin_mana_burn", builder = "lockedEnemy", priority = 760 },
-            { id = "nyx_assassin_vendetta", builder = "noTarget", priority = 900 },
-        },
-    },
-    -- Seal → Concussive → items(735) → Flare → Bolt so root/amp land before Flare AoE.
-    npc_dota_hero_skywrath_mage = {
-        initiate = { blink = true, landDist = 160, minDist = 500, priority = 980 },
-        steps = {
-            { id = "skywrath_mage_ancient_seal", builder = "lockedEnemy", priority = 900 },
-            { id = "skywrath_mage_concussive_shot", builder = "noTarget", priority = 760 },
-            { id = "skywrath_mage_mystic_flare", builder = "bestPosition", priority = 710 },
-            { id = "skywrath_mage_arcane_bolt", builder = "lockedEnemy", priority = 690 },
-        },
-    },
-    npc_dota_hero_jakiro = {
-        initiate = { blink = true, landDist = 180, minDist = 450, priority = 980 },
-        steps = {
-            { id = "jakiro_ice_path", builder = "bestPosition", priority = 880 },
-            { id = "jakiro_macropyre", builder = "aoeUlt" },
-            { id = "jakiro_dual_breath", builder = "bestPosition", priority = 720 },
-        },
-    },
-    npc_dota_hero_lina = {
-        initiate = { blink = true, landDist = 160, minDist = 500, priority = 980 },
-        steps = {
-            { id = "lina_light_strike_array", builder = "aoeUlt" },
-            { id = "lina_dragon_slave", builder = "bestPosition", priority = 780 },
-            { id = "lina_laguna_blade", builder = "lockedEnemy", priority = 850 },
-        },
-    },
-    npc_dota_hero_nevermore = {
-        -- Blink whenever outside Requiem pocket so combo is blink -> items -> ult.
-        initiate = { blink = true, landDist = 200, minDist = 320, priority = 980 },
-        -- Razes + Requiem are owned by BuildNevermorePlan (face/align + ult timing).
-        steps = {},
-    },
-    npc_dota_hero_ogre_magi = {
-        initiate = { blink = true, landDist = 120, minDist = 400, priority = 980 },
-        steps = {
-            { builder = "supportSelf" },
-            { id = "ogre_magi_fireblast", builder = "lockedEnemy", priority = 880 },
-            { id = "ogre_magi_ignite", builder = "lockedEnemy", priority = 760 },
-        },
-    },
-    npc_dota_hero_oracle = {
-        steps = {
-            { builder = "supportSelf" },
-            { id = "oracle_fortunes_end", builder = "lockedEnemy", priority = 780 },
-        },
-    },
-    npc_dota_hero_dazzle = {
-        steps = {
-            { builder = "supportSelf" },
-            { id = "dazzle_poison_touch", builder = "lockedEnemy", priority = 760 },
-        },
-    },
-    npc_dota_hero_abaddon = {
-        steps = {
-            { builder = "supportSelf" },
-            { id = "abaddon_death_coil", builder = "lockedEnemy", priority = 760 },
-        },
-    },
-    -- Acorn plants a tree for Bushwhack when none are near the lock; SS / boom / scurry fill.
-    npc_dota_hero_hoodwink = {
-        initiate = { blink = true, landDist = 160, minDist = 450, priority = 980 },
-        steps = {
-            { id = "hoodwink_acorn_shot", builder = "bestPosition", priority = 920 },
-            { id = "hoodwink_bushwhack", builder = "bestPosition", priority = 900 },
-            { id = "hoodwink_sharpshooter", builder = "bestPosition", priority = 860 },
-            { id = "hoodwink_hunters_boomerang", builder = "bestPosition", priority = 780 },
-            { id = "hoodwink_sharpshooter_release", builder = "noTarget", priority = 600 },
-            { id = "hoodwink_scurry", builder = "noTarget", priority = 520 },
-        },
-    },
-    -- Ensnare -> Mirror; Reel In only while net is on the lock. Song is a save, not kill combo.
-    npc_dota_hero_naga_siren = {
-        initiate = { blink = true, landDist = 120, minDist = 400, priority = 980 },
-        steps = {
-            { id = "naga_siren_ensnare", builder = "lockedEnemy", priority = 900 },
-            { id = "naga_siren_mirror_image", builder = "noTarget", priority = 860 },
-            { id = "naga_siren_reel_in", builder = "noTarget", priority = 780 },
-        },
-    },
-    -- Sprout trap → Wrath → shard Curse (after trees). TP / Force of Nature are SkipAbilities.
-    npc_dota_hero_furion = {
-        initiate = { blink = true, landDist = 160, minDist = 700, priority = 980 },
-        steps = {
-            { id = "furion_sprout", builder = "lockedEnemy", priority = 900 },
-            { id = "furion_wrath_of_nature", builder = "lockedEnemy", priority = 860 },
-            { id = "furion_curse_of_the_forest", builder = "noTarget", priority = 720 },
-        },
-    },
-    -- Gust → Multishot; Frost Arrows are SkipAbilities (autocast orb). Blink lands at range.
-    npc_dota_hero_drow_ranger = {
-        initiate = { blink = true, landDist = 520, minDist = 750, priority = 980 },
-        steps = {
-            { id = "drow_ranger_wave_of_silence", builder = "bestPosition", priority = 900 },
-            { id = "drow_ranger_multishot", builder = "bestPosition", priority = 820 },
-            { id = "drow_ranger_glacier", builder = "noTarget", priority = 520 },
-        },
-    },
-    -- Hook → Dismember when close; Rot toggles on once in radius. Flesh Heap is SkipAbilities.
-    npc_dota_hero_pudge = {
-        initiate = { blink = true, landDist = 140, minDist = 450, priority = 980 },
-        steps = {
-            { id = "pudge_meat_hook", builder = "bestPosition", priority = 920 },
-            { id = "pudge_dismember", builder = "lockedEnemy", priority = 860 },
-            { id = "pudge_rot", builder = "noTarget", priority = 800 },
-        },
-    },
+ControlAlly.Profiles.Heroes.npc_dota_hero_earthshaker = {
+	abilities = {
+		earthshaker_fissure = { policy = "point", priority = 110, disable = true, lineProjectile = true },
+		earthshaker_enchant_totem = {
+			policy = "noTarget",
+			priority = 84,
+			radiusSpecial = "distance_scepter",
+			selfModifiers = { "modifier_earthshaker_enchant_totem" },
+		},
+		earthshaker_echo_slam = { policy = "special", priority = 124, radiusSpecial = "echo_slam_echo_search_range" },
+	},
 }
 
--- Merge generated kits under hand overrides (locals live inside this function).
-Core.RebuildHeroKits = function()
-    local merged = {}
-    local generated = Core.Catalog.HeroKitsGenerated
-    if type(generated) == "table" then
-        for unitName, kit in pairs(generated) do
-            merged[unitName] = kit
-        end
-    end
-    local manual = Core.Catalog.HeroKitsManual
-    if type(manual) == "table" then
-        for unitName, kit in pairs(manual) do
-            merged[unitName] = kit
-        end
-    end
-    Core.Catalog.HeroKits = merged
-end
-Core.RebuildHeroKits()
-
-Core.Catalog.HeroProfiles = {
-    -- Custom / heavy logic only; simple heroes live in HeroKits.
-    npc_dota_hero_mars = Core.BuildMarsPlan,
-    npc_dota_hero_primal_beast = BuildPrimalBeastPlan,
-    npc_dota_hero_morphling = BuildMorphlingPlan,
-    npc_dota_hero_nevermore = Core.BuildNevermorePlan,
-    npc_dota_hero_treant = BuildSupportSelfPlan,
-    npc_dota_hero_omniknight = BuildSupportSelfPlan,
-    npc_dota_hero_chen = BuildSupportSelfPlan,
-    npc_dota_hero_shadow_demon = BuildSupportSelfPlan,
-    npc_dota_hero_wisp = BuildSupportSelfPlan,
-    npc_dota_hero_invoker = function(ctx, actions)
-        if not ctx.enemy then
-            return
-        end
-        if Runtime.invokerAwaitSpell and not IsAbilityEnabled(Runtime.invokerAwaitSpell) then
-            Runtime.invokerAwaitSpell = nil
-        end
-        for si = 1, #Core.Catalog.InvokerSteps do
-            local preStep = Core.Catalog.InvokerSteps[si]
-            if not IsAbilityEnabled(preStep.id) then
-                -- skip disabled combo steps
-            elseif preStep.id == "invoker_alacrity" and ctx.localHero
-                and SafeValue(NPC.HasModifier, ctx.localHero, "modifier_invoker_alacrity") then
-                MarkActionUsed(preStep.id)
-            elseif preStep.skipMods and ctx.enemy and HasAnyModifier(ctx.enemy, preStep.skipMods) then
-                MarkActionUsed(preStep.id)
-            end
-        end
-        if ctx.now - (Runtime.invokerLastInvokeAt or 0) < INVOKER_INVOKE_SETTLE
-            and not Runtime.invokerAwaitSpell then
-            return
-        end
-        if Runtime.invokerComboEnemy ~= ctx.enemy then
-            Runtime.invokerComboEnemy = ctx.enemy
-            Runtime.invokerLastInvokeAt = 0
-            Runtime.invokerAwaitSpell = nil
-            for si = 1, #Core.Catalog.InvokerSteps do
-                Runtime.usedActions[Core.Catalog.InvokerSteps[si].id] = nil
-            end
-        end
-        local quas = FindAbilityEntry(ctx.controlled, "invoker_quas")
-        local wex = FindAbilityEntry(ctx.controlled, "invoker_wex")
-        local exort = FindAbilityEntry(ctx.controlled, "invoker_exort")
-        local invoke = FindAbilityEntry(ctx.controlled, "invoker_invoke")
-        local etherealId = Core.Catalog.InvokerEndItemRoles.ethereal.id
-        local hexId = Core.Catalog.InvokerEndItemRoles.hex.id
-        local supportItemId = Core.Catalog.InvokerEndItemRoles.support.id
-        if not quas or not wex or not exort or not invoke then
-            return
-        end
-        if IsActionUsed("invoker_cold_snap") and not IsActionUsed(etherealId)
-            and IsItemEnabled(etherealId) and ctx.enemy
-            and not IsActionBlocked(etherealId, ctx.now) then
-            local ethItem = FindItemEntry(ctx.controlled, etherealId)
-            if ethItem and SafeValue(Ability.IsCastable, ethItem, ctx.mana) then
-                local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-                local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-                local ethRange = GetCastRange(ctx.controlled, ethItem)
-                if myPos and enemyPos and IsWithinRange2D(myPos, enemyPos, ethRange) then
-                    actions[#actions + 1] = {
-                        kind = "lockedEnemy",
-                        ability = ethItem,
-                        abilityId = etherealId,
-                        priority = 958,
-                        tag = "link_" .. etherealId,
-                    }
-                    return
-                end
-            end
-        end
-        if Runtime.invokerAwaitSpell then
-            local awaitId = Runtime.invokerAwaitSpell
-            local awaitStep
-            for ai = 1, #Core.Catalog.InvokerSteps do
-                if Core.Catalog.InvokerSteps[ai].id == awaitId then
-                    awaitStep = Core.Catalog.InvokerSteps[ai]
-                    break
-                end
-            end
-            if not awaitStep then
-                Runtime.invokerAwaitSpell = nil
-            else
-                local awaitKind = awaitStep.kind
-                if awaitStep.linkBreak and ctx.enemy and TargetNeedsLinkBreak(ctx.enemy) then
-                    awaitKind = "linkbreak"
-                end
-                local awaitSpell = FindInvokerBarSpell(ctx.controlled, awaitId)
-                local invokeAge = Runtime.invokerLastInvokeAt > 0
-                    and (ctx.now - Runtime.invokerLastInvokeAt) or math.huge
-                if awaitSpell and GetAbilityId(awaitSpell) == awaitId then
-                    if invokeAge >= INVOKER_INVOKE_SETTLE then
-                        if awaitKind == "auto" then
-                            local classified = ClassifyAbilityPolicy(awaitSpell, awaitId)
-                            if not classified then
-                                MarkActionUsed(awaitId)
-                                Runtime.invokerAwaitSpell = nil
-                                return
-                            end
-                            awaitKind = classified
-                        end
-                        if awaitId == "invoker_ice_wall" and awaitKind == "noTarget" then
-                            awaitKind = "iceWall"
-                        end
-                        if (awaitKind == "lockedEnemy" or awaitKind == "linkbreak")
-                            and Core.InvokerShouldDeferDisable(ctx, awaitId, awaitSpell) then
-                            Core.DbgEvent(
-                                "invoker skip_disable | %s | wait/extend active cc | %s",
-                                awaitId,
-                                FormatRangeContext(ctx)
-                            )
-                            MarkActionUsed(awaitId)
-                            Runtime.invokerAwaitSpell = nil
-                            goto invoker_continue_await
-                        end
-                        if SafeValue(Ability.CanBeExecuted, awaitSpell) == ABILITY_CAST_READY
-                            or SafeValue(Ability.IsCastable, awaitSpell, ctx.mana) then
-                            actions[#actions + 1] = {
-                                kind = awaitKind,
-                                ability = awaitSpell,
-                                abilityId = awaitId,
-                                priority = 960,
-                                tag = awaitStep.tag,
-                                meta = Core.Catalog.AbilityMeta[awaitId],
-                                allowSingle = true,
-                            }
-                            return
-                        end
-                        -- Visible after invoke but not ready yet — wait, do not MarkActionUsed.
-                        if invokeAge < INVOKER_SLOT_WAIT then
-                            return
-                        end
-                        DbgImportant("invoker skip | %s not castable", awaitId)
-                        MarkActionUsed(awaitId)
-                        Runtime.invokerAwaitSpell = nil
-                    end
-                    return
-                end
-                if invokeAge < INVOKER_SLOT_WAIT then
-                    return
-                end
-                Runtime.invokerAwaitSpell = nil
-            end
-            ::invoker_continue_await::
-        end
-        for i = 1, #Core.Catalog.InvokerSteps do
-            local step = Core.Catalog.InvokerSteps[i]
-            if not IsAbilityEnabled(step.id) then
-                goto invoker_continue_step
-            end
-            if not IsActionUsed(step.id) and not IsActionBlocked(step.id, ctx.now) then
-                if step.skipMods and HasAnyModifier(ctx.enemy, step.skipMods) then
-                    MarkActionUsed(step.id)
-                    goto invoker_continue_step
-                end
-                if step.kind == "localHero" and not ctx.localHero then
-                    MarkActionUsed(step.id)
-                    goto invoker_continue_step
-                end
-                local kind = step.kind
-                if step.linkBreak and ctx.enemy and TargetNeedsLinkBreak(ctx.enemy) then
-                    kind = "linkbreak"
-                end
-                local spell = FindInvokerBarSpell(ctx.controlled, step.id)
-                if spell and GetAbilityId(spell) == step.id then
-                    if kind == "auto" then
-                        local classified = ClassifyAbilityPolicy(spell, step.id)
-                        if not classified then
-                            MarkActionUsed(step.id)
-                            goto invoker_continue_step
-                        end
-                        kind = classified
-                    end
-                    if step.id == "invoker_ice_wall" and kind == "noTarget" then
-                        kind = "iceWall"
-                    end
-                    if (kind == "lockedEnemy" or kind == "linkbreak")
-                        and Core.InvokerShouldDeferDisable(ctx, step.id, spell) then
-                        Core.DbgEvent(
-                            "invoker skip_disable | %s | wait/extend active cc | %s",
-                            step.id,
-                            FormatRangeContext(ctx)
-                        )
-                        MarkActionUsed(step.id)
-                        goto invoker_continue_step
-                    end
-                    if SafeValue(Ability.CanBeExecuted, spell) == ABILITY_CAST_READY
-                        or SafeValue(Ability.IsCastable, spell, ctx.mana) then
-                        actions[#actions + 1] = {
-                            kind = kind,
-                            ability = spell,
-                            abilityId = step.id,
-                            priority = 960,
-                            tag = step.tag,
-                            meta = Core.Catalog.AbilityMeta[step.id],
-                            allowSingle = true,
-                        }
-                        return
-                    end
-                    local cd = SafeValue(Ability.GetCooldown, spell)
-                    local onCd = type(cd) == "number" and cd > 0.05
-                    local invokeAge = Runtime.invokerLastInvokeAt > 0
-                        and (ctx.now - Runtime.invokerLastInvokeAt) or math.huge
-                    -- Post-invoke settle / cast lock: hold the planner, do not advance steps.
-                    if not onCd and invokeAge < INVOKER_SLOT_WAIT then
-                        return
-                    end
-                    DbgImportant("invoker skip | %s not castable", step.id)
-                    MarkActionUsed(step.id)
-                    goto invoker_continue_step
-                end
-                if Runtime.invokerAwaitSpell == step.id then
-                    return
-                end
-                Runtime.invokerAwaitSpell = step.id
-                local band = 960
-                local seq = 0
-                local orbPlan = {
-                    { orb = wex, id = "invoker_wex", count = step.w or 0 },
-                    { orb = quas, id = "invoker_quas", count = step.q or 0 },
-                    { orb = exort, id = "invoker_exort", count = step.e or 0 },
-                }
-                for oi = 1, #orbPlan do
-                    local entry = orbPlan[oi]
-                    for _ = 1, entry.count do
-                        seq = seq + 1
-                        actions[#actions + 1] = {
-                            kind = "noTarget",
-                            ability = entry.orb,
-                            abilityId = entry.id,
-                            priority = band,
-                            tag = "invoker_orb_" .. entry.id .. "_" .. seq,
-                        }
-                        band = band - 1
-                    end
-                end
-                actions[#actions + 1] = {
-                    kind = "noTarget",
-                    ability = invoke,
-                    abilityId = "invoker_invoke",
-                    priority = band,
-                    tag = "ability_invoker_invoke",
-                }
-                return
-            end
-            ::invoker_continue_step::
-        end
-        if ctx.enemy and IsItemEnabled(hexId) and not IsActionUsed(hexId)
-            and not IsActionBlocked(hexId, ctx.now) then
-            local hex = FindItemEntry(ctx.controlled, hexId)
-            if hex and SafeValue(Ability.IsCastable, hex, ctx.mana) then
-                local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-                local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-                local hexRange = GetCastRange(ctx.controlled, hex)
-                if myPos and enemyPos and IsWithinRange2D(myPos, enemyPos, hexRange)
-                    and ShouldCastDisable(ctx, ctx.enemy, hexId, hex) then
-                    actions[#actions + 1] = {
-                        kind = "lockedEnemy",
-                        ability = hex,
-                        abilityId = hexId,
-                        priority = 956,
-                        tag = hexId,
-                    }
-                    return
-                end
-            end
-        end
-        if ctx.localHero and IsItemEnabled(supportItemId) and not IsActionUsed(supportItemId)
-            and not IsActionBlocked(supportItemId, ctx.now) then
-            local lotus = FindItemEntry(ctx.controlled, supportItemId)
-            if lotus and SafeValue(Ability.IsCastable, lotus, ctx.mana) then
-                local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-                local allyPos = SafeValue(Entity.GetAbsOrigin, ctx.localHero)
-                local lotusRange = GetCastRange(ctx.controlled, lotus)
-                if myPos and allyPos and IsWithinRange2D(myPos, allyPos, lotusRange) then
-                    actions[#actions + 1] = {
-                        kind = "localHero",
-                        ability = lotus,
-                        abilityId = supportItemId,
-                        priority = 955,
-                        tag = ActionTag("self.", supportItemId),
-                    }
-                    return
-                end
-            end
-        end
-    end,
+ControlAlly.Profiles.Heroes.npc_dota_hero_riki = {
+	abilities = {
+		riki_smoke_screen = { policy = "point", priority = 98, radiusSpecial = "radius" },
+		riki_blink_strike = { policy = "enemy", priority = 92 },
+		riki_tricks_of_the_trade = { policy = "point", priority = 104, radiusSpecial = "radius" },
+	},
 }
-Core.InvokerController.Build = Core.Catalog.HeroProfiles.npc_dota_hero_invoker
 
---#endregion
+ControlAlly.Profiles.Heroes.npc_dota_hero_viper = {
+	abilities = {
+		viper_nethertoxin = { policy = "point", priority = 86, radiusSpecial = "radius" },
+		viper_poison_attack = { policy = "enemy", priority = 66, attackModifier = true, allowStacking = true },
+		viper_viper_strike = { policy = "enemy", priority = 108 },
+	},
+}
 
---#region Action planning
+ControlAlly.Profiles.Heroes.npc_dota_hero_rattletrap = {
+	abilities = {
+		rattletrap_battery_assault = { policy = "noTarget", priority = 84, radiusSpecial = "radius" },
+		rattletrap_rocket_flare = { policy = "point", priority = 72, global = true, radiusSpecial = "radius" },
+		rattletrap_hookshot = {
+			policy = "point",
+			priority = 116,
+			disable = true,
+			lineProjectile = true,
+			projectileSpeedSpecial = "speed",
+			committedMotion = true,
+		},
+	},
+}
 
-local function AppendGenericActions(ctx, actions)
-    local function canCastOnEnemyNow(ability, kind)
-        -- Range is enforced at execute/approach time. Filtering here dropped short-range
-        -- disables (Lion Hex) from the plan while longer skills were still queued.
-        if not ability then
-            return false
-        end
-        if kind == "localHero" then
-            return ctx.localHero ~= nil
-        end
-        if kind == "noTarget" then
-            return true
-        end
-        return ctx.enemy ~= nil
-    end
+ControlAlly.Profiles.Heroes.npc_dota_hero_pudge = {
+	abilities = {
+		pudge_meat_hook = { policy = "point", priority = 106, disable = true, lineProjectile = true },
+		pudge_rot = {
+			policy = "toggle",
+			priority = 94,
+			toggleMode = "enemy",
+			radiusSpecial = "rot_radius",
+			minimumHealthPct = 24,
+		},
+		pudge_flesh_heap = { policy = "noTarget", priority = 112, requiresRecentDamage = true, alwaysNoTarget = true },
+		pudge_dismember = { policy = "enemy", priority = 120, disable = true },
+	},
+}
 
-    for _, entry in ipairs(ctx.snapshot and ctx.snapshot.items or CollectHeroItems(ctx.controlled)) do
-        if IsItemEnabled(entry.id) and Core.Catalog.SelfNoTargetItems[entry.id] then
-            -- Combat actives (Satanic / MoM / …) need a lock; do not fire on empty plan ticks.
-            if Runtime.comboActive and not ctx.enemy then
-                goto continue_team_item
-            end
-            if IsActionBlocked(entry.id, ctx.now) or IsActionUsed(entry.id) then
-                goto continue_team_item
-            end
-            if SafeValue(Ability.IsCastable, entry.item, ctx.mana) then
-                actions[#actions + 1] = {
-                    kind = "noTarget",
-                    ability = entry.item,
-                    abilityId = entry.id,
-                    priority = 925,
-                    tag = ActionTag("team.", entry.id),
-                }
-            end
-        end
-        ::continue_team_item::
-    end
+ControlAlly.Profiles.Heroes.npc_dota_hero_snapfire = {
+	abilities = {
+		snapfire_scatterblast = { policy = "point", priority = 84, lineProjectile = true },
+		snapfire_lil_shredder = { policy = "noTarget", priority = 76, alwaysNoTarget = true },
+		snapfire_firesnap_cookie = {
+			policy = "self",
+			priority = 90,
+			requiresTarget = true,
+			durationSpecial = "jump_duration",
+			committedMotion = true,
+		},
+		snapfire_mortimer_kisses = { policy = "point", priority = 118, radiusSpecial = "impact_radius" },
+	},
+}
 
-    for _, entry in ipairs(ctx.snapshot and ctx.snapshot.items or CollectHeroItems(ctx.controlled)) do
-        if entry.id ~= "item_refresher"
-            and IsItemEnabled(entry.id) and not ShouldSkipComboItem(entry.id) then
-            if Core.Catalog.SelfNoTargetItems[entry.id] then
-                goto continue_self_item
-            end
-            if IsActionBlocked(entry.id, ctx.now) or IsActionUsed(entry.id) then
-                goto continue_self_item
-            end
-            local policy = ClassifyItemPolicy(entry.item, entry.id)
-            local shouldUse = policy == "localHero" and LocalHeroNeedsHelp(ctx.localHero)
-                or (policy == "noTarget" and Core.Catalog.SelfItems[entry.id]
-                    and LocalHeroNeedsHelp(ctx.controlled))
-            if shouldUse and SafeValue(Ability.IsCastable, entry.item, ctx.mana) then
-                actions[#actions + 1] = {
-                    kind = policy,
-                    ability = entry.item,
-                    abilityId = entry.id,
-                    priority = 960,
-                    tag = ActionTag("self.", entry.id),
-                }
-            end
-        end
-        ::continue_self_item::
-    end
+ControlAlly.Profiles.Heroes.npc_dota_hero_wisp = {
+	abilities = {
+		wisp_tether = { policy = "ally", priority = 96, allyMode = "buff" },
+		wisp_overcharge = { policy = "noTarget", priority = 88, alwaysNoTarget = true },
+		wisp_spirits = { policy = "noTarget", priority = 82, alwaysNoTarget = true },
+		wisp_spirits_in = { policy = "special", allowHidden = true },
+		wisp_spirits_out = { policy = "special", allowHidden = true },
+		wisp_tether_break = { policy = "disabled", allowHidden = true },
+		wisp_relocate = { policy = "disabled" },
+	},
+}
 
-    for _, entry in ipairs(ctx.snapshot and ctx.snapshot.abilities or CollectHeroAbilities(ctx.controlled)) do
-        if SafeValue(NPC.GetUnitName, ctx.controlled) == "npc_dota_hero_invoker" then
-            goto continue_ability
-        end
-        -- Morphling kit/profile owns Waveform / Adaptive / Attribute Shift.
-        if SafeValue(NPC.GetUnitName, ctx.controlled) == "npc_dota_hero_morphling"
-            and entry.id
-            and entry.id:find("morphling_", 1, true)
-        then
-            goto continue_ability
-        end
-        -- Nevermore profile owns razes + Requiem + Feast (Feast only in ult burst with L25 talent).
-        if SafeValue(NPC.GetUnitName, ctx.controlled) == "npc_dota_hero_nevermore"
-            and entry.id
-            and (entry.id:find("nevermore_shadowraze", 1, true)
-                or entry.id == "nevermore_requiem"
-                or entry.id == Core.Catalog.NevermoreFeastId)
-        then
-            goto continue_ability
-        end
-        if IsAbilityEnabled(entry.id) and SafeValue(Ability.IsCastable, entry.ability, ctx.mana) then
-            -- Kit owns these ids (even when gated out this tick); do not re-add via generic.
-            if Runtime.kitAbilityIds and Runtime.kitAbilityIds[entry.id] then
-                goto continue_ability
-            end
-            if IsActionBlocked(entry.id, ctx.now) then
-                goto continue_ability
-            end
-            if IsActionUsed(entry.id) then
-                goto continue_ability
-            end
-            local skipSelfMod = Core.Catalog.SkipWhileSelfModifier[entry.id]
-            if skipSelfMod and ctx.controlled
-                and SafeValue(NPC.HasModifier, ctx.controlled, skipSelfMod) then
-                goto continue_ability
-            end
-            local needEnemyMod = Core.Catalog.RequiresEnemyModifier[entry.id]
-            if needEnemyMod then
-                if not ctx.enemy
-                    or not SafeValue(NPC.HasModifier, ctx.enemy, needEnemyMod) then
-                    goto continue_ability
-                end
-            end
-            -- Defer Pulverize while Trample is active (orbit first, ult after).
-            if entry.id == "primal_beast_pulverize"
-                and IsPrimalBeastTrampling(ctx.controlled) then
-                goto continue_ability
-            end
-            local policy, meta = ClassifyAbilityPolicy(entry.ability, entry.id)
-            if not policy then
-                goto continue_ability
-            end
-            local behavior = SafeValue(Ability.GetBehavior, entry.ability, true)
-                or SafeValue(Ability.GetBehavior, entry.ability, false) or 0
-            if policy == "noTarget"
-                and HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_TOGGLE)
-                and SafeValue(Ability.GetToggleState, entry.ability) == true then
-                MarkActionUsed(entry.id)
-                goto continue_ability
-            end
-            local priority = Core.Catalog.PriorityOverrides[entry.id] or 700
-            if not Core.Catalog.PriorityOverrides[entry.id] then
-                if policy == "localHero" then
-                    priority = LocalHeroNeedsHelp(ctx.localHero) and 940 or 300
-                elseif policy == "bestPosition" then
-                    priority = SafeValue(Ability.IsUltimate, entry.ability) and 820 or 650
-                elseif policy == "noTarget" then
-                    priority = SafeValue(Ability.IsUltimate, entry.ability) and 830 or 640
-                elseif Core.Catalog.DisableModifiers[entry.id] then
-                    priority = 760
-                end
-            end
+ControlAlly.Profiles.Heroes.npc_dota_hero_lone_druid = {
+	abilities = {
+		lone_druid_spirit_bear = { policy = "special", priority = 140 },
+		lone_druid_rabid = { policy = "noTarget", priority = 78, alwaysNoTarget = true },
+		lone_druid_savage_roar = { policy = "noTarget", priority = 104, radiusSpecial = "radius" },
+		lone_druid_true_form = { policy = "noTarget", priority = 112, alwaysNoTarget = true },
+		lone_druid_true_form_battle_cry = { policy = "noTarget", priority = 94, allowHidden = true },
+	},
+}
 
-            if policy == "localHero" and not LocalHeroNeedsHelp(ctx.localHero)
-                and Core.Catalog.FriendlyOnlyAbilities[entry.id] then
-                goto continue_ability
-            end
+ControlAlly.Profiles.GlobalAbilities.lone_druid_savage_roar_bear = {
+	policy = "noTarget",
+	priority = 104,
+	radiusSpecial = "radius",
+}
+ControlAlly.Profiles.GlobalAbilities.lone_druid_spirit_bear_fetch = {
+	policy = "enemy",
+	priority = 94,
+	disable = true,
+}
+ControlAlly.Profiles.GlobalAbilities.lone_druid_spirit_bear_return = { policy = "disabled" }
 
-            if policy == "noTarget" and Runtime.comboActive and not ctx.enemy then
-                goto continue_ability
-            end
+ControlAlly.Profiles.Heroes.npc_dota_hero_kez = {
+	abilities = {
+		kez_switch_weapons = { policy = "special", priority = 24 },
+		kez_echo_slash = { policy = "noTarget", priority = 88, radiusSpecial = "katana_radius" },
+		kez_grappling_claw = {
+			policy = "enemy",
+			priority = 104,
+			disable = true,
+			projectileSpeedSpecial = "grapple_speed",
+			committedMotion = true,
+		},
+		kez_kazurai_katana = { policy = "enemy", priority = 72, attackModifier = true, allowStacking = true },
+		kez_raptor_dance = { policy = "noTarget", priority = 116, radiusSpecial = "radius" },
+		kez_falcon_rush = { policy = "noTarget", priority = 92, alwaysNoTarget = true },
+		kez_falcon_rush_ad = { policy = "noTarget", priority = 92, allowHidden = true, menuVisible = true },
+		kez_talon_toss = { policy = "enemy", priority = 94, disable = true },
+		kez_talon_toss_ad = { policy = "enemy", priority = 94, allowHidden = true, menuVisible = true, disable = true },
+		kez_shodo_sai = { policy = "point", priority = 108, requiresRecentDamage = true },
+		kez_shodo_sai_ad = {
+			policy = "point",
+			priority = 108,
+			allowHidden = true,
+			menuVisible = true,
+			requiresRecentDamage = true,
+		},
+		kez_ravens_veil = { policy = "noTarget", priority = 104, alwaysNoTarget = true },
+		kez_ravens_veil_ad = { policy = "noTarget", priority = 104, allowHidden = true, menuVisible = true },
+	},
+}
 
-            -- Pointless no-target AOE (Call, Stomp, ...) outside radius -- wait / blink instead.
-            if policy == "noTarget" and meta and meta.noTarget and ctx.enemy then
-                local aoeRadius = GetAoeRadius(entry.ability, entry.id, meta)
-                if aoeRadius and aoeRadius > 0 then
-                    local myPos = ctx.snapshot and ctx.snapshot.positions.controlled
-                        or SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-                    local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-                    if myPos and enemyPos and Dist2D(myPos, enemyPos) > aoeRadius then
-                        goto continue_ability
-                    end
-                end
-            end
+ControlAlly.Profiles.Heroes.npc_dota_hero_monkey_king = {
+	abilities = {
+		monkey_king_boundless_strike = { policy = "point", priority = 106, disable = true, lineProjectile = true },
+		monkey_king_tree_dance = { policy = "special", priority = 92 },
+		monkey_king_primal_spring = { policy = "special", allowHidden = true, menuVisible = true, priority = 110 },
+		monkey_king_primal_spring_early = { policy = "special", allowHidden = true },
+		monkey_king_wukongs_command = { policy = "point", priority = 120, radiusSpecial = "second_radius" },
+	},
+}
 
-            if policy == "lockedEnemy" or policy == "bestPosition" then
-                if not ctx.enemy then
-                    goto continue_ability
-                end
-                if entry.id == "sniper_shrapnel" then
-                    local shMeta = meta or Core.Catalog.AbilityMeta.sniper_shrapnel
-                    if shMeta and shMeta.debuffMods and HasAnyModifier(ctx.enemy, shMeta.debuffMods) then
-                        goto continue_ability
-                    end
-                    if Runtime.shrapnelLastEnemy == ctx.enemy and Runtime.shrapnelLastCastAt then
-                        local elapsed = ctx.now - Runtime.shrapnelLastCastAt
-                        local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-                        if elapsed < 9.0 and enemyPos and Runtime.shrapnelLastPos then
-                            if Dist2D(enemyPos, Runtime.shrapnelLastPos) < 350 then
-                                goto continue_ability
-                            end
-                        end
-                    end
-                end
-                if policy == "lockedEnemy" and Core.Catalog.DisableModifiers[entry.id]
-                    and not ShouldCastDisable(ctx, ctx.enemy, entry.id, entry.ability) then
-                    goto continue_ability
-                end
-                if policy == "lockedEnemy"
-                    and Core.Catalog.HexAbilities[entry.id]
-                    and not IsLinkBreakItem(entry.id)
-                    and TargetNeedsLinkBreak(ctx.enemy) then
-                    local hasLinkItem = false
-                    for _, popId in ipairs(Core.Catalog.LinkbreakItems) do
-                        if IsItemEnabled(popId) and not IsActionUsed(popId)
-                            and not IsActionBlocked(popId, ctx.now) then
-                            local pop = FindItemEntry(ctx.controlled, popId)
-                            if pop and SafeValue(Ability.IsCastable, pop, ctx.mana) then
-                                hasLinkItem = true
-                                break
-                            end
-                        end
-                    end
-                    if hasLinkItem then
-                        goto continue_ability
-                    end
-                end
-                if not canCastOnEnemyNow(entry.ability, policy) then
-                    goto continue_ability
-                end
-            end
+ControlAlly.Profiles.Heroes.npc_dota_hero_spectre = {
+	abilities = {
+		spectre_spectral_dagger = { policy = "enemy", priority = 84 },
+		spectre_haunt = { policy = "special", priority = 116 },
+		spectre_shadow_step = { policy = "special", priority = 116 },
+		spectre_reality = { policy = "special", allowHidden = true, menuVisible = true, priority = 140 },
+	},
+}
 
-            actions[#actions + 1] = {
-                kind = policy,
-                ability = entry.ability,
-                abilityId = entry.id,
-                meta = meta,
-                allowSingle = policy == "bestPosition" and (meta == nil or meta.allowSingle == true),
-                priority = priority,
-                tag = "ability_" .. entry.id,
-            }
-        end
-        ::continue_ability::
-    end
+ControlAlly.Profiles.Heroes.npc_dota_hero_ember_spirit = {
+	abilities = {
+		ember_spirit_searing_chains = { policy = "noTarget", priority = 102, radiusSpecial = "radius", disable = true },
+		ember_spirit_sleight_of_fist = { policy = "point", priority = 92, radiusSpecial = "radius" },
+		ember_spirit_flame_guard = { policy = "noTarget", priority = 84, radiusSpecial = "radius" },
+		ember_spirit_fire_remnant = { policy = "special", priority = 90 },
+		ember_spirit_activate_fire_remnant = {
+			policy = "special",
+			allowHidden = true,
+			menuVisible = true,
+			priority = 118,
+		},
+	},
+}
 
-    for _, entry in ipairs(ctx.snapshot and ctx.snapshot.items or CollectHeroItems(ctx.controlled)) do
-        if IsItemEnabled(entry.id) and not ShouldSkipComboItem(entry.id) then
-            if entry.id == "item_refresher" or IsActionBlocked(entry.id, ctx.now)
-                or IsActionUsed(entry.id) then
-                goto continue_item
-            end
-            local policy = ClassifyItemPolicy(entry.item, entry.id)
-            if not policy then
-                goto continue_item
-            end
-            -- SF ult burst: only the chosen setup item (abyssal XOR hex), nothing else.
-            if Runtime.sfUltBurstActive
-                and (policy == "linkbreak" or policy == "lockedEnemy")
-                and entry.id ~= Runtime.sfUltSetupId
-            then
-                goto continue_item
-            end
-            if Core.Catalog.SelfItems[entry.id] and not IsLinkBreakItem(entry.id) then
-                -- Keep pure support items help-gated; still allow enemy-targeted SelfItems (Force/Pike).
-                if policy ~= "lockedEnemy" and policy ~= "bestPosition" and policy ~= "linkbreak" then
-                    goto continue_item
-                end
-            end
-            local behavior = SafeValue(Ability.GetBehavior, entry.item, true)
-                or SafeValue(Ability.GetBehavior, entry.item, false) or 0
-            if HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_TOGGLE)
-                and SafeValue(Ability.GetToggleState, entry.item) == true then
-                MarkActionUsed(entry.id)
-                goto continue_item
-            end
-            if policy == "linkbreak" then
-                if IsActionUsed(entry.id) then
-                    goto continue_item
-                end
-                if SafeValue(Ability.IsCastable, entry.item, ctx.mana) then
-                    local invokerCombo = SafeValue(NPC.GetUnitName, ctx.controlled) == "npc_dota_hero_invoker"
-                    if invokerCombo
-                        and entry.id == Core.Catalog.InvokerEndItemRoles.ethereal.id and ctx.enemy
-                        and not IsActionUsed(entry.id)
-                        and canCastOnEnemyNow(entry.item, "lockedEnemy") then
-                        actions[#actions + 1] = {
-                            kind = "lockedEnemy",
-                            ability = entry.item,
-                            abilityId = entry.id,
-                            priority = 950,
-                            tag = "link_" .. entry.id,
-                        }
-                    elseif UI.UseLinkBreak and SafeValue(UI.UseLinkBreak.Get, UI.UseLinkBreak) and ctx.enemy and TargetNeedsLinkBreak(ctx.enemy)
-                        and canCastOnEnemyNow(entry.item, "linkbreak") then
-                        actions[#actions + 1] = {
-                            kind = "linkbreak",
-                            ability = entry.item,
-                            abilityId = entry.id,
-                            priority = 950,
-                            tag = "link_" .. entry.id,
-                        }
-                    elseif ctx.enemy and ShouldCastDisable(ctx, ctx.enemy, entry.id, entry.item)
-                        and canCastOnEnemyNow(entry.item, "lockedEnemy") then
-                        actions[#actions + 1] = {
-                            kind = "lockedEnemy",
-                            ability = entry.item,
-                            abilityId = entry.id,
-                            priority = 735,
-                            tag = entry.id,
-                        }
-                    elseif ctx.enemy
-                        and Core.Catalog.DisableModifiers[entry.id] == nil
-                        and not Core.Catalog.HexAbilities[entry.id]
-                        and SafeValue(Ability.IsCastable, entry.item, ctx.mana)
-                        and canCastOnEnemyNow(entry.item, "lockedEnemy") then
-                        -- Linkbreak catalog items that are not hard disables (eblade/nullifier/vessel).
-                        actions[#actions + 1] = {
-                            kind = "lockedEnemy",
-                            ability = entry.item,
-                            abilityId = entry.id,
-                            priority = 725,
-                            tag = entry.id,
-                        }
-                    end
-                end
-            elseif policy == "lockedEnemy" and ctx.enemy then
-                if IsActionUsed(entry.id) then
-                    goto continue_item
-                end
-                if SafeValue(Ability.IsCastable, entry.item, ctx.mana) then
-                    local isDisable = Core.Catalog.DisableModifiers[entry.id] ~= nil
-                        or Core.Catalog.HexAbilities[entry.id] == true
-                    local should = false
-                    if isDisable then
-                        should = ShouldCastDisable(ctx, ctx.enemy, entry.id, entry.item)
-                    else
-                        -- Offensive target items (harpoon, force, vessel, ...).
-                        should = true
-                    end
-                    if should and canCastOnEnemyNow(entry.item, policy) then
-                        actions[#actions + 1] = {
-                            kind = "lockedEnemy",
-                            ability = entry.item,
-                            abilityId = entry.id,
-                            priority = isDisable and 740 or 720,
-                            tag = entry.id,
-                        }
-                    end
-                end
-            elseif policy == "localHero" and ctx.localHero
-                and LocalHeroNeedsHelp(ctx.localHero)
-                and SafeValue(Ability.IsCastable, entry.item, ctx.mana) then
-                actions[#actions + 1] = {
-                    kind = "localHero",
-                    ability = entry.item,
-                    abilityId = entry.id,
-                    priority = 910,
-                    tag = entry.id,
-                }
-            elseif policy == "noTarget" and not Core.Catalog.SelfNoTargetItems[entry.id]
-                and SafeValue(Ability.IsCastable, entry.item, ctx.mana) then
-                actions[#actions + 1] = {
-                    kind = "noTarget",
-                    ability = entry.item,
-                    abilityId = entry.id,
-                    priority = 620,
-                    tag = entry.id,
-                }
-            elseif policy == "bestPosition" and ctx.enemy
-                and not entry.id:find("blink", 1, true)
-                and SafeValue(Ability.IsCastable, entry.item, ctx.mana)
-                and canCastOnEnemyNow(entry.item, policy) then
-                local landPrio = Core.Catalog.CombatLandItems
-                    and Core.Catalog.CombatLandItems[entry.id]
-                actions[#actions + 1] = {
-                    kind = "bestPosition",
-                    ability = entry.item,
-                    abilityId = entry.id,
-                    allowSingle = true,
-                    priority = type(landPrio) == "number" and landPrio or 620,
-                    tag = entry.id,
-                }
-            end
-            ::continue_item::
-        end
-    end
+ControlAlly.Profiles.Heroes.npc_dota_hero_earth_spirit = {
+	abilities = {
+		earth_spirit_stone_caller = { policy = "special", priority = 74 },
+		earth_spirit_boulder_smash = { policy = "special", priority = 96, disable = true, lineProjectile = true },
+		earth_spirit_rolling_boulder = { policy = "special", priority = 100, disable = true, lineProjectile = true },
+		earth_spirit_geomagnetic_grip = { policy = "special", priority = 90, disable = true, lineProjectile = true },
+		earth_spirit_petrify = { policy = "enemy", priority = 104, disable = true, allowHidden = true },
+		earth_spirit_magnetize = { policy = "noTarget", priority = 116, radiusSpecial = "cast_radius" },
+	},
+}
 
-    if IsItemEnabled("item_refresher") and not IsActionUsed("item_refresher")
-        and not IsActionBlocked("item_refresher", ctx.now) then
-        -- Nevermore: refresher is owned by BuildNevermorePlan after Requiem (ult chain).
-        if SafeValue(NPC.GetUnitName, ctx.controlled) == "npc_dota_hero_nevermore" then
-            goto skip_generic_refresher
-        end
-        local refresher = FindItemEntry(ctx.controlled, "item_refresher")
-        if refresher and SafeValue(Ability.IsCastable, refresher, ctx.mana) then
-            -- Ignore toggles / short-CD spam (Arc, Lightning Hands): they stay ready and
-            -- permanently blocked "all skills on CD" refresher.
-            local REFRESHER_MIN_CD = 8.0
-            local function countsForRefresher(ability, abilityId)
-                if not ability or type(abilityId) ~= "string" then
-                    return false
-                end
-                if Core.Catalog.ReusableComboAbilities[abilityId] then
-                    return false
-                end
-                local beh = SafeValue(Ability.GetBehavior, ability, true)
-                    or SafeValue(Ability.GetBehavior, ability, false) or 0
-                if HasAbilityBehaviorFlag(beh, BEH.DOTA_ABILITY_BEHAVIOR_TOGGLE) then
-                    return false
-                end
-                local cdLen = SafeValue(Ability.GetCooldownLength, ability)
-                if type(cdLen) ~= "number" or cdLen < REFRESHER_MIN_CD then
-                    return false
-                end
-                return true
-            end
-            local allOnCooldown = true
-            local sawEnabledAbility = false
-            if SafeValue(NPC.GetUnitName, ctx.controlled) == "npc_dota_hero_invoker" then
-                for ri = 1, #Core.Catalog.InvokerSteps do
-                    local step = Core.Catalog.InvokerSteps[ri]
-                    if IsAbilityEnabled(step.id) then
-                        local spell = SafeValue(NPC.GetAbility, ctx.controlled, step.id)
-                        if countsForRefresher(spell, step.id) then
-                            sawEnabledAbility = true
-                            local cooldown = SafeValue(Ability.GetCooldown, spell)
-                            if type(cooldown) ~= "number" or cooldown <= 0 then
-                                allOnCooldown = false
-                                break
-                            end
-                        end
-                    end
-                end
-            else
-                for _, entry in ipairs(ctx.snapshot and ctx.snapshot.abilities or CollectHeroAbilities(ctx.controlled)) do
-                    if IsAbilityEnabled(entry.id) and countsForRefresher(entry.ability, entry.id) then
-                        sawEnabledAbility = true
-                        local cooldown = SafeValue(Ability.GetCooldown, entry.ability)
-                        if type(cooldown) ~= "number" or cooldown <= 0 then
-                            allOnCooldown = false
-                            break
-                        end
-                    end
-                end
-            end
-            if sawEnabledAbility and allOnCooldown then
-                actions[#actions + 1] = {
-                    kind = "noTarget",
-                    ability = refresher,
-                    abilityId = "item_refresher",
-                    priority = 500,
-                    tag = "item_refresher_all_skills_cd",
-                }
-                DbgVerbose("refresher_ready", "refresher ready | long-cd abilities on cooldown")
-            end
-        end
-        ::skip_generic_refresher::
-    end
+ControlAlly.Profiles.Heroes.npc_dota_hero_pugna = {
+	abilities = {
+		pugna_nether_blast = { policy = "point", priority = 82, radiusSpecial = "radius" },
+		pugna_decrepify = { policy = "special", priority = 88 },
+		pugna_nether_ward = { policy = "point", priority = 78, radiusSpecial = "radius" },
+		pugna_life_drain = { policy = "special", priority = 112 },
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_ringmaster = {
+	abilities = {
+		ringmaster_tame_the_beasts = {
+			policy = "point",
+			priority = 98,
+			radiusSpecial = "end_width",
+			specialStage = "ringmaster_tame",
+		},
+		ringmaster_tame_the_beasts_crack = { policy = "special", allowHidden = true },
+		ringmaster_wheel = { policy = "point", priority = 120, radiusSpecial = "mesmerize_radius" },
+		ringmaster_spotlight = { policy = "point", priority = 88, radiusSpecial = "radius" },
+		ringmaster_the_box = { policy = "ally", priority = 112, allyMode = "save", allyHealthPct = 42 },
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_storm_spirit = {
+	abilities = {
+		storm_spirit_static_remnant = { policy = "noTarget", priority = 84, radiusSpecial = "static_remnant_radius" },
+		storm_spirit_electric_vortex = { policy = "enemy", priority = 106, disable = true },
+		storm_spirit_ball_lightning = { policy = "special", priority = 30 },
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_hoodwink = {
+	abilities = {
+		hoodwink_acorn_shot = { policy = "enemy", priority = 82 },
+		hoodwink_bushwhack = { policy = "special", priority = 104, disable = true, radiusSpecial = "trap_radius" },
+		hoodwink_scurry = { policy = "noTarget", priority = 74, alwaysNoTarget = true },
+		hoodwink_sharpshooter = {
+			policy = "point",
+			priority = 116,
+			lineProjectile = true,
+			specialStage = "hood_sharpshooter",
+		},
+		hoodwink_sharpshooter_release = { policy = "special", allowHidden = true },
+		hoodwink_hunters_boomerang = {
+			policy = "enemy",
+			priority = 94,
+			allowHidden = true,
+			menuVisible = true,
+		},
+		hoodwink_decoy = {
+			policy = "noTarget",
+			priority = 96,
+			alwaysNoTarget = true,
+			allowHidden = true,
+			menuVisible = true,
+		},
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_ancient_apparition = {
+	abilities = {
+		ancient_apparition_cold_feet = { policy = "enemy", priority = 94, disable = true },
+		ancient_apparition_ice_vortex = { policy = "point", priority = 74, radiusSpecial = "radius" },
+		ancient_apparition_chilling_touch = { policy = "enemy", priority = 68, attackModifier = true },
+		ancient_apparition_ice_blast = { policy = "special", priority = 122 },
+		ancient_apparition_ice_blast_release = {
+			policy = "special",
+			priority = 200,
+			allowHidden = true,
+			menuVisible = false,
+		},
+		ancient_apparition_ice_age = {
+			policy = "point",
+			priority = 88,
+			radiusSpecial = "radius",
+			allowHidden = true,
+			menuVisible = true,
+		},
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_nevermore = {
+	abilities = {
+		nevermore_shadowraze1 = { policy = "special", priority = 94, radiusSpecial = "shadowraze_radius" },
+		nevermore_shadowraze2 = { policy = "special", priority = 96, radiusSpecial = "shadowraze_radius" },
+		nevermore_shadowraze3 = { policy = "special", priority = 98, radiusSpecial = "shadowraze_radius" },
+		nevermore_frenzy = { policy = "noTarget", priority = 78, alwaysNoTarget = true },
+		nevermore_requiem = { policy = "noTarget", priority = 124, radiusSpecial = "requiem_radius" },
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_dazzle = {
+	abilities = {
+		dazzle_poison_touch = { policy = "enemy", priority = 86 },
+		dazzle_shallow_grave = {
+			policy = "ally",
+			priority = 142,
+			allyMode = "save",
+			allyHealthPct = 26,
+			allyModifiers = { "modifier_dazzle_shallow_grave" },
+			urgent = true,
+		},
+		dazzle_shadow_wave = { policy = "ally", priority = 98, allyMode = "heal", allyHealthPct = 78 },
+		dazzle_nothl_projection = { policy = "special", priority = 110 },
+		dazzle_nothl_projection_end = { policy = "special", allowHidden = true },
+		dazzle_rain_of_vermin = {
+			policy = "point",
+			priority = 102,
+			radiusSpecial = "radius",
+			allowHidden = true,
+			menuVisible = true,
+		},
+		dazzle_weave = { policy = "point", priority = 114, radiusSpecial = "radius" },
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_jakiro = {
+	abilities = {
+		jakiro_dual_breath = { policy = "point", priority = 84, lineProjectile = true },
+		jakiro_ice_path = { policy = "point", priority = 108, disable = true, lineProjectile = true },
+		jakiro_liquid_fire = { policy = "enemy", priority = 68, attackModifier = true },
+		jakiro_liquid_ice = { policy = "enemy", priority = 72, attackModifier = true, allowHidden = true },
+		jakiro_macropyre = { policy = "point", priority = 116, lineProjectile = true },
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_skywrath_mage = {
+	abilities = {
+		skywrath_mage_arcane_bolt = { policy = "enemy", priority = 82 },
+		skywrath_mage_concussive_shot = { policy = "noTarget", priority = 86, radiusSpecial = "launch_radius" },
+		skywrath_mage_ancient_seal = { policy = "enemy", priority = 108, disable = true },
+		skywrath_mage_mystic_flare = {
+			policy = "point",
+			priority = 118,
+			radiusSpecial = "radius",
+			requiresImmobile = true,
+			requirePrimary = true,
+		},
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_morphling = {
+	abilities = {
+		morphling_waveform = {
+			policy = "point",
+			priority = 94,
+			lineProjectile = true,
+			projectileSpeedSpecial = "speed",
+			committedMotion = true,
+		},
+		morphling_adaptive_strike_agi = { policy = "enemy", priority = 88 },
+		morphling_morph_agi = { policy = "special" },
+		morphling_morph_str = { policy = "special" },
+		morphling_replicate = { policy = "special", priority = 112 },
+		morphling_morph_replicate = { policy = "special", allowHidden = true, menuVisible = true, priority = 160 },
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_meepo = {
+	abilities = {
+		meepo_earthbind = {
+			policy = "special",
+			priority = 112,
+			radiusSpecial = "radius",
+			projectileSpeedSpecial = "speed",
+			durationSpecial = "duration",
+		},
+		meepo_poof = { policy = "special", priority = 82, radiusSpecial = "radius" },
+		meepo_petrify = {
+			policy = "noTarget",
+			priority = 132,
+			defensiveHealthPct = 24,
+			alwaysNoTarget = true,
+			allowHidden = true,
+			urgent = true,
+		},
+		meepo_megameepo = { policy = "noTarget", priority = 126, alwaysNoTarget = true, allowHidden = true },
+		meepo_megameepo_fling = { policy = "enemy", priority = 112, allowHidden = true },
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_gyrocopter = {
+	abilities = {
+		gyrocopter_rocket_barrage = { policy = "noTarget", priority = 86, radiusSpecial = "radius" },
+		gyrocopter_homing_missile = { policy = "enemy", priority = 102, disable = true },
+		gyrocopter_flak_cannon = { policy = "noTarget", priority = 78, alwaysNoTarget = true },
+		gyrocopter_call_down = { policy = "point", priority = 116, radiusSpecial = "radius" },
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_windrunner = {
+	abilities = {
+		windrunner_shackleshot = { policy = "enemy", priority = 108, disable = true },
+		windrunner_powershot = { policy = "point", priority = 88, lineProjectile = true },
+		windrunner_windrun = { policy = "noTarget", priority = 78 },
+		windrunner_focusfire = { policy = "enemy", priority = 116 },
+		windrunner_gale_force = {
+			policy = "vector",
+			priority = 106,
+			vectorPerpendicular = true,
+			allowHidden = true,
+			menuVisible = true,
+		},
+		windrunner_focusfire_cancel = { policy = "disabled", allowHidden = true },
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_crystal_maiden = {
+	abilities = {
+		crystal_maiden_crystal_nova = { policy = "point", priority = 84, radiusSpecial = "radius" },
+		crystal_maiden_frostbite = { policy = "enemy", priority = 102, disable = true },
+		crystal_maiden_freezing_field = { policy = "noTarget", priority = 122, radiusSpecial = "radius" },
+		crystal_maiden_freezing_field_stop = { policy = "disabled", allowHidden = true },
+		crystal_maiden_let_it_go = {
+			policy = "point",
+			priority = 74,
+			allowHidden = true,
+			menuVisible = true,
+		},
+		crystal_maiden_crystal_clone = {
+			policy = "selfPosition",
+			priority = 104,
+			allowHidden = true,
+			menuVisible = true,
+		},
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_disruptor = {
+	abilities = {
+		disruptor_thunder_strike = { policy = "enemy", priority = 82 },
+		disruptor_glimpse = { policy = "enemy", priority = 98, disable = true },
+		disruptor_kinetic_field = { policy = "point", priority = 106, disable = true, radiusSpecial = "radius" },
+		disruptor_static_storm = { policy = "point", priority = 120, disable = true, radiusSpecial = "radius" },
+		disruptor_kinetic_fence = {
+			policy = "vector",
+			priority = 106,
+			vectorPerpendicular = true,
+			disable = true,
+			allowHidden = true,
+			menuVisible = true,
+		},
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_bloodseeker = {
+	abilities = {
+		bloodseeker_bloodrage = { policy = "noTarget", priority = 78, alwaysNoTarget = true },
+		bloodseeker_blood_bath = { policy = "point", priority = 96, disable = true, radiusSpecial = "radius" },
+		bloodseeker_blood_mist = {
+			policy = "toggle",
+			priority = 84,
+			toggleMode = "enemy",
+			radiusSpecial = "radius",
+			minimumHealthPct = 42,
+		},
+		bloodseeker_rupture = { policy = "enemy", priority = 118 },
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_ogre_magi = {
+	abilities = {
+		ogre_magi_fireblast = { policy = "enemy", priority = 108, disable = true },
+		ogre_magi_unrefined_fireblast = {
+			policy = "enemy",
+			priority = 116,
+			disable = true,
+			allowHidden = true,
+			menuVisible = true,
+		},
+		ogre_magi_ignite = { policy = "enemy", priority = 88 },
+		ogre_magi_bloodlust = {
+			policy = "ally",
+			priority = 78,
+			allyMode = "buff",
+			allyModifiers = { "modifier_ogre_magi_bloodlust" },
+		},
+		ogre_magi_frost_armor = { policy = "ally", priority = 84, allyMode = "save", allowHidden = true },
+		ogre_magi_smash = {
+			policy = "ally",
+			priority = 96,
+			allyMode = "save",
+			allowHidden = true,
+			menuVisible = true,
+		},
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_queenofpain = {
+	abilities = {
+		queenofpain_shadow_strike = { policy = "enemy", priority = 82 },
+		queenofpain_blink = { policy = "gapclose", priority = 92, minDistance = 500 },
+		queenofpain_scream_of_pain = { policy = "noTarget", priority = 88, radiusSpecial = "area_of_effect" },
+		queenofpain_sonic_wave = { policy = "point", priority = 120, lineProjectile = true },
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_grimstroke = {
+	abilities = {
+		grimstroke_dark_artistry = { policy = "point", priority = 84, lineProjectile = true },
+		grimstroke_ink_creature = { policy = "enemy", priority = 94, disable = true },
+		grimstroke_spirit_walk = { policy = "ally", priority = 92, allyMode = "buff" },
+		grimstroke_soul_chain = { policy = "enemy", priority = 118, disable = true },
+		grimstroke_dark_portrait = { policy = "enemy", priority = 108, allowHidden = true, menuVisible = true },
+		grimstroke_ink_over = {
+			policy = "enemy",
+			priority = 92,
+			allowHidden = true,
+			menuVisible = true,
+		},
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_axe = {
+	abilities = {
+		axe_berserkers_call = { policy = "noTarget", priority = 112, radiusSpecial = "radius", disable = true },
+		axe_battle_hunger = { policy = "enemy", priority = 82 },
+		axe_culling_blade = { policy = "special", priority = 124, preferLowHealth = true },
+	},
+}
+
+ControlAlly.Profiles.Heroes.npc_dota_hero_witch_doctor = {
+	abilities = {
+		witch_doctor_paralyzing_cask = { policy = "enemy", priority = 102, disable = true },
+		witch_doctor_voodoo_restoration = {
+			policy = "toggle",
+			priority = 96,
+			toggleMode = "heal",
+			radiusSpecial = "radius",
+		},
+		witch_doctor_maledict = { policy = "point", priority = 94, radiusSpecial = "radius" },
+		witch_doctor_death_ward = { policy = "point", priority = 122, radiusSpecial = "attack_range_tooltip" },
+		witch_doctor_voodoo_switcheroo = {
+			policy = "noTarget",
+			priority = 132,
+			allowHidden = true,
+			menuVisible = true,
+			urgent = true,
+		},
+	},
+}
+
+ControlAlly.Profiles.RefreshableTinkerActions = {
+	tinker_laser = true,
+	tinker_warp_grenade = true,
+	tinker_march_of_the_machines = true,
+	tinker_defense_matrix = true,
+	tinker_deploy_turrets = true,
+}
+
+ControlAlly.Profiles.InvokerSpells = {
+	invoker_cold_snap = {
+		orbs = { "invoker_quas", "invoker_quas", "invoker_quas" },
+		policy = "enemy",
+		priority = 98,
+		disable = true,
+		targetModifiers = { "modifier_invoker_cold_snap" },
+	},
+	invoker_tornado = {
+		orbs = { "invoker_wex", "invoker_wex", "invoker_quas" },
+		policy = "point",
+		priority = 87,
+		disable = true,
+		radiusSpecial = "area_of_effect",
+		projectileSpeedSpecial = "travel_speed",
+		travelDistanceSpecial = "travel_distance",
+		lineProjectile = true,
+		durationSpecial = "lift_duration",
+		requirePrimary = true,
+		targetModifiers = { "modifier_invoker_tornado" },
+	},
+	invoker_chaos_meteor = {
+		orbs = { "invoker_exort", "invoker_exort", "invoker_wex" },
+		policy = "point",
+		priority = 86,
+		radiusSpecial = "area_of_effect",
+		delaySpecial = "land_time",
+		travelDistanceSpecial = "travel_distance",
+		comboFollowup = true,
+		preferDisabledTarget = true,
+	},
+	invoker_deafening_blast = {
+		orbs = { "invoker_quas", "invoker_wex", "invoker_exort" },
+		policy = "point",
+		priority = 80,
+		disable = true,
+		radiusSpecial = "radius_end",
+		projectileSpeedSpecial = "travel_speed",
+		travelDistanceSpecial = "travel_distance",
+		lineProjectile = true,
+		comboFollowup = true,
+		targetModifiers = { "modifier_invoker_deafening_blast_disarm" },
+	},
+	invoker_emp = {
+		orbs = { "invoker_wex", "invoker_wex", "invoker_wex" },
+		policy = "point",
+		priority = 70,
+		radiusSpecial = "area_of_effect",
+		delaySpecial = "delay",
+		comboFollowup = true,
+		targetManaMinPct = 18,
+		preferDisabledTarget = true,
+	},
+	invoker_sun_strike = {
+		orbs = { "invoker_exort", "invoker_exort", "invoker_exort" },
+		policy = "point",
+		priority = 58,
+		global = true,
+		radiusSpecial = "area_of_effect",
+		delaySpecial = "delay",
+		comboFollowup = true,
+		preferDisabledTarget = true,
+		preferLowHealth = true,
+		allowMagicImmune = true,
+	},
+	invoker_ice_wall = {
+		orbs = { "invoker_quas", "invoker_quas", "invoker_exort" },
+		policy = "iceWall",
+		priority = 54,
+		maxDistanceSpecial = "wall_total_length",
+		disable = true,
+	},
+	invoker_forge_spirit = {
+		orbs = { "invoker_quas", "invoker_exort", "invoker_exort" },
+		policy = "noTarget",
+		priority = 47,
+		alwaysNoTarget = true,
+	},
+	invoker_alacrity = {
+		orbs = { "invoker_wex", "invoker_wex", "invoker_exort" },
+		policy = "self",
+		priority = 50,
+		combatBuff = true,
+		selfModifiers = { "modifier_invoker_alacrity" },
+	},
+	invoker_ghost_walk = {
+		orbs = { "invoker_quas", "invoker_quas", "invoker_wex" },
+		policy = "noTarget",
+		priority = 130,
+		defensiveHealthPct = 28,
+		radiusSpecial = "area_of_effect",
+		alwaysNoTarget = true,
+		selfModifiers = { "modifier_invoker_ghost_walk_self" },
+		urgent = true,
+	},
+}
+
+ControlAlly.Profiles.SupportItems = {
+	item_solar_crest = {
+		policy = "ally",
+		priority = 108,
+		family = "pavise_barrier",
+		durationSpecial = "duration",
+		defensiveHealthPct = 76,
+	},
+	item_pavise = {
+		policy = "ally",
+		priority = 104,
+		family = "pavise_barrier",
+		durationSpecial = "duration",
+		defensiveHealthPct = 70,
+	},
+	item_glimmer_cape = {
+		policy = "ally",
+		priority = 122,
+		family = "glimmer_save",
+		durationSpecial = "duration",
+		defensiveHealthPct = 48,
+		urgent = true,
+	},
+	item_pipe = {
+		policy = "allyNoTarget",
+		priority = 116,
+		family = "pipe_barrier",
+		radiusSpecial = "barrier_radius",
+		durationSpecial = "barrier_duration",
+		defensiveHealthPct = 72,
+		urgent = true,
+	},
+	item_arcane_boots = {
+		policy = "manaBoots",
+		priority = 82,
+		family = "mana_restore",
+		radiusSpecial = "replenish_radius",
+		amountSpecial = "replenish_amount",
+	},
+	item_guardian_greaves = {
+		policy = "greaves",
+		priority = 126,
+		family = "mana_restore",
+		radiusSpecial = "replenish_radius",
+		healSpecial = "replenish_health",
+		amountSpecial = "replenish_mana",
+		urgent = true,
+	},
+	item_phase_boots = {
+		policy = "chaseBoots",
+		priority = 46,
+		family = "phase_movement",
+		durationSpecial = "phase_duration",
+	},
+	item_boots_of_bearing = {
+		policy = "combatBoots",
+		priority = 88,
+		family = "bearing_haste",
+		radiusSpecial = "radius",
+		durationSpecial = "duration",
+	},
+	item_power_treads = {
+		policy = "powerTreads",
+		priority = 38,
+		family = "treads_attribute",
+	},
+	item_refresher = { policy = "refresher", priority = 140 },
+	item_refresher_shard = { policy = "refresher", priority = 142 },
+}
+
+ControlAlly.Profiles.Items = {
+	item_blink = {
+		policy = "gapclose",
+		priority = 96,
+		minDistance = 500,
+		castRangeSpecial = "blink_range",
+		ignoreCastRangeBonus = true,
+	},
+	item_overwhelming_blink = {
+		policy = "gapclose",
+		priority = 102,
+		minDistance = 450,
+		castRangeSpecial = "blink_range",
+		ignoreCastRangeBonus = true,
+	},
+	item_swift_blink = {
+		policy = "gapclose",
+		priority = 100,
+		minDistance = 500,
+		castRangeSpecial = "blink_range",
+		ignoreCastRangeBonus = true,
+	},
+	item_arcane_blink = {
+		policy = "gapclose",
+		priority = 100,
+		minDistance = 500,
+		castRangeSpecial = "blink_range",
+		ignoreCastRangeBonus = true,
+	},
+	item_sheepstick = { policy = "enemy", priority = 116, disable = true, linkPriority = 45 },
+	item_abyssal_blade = {
+		policy = "enemy",
+		priority = 114,
+		disable = true,
+		allowMagicImmune = true,
+		linkPriority = 55,
+	},
+	item_orchid = { policy = "enemy", priority = 101, disable = true, linkPriority = 72 },
+	item_bloodthorn = { policy = "enemy", priority = 106, disable = true, linkPriority = 66 },
+	item_rod_of_atos = { policy = "enemy", priority = 89, disable = true, linkPriority = 88 },
+	item_gungir = { policy = "point", priority = 94, disable = true, radiusSpecial = "radius" },
+	item_nullifier = { policy = "enemy", priority = 93, linkPriority = 62 },
+	item_heavens_halberd = { policy = "enemy", priority = 88, disable = true, linkPriority = 80 },
+	item_ethereal_blade = { policy = "enemy", priority = 84, linkPriority = 78 },
+	item_diffusal_blade = { policy = "enemy", priority = 78, linkPriority = 112 },
+	item_disperser = { policy = "enemy", priority = 80, linkPriority = 108 },
+	item_spirit_vessel = { policy = "enemy", priority = 73, linkPriority = 118 },
+	item_urn_of_shadows = { policy = "enemy", priority = 67, linkPriority = 122 },
+	item_dagon = { policy = "enemy", priority = 83, linkPriority = 76 },
+	item_dagon_2 = { policy = "enemy", priority = 85, linkPriority = 74 },
+	item_dagon_3 = { policy = "enemy", priority = 87, linkPriority = 72 },
+	item_dagon_4 = { policy = "enemy", priority = 89, linkPriority = 70 },
+	item_dagon_5 = { policy = "enemy", priority = 91, linkPriority = 68 },
+	item_shivas_guard = { policy = "noTarget", priority = 82, radiusSpecial = "blast_radius" },
+	item_veil_of_discord = { policy = "noTarget", priority = 69, radiusSpecial = "debuff_radius" },
+	item_black_king_bar = {
+		policy = "noTarget",
+		priority = 124,
+		radius = 725,
+		defensiveHealthPct = 72,
+		requiresRecentDamage = true,
+		urgent = true,
+	},
+	item_blade_mail = {
+		policy = "noTarget",
+		priority = 112,
+		radius = 650,
+		defensiveHealthPct = 68,
+		requiresRecentDamage = true,
+		urgent = true,
+	},
+	item_satanic = {
+		policy = "noTarget",
+		priority = 128,
+		radius = 500,
+		defensiveHealthPct = 44,
+		urgent = true,
+	},
+	item_manta = {
+		policy = "noTarget",
+		priority = 121,
+		radius = 700,
+		requiresBadState = true,
+		urgent = true,
+	},
+	item_lotus_orb = {
+		policy = "self",
+		priority = 109,
+		defensiveHealthPct = 52,
+		requiresRecentDamage = true,
+		urgent = true,
+	},
+	item_glimmer_cape = {
+		policy = "self",
+		priority = 118,
+		defensiveHealthPct = 34,
+		urgent = true,
+	},
+	item_ghost = {
+		policy = "noTarget",
+		priority = 126,
+		radius = 450,
+		defensiveHealthPct = 30,
+		urgent = true,
+	},
+}
+
+function ControlAlly.Utils.call(fn, ...)
+	if type(fn) ~= "function" then
+		return nil
+	end
+	local ok, a, b, c = pcall(fn, ...)
+	if not ok then
+		return nil
+	end
+	return a, b, c
 end
 
-Core.ResolveFriendlyFieldPosition = function(ctx, action)
-    if not ctx or not ctx.controlled then
-        return nil
-    end
-    local myPos = ctx.snapshot and ctx.snapshot.positions.controlled
-        or SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-    if not myPos then
-        return nil
-    end
-    local meta = action and (action.meta or Core.Catalog.AbilityMeta[action.abilityId])
-    local radius = GetAoeRadius(
-        action and (action.resolverAbility or action.ability),
-        action and (action.resolverAbilityId or action.abilityId),
-        meta
-    )
-    if not radius or radius <= 0 then
-        radius = (meta and meta.defaultRadius) or 300
-    end
-    local localPos = ctx.localHero and SafeValue(Entity.GetAbsOrigin, ctx.localHero) or nil
-    if localPos and Dist2D(myPos, localPos) <= radius * 2 + RANGE_TOLERANCE then
-        local mid = Vector(
-            (myPos.x + localPos.x) * 0.5,
-            (myPos.y + localPos.y) * 0.5,
-            myPos.z
-        )
-        if Dist2D(mid, myPos) <= radius + RANGE_TOLERANCE
-            and Dist2D(mid, localPos) <= radius + RANGE_TOLERANCE then
-            return mid
-        end
-    end
-    return myPos
+function ControlAlly.Utils.try(fn, ...)
+	if type(fn) ~= "function" then
+		return false
+	end
+	return pcall(fn, ...)
 end
 
-local function ResolveActionPosition(ctx, action)
-    local meta = action.meta or Core.Catalog.AbilityMeta[action.abilityId]
-    if (action.positionPolicy or (meta and meta.positionPolicy)) == "selfOrLocal" then
-        return Core.ResolveFriendlyFieldPosition(ctx, action), 1
-    end
-    local resolverAbility = action.resolverAbility or action.ability
-    local resolverAbilityId = action.resolverAbilityId or action.abilityId
-    local radius = GetAoeRadius(resolverAbility, resolverAbilityId, meta)
-    local minHits = action.requiredHits
-        or (UI.MinClusterHits and SafeValue(UI.MinClusterHits.Get, UI.MinClusterHits) or 2)
-    local myPos = ctx.snapshot and ctx.snapshot.positions.controlled
-        or SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-    local preferTarget = ctx.enemy
-    local preferPos = preferTarget and SafeValue(Entity.GetAbsOrigin, preferTarget) or nil
-    local enemies = GetEnemiesNear(myPos, radius + 800, ctx.controlled)
-    local allies = nil
-    if meta and meta.avoidAllies then
-        allies = Core.GetAlliesNear(myPos, radius + 800, ctx.controlled)
-    end
-    local pos, hits = FindBestAoePosition(
-        myPos,
-        enemies,
-        radius,
-        minHits,
-        meta and meta.predictionTime,
-        allies
-    )
-
-    -- Locked target wins over densest nearby cluster (HUD target != random pack).
-    if preferPos then
-        local coversPreferred = pos and Dist2D(pos, preferPos) <= radius + RANGE_TOLERANCE
-        if not coversPreferred or (hits or 0) < minHits then
-            local nearPreferred = GetEnemiesNear(preferPos, radius * 2, ctx.controlled)
-            local clustered = {}
-            for i = 1, #nearPreferred do
-                local enemy = nearPreferred[i]
-                if CanTargetEnemy(enemy, ctx.controlled) then
-                    clustered[#clustered + 1] = enemy
-                end
-            end
-            local altAllies = allies
-            if meta and meta.avoidAllies then
-                altAllies = Core.GetAlliesNear(preferPos, radius * 2, ctx.controlled)
-            end
-            local altPos, altHits = FindBestAoePosition(
-                preferPos,
-                clustered,
-                radius,
-                1,
-                meta and meta.predictionTime,
-                altAllies
-            )
-            if altPos and Dist2D(altPos, preferPos) <= radius + RANGE_TOLERANCE then
-                pos, hits = altPos, altHits
-                coversPreferred = true
-            elseif action.allowSingle or minHits <= 1 then
-                -- Still prefer an ally-clear offset over raw enemy feet.
-                local soloPos, soloHits = FindBestAoePosition(
-                    preferPos,
-                    { preferTarget },
-                    radius,
-                    1,
-                    meta and meta.predictionTime,
-                    altAllies
-                )
-                if soloPos and Dist2D(soloPos, preferPos) <= radius + RANGE_TOLERANCE then
-                    pos, hits = soloPos, soloHits
-                else
-                    pos, hits = preferPos, CountHitsAt(preferPos, clustered, radius)
-                end
-                coversPreferred = true
-            end
-        end
-        if pos and action.positionMaxRange and myPos
-            and Dist2D(myPos, pos) > action.positionMaxRange + RANGE_TOLERANCE then
-            if Dist2D(myPos, preferPos) <= (action.positionMaxRange or 0) + RANGE_TOLERANCE then
-                if meta and meta.avoidAllies and preferTarget then
-                    local soloPos = FindBestAoePosition(
-                        preferPos,
-                        { preferTarget },
-                        radius,
-                        1,
-                        meta and meta.predictionTime,
-                        allies
-                    )
-                    if soloPos and Dist2D(myPos, soloPos) <= (action.positionMaxRange or 0) + RANGE_TOLERANCE then
-                        return soloPos, 1
-                    end
-                end
-                return preferPos, 1
-            end
-            return nil, 0
-        end
-        if pos and coversPreferred then
-            return pos, hits or 1
-        end
-        if action.allowSingle or minHits <= 1 then
-            if meta and meta.avoidAllies and preferTarget then
-                local soloPos = FindBestAoePosition(
-                    preferPos,
-                    { preferTarget },
-                    radius,
-                    1,
-                    meta and meta.predictionTime,
-                    allies
-                )
-                if soloPos then
-                    return soloPos, 1
-                end
-            end
-            return preferPos, 1
-        end
-        return nil, 0
-    end
-
-    if pos and hits >= minHits then
-        if action.positionMaxRange and myPos
-            and Dist2D(myPos, pos) > action.positionMaxRange + RANGE_TOLERANCE then
-            return nil, 0
-        end
-        return pos, hits
-    end
-
-    if action.allowSingle and preferPos then
-        if meta and meta.avoidAllies and preferTarget then
-            local soloPos = FindBestAoePosition(
-                preferPos,
-                { preferTarget },
-                radius,
-                1,
-                meta and meta.predictionTime,
-                allies
-            )
-            if soloPos then
-                return soloPos, 1
-            end
-        end
-        return preferPos, 1
-    end
-
-    return nil, 0
+function ControlAlly.Utils.hasFlag(value, flag)
+	value = tonumber(value) or 0
+	flag = tonumber(flag) or 0
+	return flag > 0 and value % (flag * 2) >= flag
 end
 
-function Core.InvokerController.Status(ctx)
-    if Runtime.pending then
-        return {
-            busy = true,
-            phase = "confirm",
-            spellId = Runtime.pending.abilityId,
-        }
-    end
-    if #Runtime.actionQueue > 0 then
-        local head = Runtime.actionQueue[1]
-        local tag = head and head.tag or ""
-        local phase = tag:sub(1, 12) == "invoker_orb_" and "prepareOrbs"
-            or (head and head.abilityId == "invoker_invoke" and "invoke" or "cast")
-        return {
-            busy = true,
-            phase = phase,
-            spellId = Runtime.invokerAwaitSpell or (head and head.abilityId),
-        }
-    end
-    if Runtime.invokerAwaitSpell then
-        return {
-            busy = true,
-            phase = "waitSlot",
-            spellId = Runtime.invokerAwaitSpell,
-        }
-    end
-    for si = 1, #Core.Catalog.InvokerSteps do
-        local step = Core.Catalog.InvokerSteps[si]
-        if IsAbilityEnabled(step.id) and not IsActionUsed(step.id)
-            and not IsActionBlocked(step.id, ctx.now) then
-            return {
-                busy = true,
-                phase = "selectStep",
-                spellId = step.id,
-            }
-        end
-    end
-    for i = 1, #Core.Catalog.InvokerEndItems do
-        local entry = Core.Catalog.InvokerEndItems[i]
-        local target = entry.targetPolicy == "localHero" and ctx.localHero or ctx.enemy
-        if target and IsItemEnabled(entry.id) and not IsActionUsed(entry.id)
-            and not IsActionBlocked(entry.id, ctx.now) then
-            local item = FindItemEntry(ctx.controlled, entry.id)
-            if item and SafeValue(Ability.IsCastable, item, ctx.mana) then
-                local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-                local targetPos = SafeValue(Entity.GetAbsOrigin, target)
-                if myPos and targetPos
-                    and IsWithinRange2D(myPos, targetPos, GetCastRange(ctx.controlled, item)) then
-                    return {
-                        busy = true,
-                        phase = "cast",
-                        spellId = entry.id,
-                    }
-                end
-            end
-        end
-    end
-    return {
-        busy = false,
-        phase = "complete",
-        spellId = nil,
-    }
+function ControlAlly.Utils.clamp(value, minimum, maximum)
+	if value < minimum then
+		return minimum
+	end
+	if value > maximum then
+		return maximum
+	end
+	return value
 end
 
-local function BuildActionPlan(ctx)
-    local actions = {}
-    Runtime.sfUltBurstActive = false
-    Runtime.sfUltSetupId = nil
-    Runtime.kitAbilityIds = {}
-
-    local unitName = SafeValue(NPC.GetUnitName, ctx.controlled)
-    local morphSource = nil
-    if unitName == "npc_dota_hero_morphling" and IsMorphlingReplicated(ctx.controlled) then
-        morphSource = ResolveMorphSourceUnitName(ctx)
-    end
-
-    local kitName = morphSource or unitName
-    if kitName and kitName ~= "npc_dota_hero_invoker" then
-        local kit = Core.Catalog.HeroKits[kitName]
-        if kit then
-            ApplyHeroKit(ctx, actions, kit)
-            local steps = kit.steps
-            if type(steps) == "table" then
-                for i = 1, #steps do
-                    local sid = steps[i] and steps[i].id
-                    if type(sid) == "string" then
-                        Runtime.kitAbilityIds[sid] = true
-                    end
-                end
-            end
-        end
-    end
-
-    local profileFn = unitName == "npc_dota_hero_invoker"
-        and Core.InvokerController.Build or (unitName and Core.Catalog.HeroProfiles[unitName])
-    if profileFn then
-        profileFn(ctx, actions)
-    end
-
-    -- While Morphling is replicated, also run the copied hero's custom profile.
-    if morphSource
-        and morphSource ~= "npc_dota_hero_invoker"
-        and morphSource ~= unitName
-    then
-        local stolenProfile = Core.Catalog.HeroProfiles[morphSource]
-        if stolenProfile then
-            stolenProfile(ctx, actions)
-        end
-    end
-
-    if unitName == "npc_dota_hero_invoker" then
-        local status = Core.InvokerController.Status(ctx)
-        Runtime.invokerFsm = status
-        if not status.busy then
-            AppendGenericActions(ctx, actions)
-        end
-        return actions
-    end
-
-    -- Heroes without a kit initiate still need blink gap-close (e.g. Alchemist + Harpoon).
-    do
-        local hasBlink = false
-        for i = 1, #actions do
-            local aid = actions[i] and actions[i].abilityId
-            if type(aid) == "string" and aid:find("blink", 1, true) then
-                hasBlink = true
-                break
-            end
-        end
-        if not hasBlink then
-            local atk = GetAttackRange(ctx.controlled)
-            local ranged = IsRangedAttacker(ctx.controlled)
-            -- Ranged: land at attack range, not melee (160). Melee stays close.
-            TryAppendInitiateBlink(ctx, actions, {
-                minDist = ranged and (atk + 80) or 550,
-                landDist = ranged and math.max(atk - 50, 350) or 160,
-                priority = 980,
-            })
-        end
-    end
-
-    AppendGenericActions(ctx, actions)
-
-    table.sort(actions, function(a, b)
-        if a.priority ~= b.priority then
-            return a.priority > b.priority
-        end
-        return (a.abilityId or "") < (b.abilityId or "")
-    end)
-
-    local filtered = {}
-    local seen = {}
-    for i = 1, #actions do
-        local action = actions[i]
-        local key = action.abilityId or action.tag or ((action.kind or "") .. ":?")
-        if not seen[key] then
-            seen[key] = true
-            filtered[#filtered + 1] = action
-        end
-    end
-
-    return filtered
+function ControlAlly.Utils.distance2D(a, b)
+	if not a or not b then
+		return math.huge
+	end
+	local dx = (a.x or 0) - (b.x or 0)
+	local dy = (a.y or 0) - (b.y or 0)
+	return math.sqrt(dx * dx + dy * dy)
 end
 
---#endregion
-
---#region Combo executor
-
-local function ResetPending()
-    Runtime.pending = nil
+function ControlAlly.Utils.positionToward(from, to, distance)
+	if not from or not to then
+		return nil
+	end
+	local dx = (to.x or 0) - (from.x or 0)
+	local dy = (to.y or 0) - (from.y or 0)
+	local length = math.sqrt(dx * dx + dy * dy)
+	if length <= 0.001 then
+		return Vector(from.x, from.y, from.z or to.z or 0)
+	end
+	local scale = distance / length
+	return Vector(from.x + dx * scale, from.y + dy * scale, to.z or from.z or 0)
 end
 
-local function EndSession(reason)
-    if IsDebugEnabled() and #Runtime.comboTrace > 0 then
-        DbgImportant(
-            "combo trace | reason=%s duration=%.2f actions=[%s]",
-            reason or "unknown",
-            Runtime.comboStartedAt and math.max(0, GetGameTime() - Runtime.comboStartedAt) or 0,
-            table.concat(Runtime.comboTrace, " > ")
-        )
-    end
-    DbgImportant("abort | %s", reason or "unknown")
-    ResetPending()
-    Runtime.actionQueue = {}
-    Runtime.comboActive = false
-    Runtime.comboKeyHeldPrev = false
-    Runtime.comboForceResolve = false
-    Runtime.failedActions = {}
-    Runtime.usedActions = {}
-    Runtime.usedActionCharges = {}
-    Runtime.sfUltBurstActive = false
-    Runtime.sfUltSetupId = nil
-    Runtime.shrapnelLastCastAt = 0
-    Runtime.shrapnelLastPos = nil
-    Runtime.shrapnelLastEnemy = nil
-    Runtime.nextComboAt = 0
-    Runtime.invokerComboEnemy = nil
-    Runtime.invokerLastInvokeAt = 0
-    Runtime.invokerAwaitSpell = nil
-    Runtime.invokerFsm = { phase = "selectStep", spellId = nil }
-    Runtime.lastAttackOrderAt = -math.huge
-    Runtime.lastAttackTarget = nil
-    Runtime.lastFollowOrderAt = -math.huge
-    Runtime.lastFollowPos = nil
-    Runtime.comboReleaseAt = nil
-    Runtime.lockedEnemy = nil
-    Runtime.lockedEnemyScore = nil
-    Runtime.sessionHero = nil
-    Runtime.renderSnapshot = nil
-    Runtime.combatSnapshot = nil
-    Runtime.catalogCache = nil
-    Runtime.lastCatalogRefreshAt = -math.huge
-    Runtime.snapshotInvalidated = true
-    Runtime.emptyPlanUntil = 0
-    Runtime.comboTrace = {}
-    Runtime.comboStartedAt = nil
-    Runtime.trampleOrbitAngle = nil
-    Runtime.lastTrampleOrbitAt = -math.huge
-    Runtime.morphSourceUnitName = nil
-    Runtime.morphAwaitReplicate = false
-    Runtime.morphWasReplicated = false
-    Runtime.morphFormPending = false
-    Runtime.morphAwaitReplicateAt = nil
-    Runtime.morphFormPendingAt = nil
-    Runtime.controlLostSince = nil
+function ControlAlly.Utils.rotate2D(vector, angle)
+	local cosine = math.cos(angle)
+	local sine = math.sin(angle)
+	return Vector(
+		(vector.x or 0) * cosine - (vector.y or 0) * sine,
+		(vector.x or 0) * sine + (vector.y or 0) * cosine,
+		vector.z or 0
+	)
 end
 
-local function SyncBuiltinWidgets(force)
-    local function menuFind(...)
-        if not Menu or not Menu.Find then
-            return nil
-        end
-        local ok, result = TryCall(Menu.Find, ...)
-        if ok then
-            return result
-        end
-        return nil
-    end
-
-    local now = GetGameTime()
-    if not force and now - Runtime.lastBuiltinSyncAt < BUILTIN_MENU_SYNC_INTERVAL then
-        return
-    end
-    Runtime.lastBuiltinSyncAt = now
-
-    BuiltIn.unitsSearchRange = menuFind(
-        "Heroes", "", "Settings", "General", "Units Controller", "Search Range"
-    )
-    BuiltIn.targetSearchRange = menuFind(
-        "Heroes", "", "Settings", "General", "Target Selection", "Search Range"
-    )
-    BuiltIn.targetStyle = menuFind(
-        "Heroes", "", "Settings", "General", "Target Selection", "Style"
-    )
-    BuiltIn.moveToCursor = menuFind(
-        "Heroes", "", "Settings", "General", "Target Selection", "Move to Cursor"
-    )
-
-    local hero = Runtime.localHero or SafeValue(Heroes.GetLocal)
-    local unitName = hero and SafeValue(NPC.GetUnitName, hero)
-    local heroName = unitName
-    if unitName and GameLocalizer and GameLocalizer.FindNPC then
-        local localized = SafeValue(GameLocalizer.FindNPC, unitName)
-        if type(localized) == "string" and localized ~= "" then
-            heroName = localized
-        else
-            heroName = GetHeroDisplayName(unitName)
-        end
-    end
-
-    if heroName and heroName == BuiltIn.lastHeroMenuName and BuiltIn.comboKey then
-        return
-    end
-
-    BuiltIn.lastHeroMenuName = heroName
-    BuiltIn.comboKey = nil
-
-    if not heroName then
-        return
-    end
-
-    BuiltIn.comboKey = menuFind(
-        "Heroes", "Hero List", heroName, "Main Settings", "Hero Settings", "Combo Key"
-    ) or menuFind(
-        "Heroes", "Hero List", heroName, "Main Settings", "General", "Combo Key"
-    ) or menuFind(
-        "Heroes", "Hero List", heroName, "Main Settings", "Combo Key"
-    )
-
-    if BuiltIn.comboKey then
-        DbgImportant("combo key linked | hero=%s", heroName)
-    end
+function ControlAlly.Utils.normalized2D(from, to)
+	local dx = (to.x or 0) - (from.x or 0)
+	local dy = (to.y or 0) - (from.y or 0)
+	local length = math.sqrt(dx * dx + dy * dy)
+	if length <= 0.001 then
+		return nil
+	end
+	return Vector(dx / length, dy / length, 0)
 end
 
-local function IsComboKeyHeld()
-    SyncBuiltinWidgets(false)
-    local widget = BuiltIn.comboKey
-    if not widget or type(widget.IsDown) ~= "function" then
-        return false
-    end
-    return SafeValue(widget.IsDown, widget) == true
+function ControlAlly.Utils.entityIndex(entity)
+	return ControlAlly.Utils.call(Entity.GetIndex, entity)
 end
 
-local function BuildContext(now)
-    local controlled = ResolveControlledHero()
-    if not controlled or not IsValidHero(controlled) then
-        -- Morph / transform can briefly invalidate the assigned hero; keep the session sticky.
-        if Runtime.comboActive and Runtime.selectedPlayerId ~= nil then
-            Runtime.controlLostSince = Runtime.controlLostSince or now
-            if now - Runtime.controlLostSince < 1.25 then
-                return nil
-            end
-        end
-        if Runtime.comboActive or Runtime.pending then
-            EndSession("controlled hero unavailable")
-        end
-        return nil
-    end
-    Runtime.controlLostSince = nil
-
-    if Runtime.sessionHero and Runtime.sessionHero ~= controlled then
-        -- Morph (and some engine refreshes) replace hero userdata while the ally slot stays the same.
-        local oldValid = IsValidHero(Runtime.sessionHero)
-        local oldName = oldValid and SafeValue(NPC.GetUnitName, Runtime.sessionHero) or nil
-        local newName = SafeValue(NPC.GetUnitName, controlled)
-        local selectedEntry = ResolveAllyEntryByPlayerId(Runtime.selectedPlayerId)
-        local liveAssigned = selectedEntry and RefreshAllyEntryHero(selectedEntry) or nil
-        local controlledEntry = nil
-        for i = 1, #Runtime.controllableAllies do
-            local entry = Runtime.controllableAllies[i]
-            if entry and (entry.hero == controlled
-                or (entry.player and SafeValue(Player.GetAssignedHero, entry.player) == controlled))
-            then
-                controlledEntry = entry
-                break
-            end
-        end
-        local sameAllySlot = controlledEntry ~= nil
-            and Runtime.selectedPlayerId ~= nil
-            and controlledEntry.playerId == Runtime.selectedPlayerId
-        local sameHeroIdentity = oldName ~= nil and oldName == newName
-        local assignedMatch = liveAssigned ~= nil and controlled == liveAssigned
-        if sameAllySlot and assignedMatch and (sameHeroIdentity or not oldValid) then
-            DbgImportant(
-                "session hero handle refresh | %s -> %s (P%s)",
-                oldName or "invalid",
-                newName or "?",
-                tostring(Runtime.selectedPlayerId)
-            )
-            Runtime.sessionHero = controlled
-            Runtime.snapshotInvalidated = true
-            Runtime.syncedInventorySig = nil
-            Runtime.catalogCache = nil
-        elseif Runtime.comboActive and not oldValid and liveAssigned and IsValidHero(liveAssigned) then
-            -- Prefer sticky assigned hero over a wrong ResolveControlledHero flicker.
-            controlled = liveAssigned
-            Runtime.sessionHero = liveAssigned
-            Runtime.snapshotInvalidated = true
-            Runtime.syncedInventorySig = nil
-            Runtime.catalogCache = nil
-            DbgImportant(
-                "session hero sticky recover | %s (P%s)",
-                SafeValue(NPC.GetUnitName, liveAssigned) or "?",
-                tostring(Runtime.selectedPlayerId)
-            )
-        else
-            EndSession("controlled hero changed")
-            return nil
-        end
-    end
-    Runtime.sessionHero = controlled
-
-    Runtime.combatSnapshot = nil
-    local catalog = Runtime.catalogCache
-    if Runtime.snapshotInvalidated or not catalog or catalog.controlled ~= controlled
-        or now - (Runtime.lastCatalogRefreshAt or -math.huge) >= 0.35 then
-        local abilityEntries = CollectHeroAbilities(controlled)
-        local itemEntries = CollectHeroItems(controlled)
-        catalog = {
-            controlled = controlled,
-            abilities = abilityEntries,
-            items = itemEntries,
-            abilitiesById = {},
-            itemsById = {},
-            enabledAbilitiesById = {},
-            enabledItemsById = {},
-        }
-        for i = 1, #abilityEntries do
-            local entry = abilityEntries[i]
-            catalog.abilitiesById[entry.id] = entry.ability
-            catalog.enabledAbilitiesById[entry.id] = IsAbilityEnabled(entry.id)
-        end
-        for i = 1, #itemEntries do
-            local entry = itemEntries[i]
-            catalog.itemsById[entry.id] = entry.item
-            catalog.enabledItemsById[entry.id] = IsItemEnabled(entry.id)
-        end
-        Runtime.catalogCache = catalog
-        Runtime.lastCatalogRefreshAt = now
-    end
-    for i = 1, #catalog.abilities do
-        local id = catalog.abilities[i].id
-        catalog.enabledAbilitiesById[id] = IsAbilityEnabled(id)
-    end
-    for i = 1, #catalog.items do
-        local id = catalog.items[i].id
-        catalog.enabledItemsById[id] = IsItemEnabled(id)
-    end
-    local snapshot = {
-        now = now,
-        controlled = controlled,
-        localHero = Runtime.localHero,
-        abilities = catalog.abilities,
-        items = catalog.items,
-        abilitiesById = catalog.abilitiesById,
-        itemsById = catalog.itemsById,
-        enabledAbilitiesById = catalog.enabledAbilitiesById,
-        enabledItemsById = catalog.enabledItemsById,
-        enabled = UI.Enabled and SafeValue(UI.Enabled.Get, UI.Enabled) == true,
-        helpEnabled = Runtime.localPlayerId
-            and SafeValue(Entity.IsControllableByPlayer, controlled, Runtime.localPlayerId) == true or false,
-        positions = {},
-    }
-    Runtime.combatSnapshot = snapshot
-    Runtime.snapshotInvalidated = false
-
-    InvalidateLostTarget(controlled)
-
-    local manaThreshold = UI.ManaThreshold and SafeValue(UI.ManaThreshold.Get, UI.ManaThreshold) or 15
-    local mana = SafeValue(NPC.GetMana, controlled) or 0
-
-    local enemy = ResolveLockedEnemy({
-        controlled = controlled,
-        now = now,
-    }, Runtime.comboForceResolve or (Runtime.comboActive and not Runtime.lockedEnemy))
-
-    if not enemy and Runtime.comboActive and Runtime.lockedEnemy and CanTargetEnemy(Runtime.lockedEnemy, controlled) then
-        enemy = Runtime.lockedEnemy
-    end
-    snapshot.positions.controlled = SafeValue(Entity.GetAbsOrigin, controlled)
-    snapshot.positions.localHero = Runtime.localHero and SafeValue(Entity.GetAbsOrigin, Runtime.localHero) or nil
-    snapshot.positions.enemy = enemy and SafeValue(Entity.GetAbsOrigin, enemy) or nil
-
-    local ctx = {
-        now = now,
-        player = Runtime.localPlayer,
-        controlled = controlled,
-        localHero = Runtime.localHero,
-        enemy = enemy,
-        mana = mana,
-        canCast = snapshot.enabled and snapshot.helpEnabled
-            and CanAct(controlled) and GetManaPct(controlled) >= manaThreshold,
-        snapshot = snapshot,
-    }
-    EnsureCtxEnemy(ctx)
-    snapshot.enemy = ctx.enemy
-    snapshot.mana = mana
-    snapshot.canCast = ctx.canCast
-    snapshot.positions.enemy = ctx.enemy and SafeValue(Entity.GetAbsOrigin, ctx.enemy) or nil
-    return ctx
+function ControlAlly.Utils.gameTime()
+	return ControlAlly.Utils.call(GameRules.GetGameTime) or 0
 end
 
-function Core.ActionRunner.NextIdentifier(tag)
-    Runtime.orderSequence = (Runtime.orderSequence or 0) + 1
-    return OrderTag((tag or "action") .. "#" .. tostring(Runtime.orderSequence))
+function ControlAlly.Utils.unitName(unit)
+	return ControlAlly.Utils.call(NPC.GetUnitName, unit) or ControlAlly.Utils.call(Entity.GetUnitName, unit)
 end
 
-function Core.ActionRunner.Normalize(action)
-    if not action then
-        return nil
-    end
-    local kind = action.kind
-    if kind ~= "localHero" and kind ~= "linkbreak" and kind ~= "lockedEnemy"
-        and kind ~= "bestPosition" and kind ~= "noTarget" and kind ~= "iceWall" then
-        return nil
-    end
-    local meta = action.meta or Core.Catalog.AbilityMeta[action.abilityId]
-    action.meta = meta
-    action.targetPolicy = action.targetPolicy
-        or (kind == "localHero" and "localHero"
-            or ((kind == "lockedEnemy" or kind == "linkbreak" or kind == "iceWall") and "lockedEnemy" or "none"))
-    action.positionPolicy = action.positionPolicy
-        or (meta and meta.positionPolicy)
-        or (kind == "bestPosition" and "dynamicAoe"
-            or (kind == "iceWall" and "sideFacing" or "none"))
-    action.rangePolicy = action.rangePolicy
-        or ((kind == "noTarget" or kind == "iceWall") and kind or "castRange")
-    action.issuePolicy = action.issuePolicy or kind
-    if not action.confirmationPolicy then
-        local tag = action.tag or ""
-        local abilityId = action.abilityId
-        local isInvokerStep = false
-        if abilityId then
-            for ci = 1, #Core.Catalog.InvokerSteps do
-                if Core.Catalog.InvokerSteps[ci].id == abilityId then
-                    isInvokerStep = true
-                    break
-                end
-            end
-        end
-        if tag:sub(1, 12) == "invoker_orb_" then
-            action.confirmationPolicy = "orbAck"
-        elseif abilityId == "invoker_invoke" then
-            action.confirmationPolicy = "invokeSlot"
-        elseif abilityId == "item_refresher" then
-            action.confirmationPolicy = "cooldown"
-        elseif kind == "linkbreak" then
-            action.confirmationPolicy = "linkenState"
-        elseif isInvokerStep then
-            action.confirmationPolicy = "usageEvidence"
-        else
-            local behavior = action.ability and (
-                SafeValue(Ability.GetBehavior, action.ability, true)
-                    or SafeValue(Ability.GetBehavior, action.ability, false) or 0
-            ) or 0
-            if HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_TOGGLE) then
-                action.confirmationPolicy = "toggleFlip"
-            else
-                action.confirmationPolicy = "usageOrAck"
-            end
-        end
-    end
-    return action
+function ControlAlly.Utils.abilityName(ability)
+	return ControlAlly.Utils.call(Ability.GetName, ability) or ControlAlly.Utils.call(Ability.GetBaseName, ability)
 end
 
-function Core.ActionRunner.PreparePending(ctx, action)
-    local behavior = SafeValue(Ability.GetBehavior, action.ability, true)
-        or SafeValue(Ability.GetBehavior, action.ability, false) or 0
-    local isChanneled = HasAbilityBehaviorFlag(behavior, BEH.DOTA_ABILITY_BEHAVIOR_CHANNELLED)
-    local timeout = isChanneled and 4.0 or ACTION_TIMEOUT
-    local absoluteTimeout = isChanneled and 12.0 or ACTION_TIMEOUT
-    local charges = SafeValue(Ability.GetCurrentCharges, action.ability)
-    local identifier = Core.ActionRunner.NextIdentifier(action.tag)
-    return {
-        status = "prepared",
-        kind = action.kind,
-        targetPolicy = action.targetPolicy,
-        positionPolicy = action.positionPolicy,
-        rangePolicy = action.rangePolicy,
-        issuePolicy = action.issuePolicy,
-        confirmationPolicy = action.confirmationPolicy,
-        ability = action.ability,
-        abilityId = action.abilityId,
-        target = action.target
-            or (action.targetPolicy == "localHero" and ctx.localHero)
-            or (action.targetPolicy == "lockedEnemy" and ctx.enemy)
-            or nil,
-        position = action.position,
-        positionAt = action.positionAt,
-        positionTtl = action.positionTtl,
-        resolverAbility = action.resolverAbility,
-        resolverAbilityId = action.resolverAbilityId,
-        positionMaxRange = action.positionMaxRange,
-        meta = action.meta,
-        allowSingle = action.allowSingle,
-        requiredHits = action.requiredHits,
-        aoeRadius = action.aoeRadius,
-        requiresAction = action.requiresAction,
-        tag = action.tag,
-        identifier = identifier,
-        attemptIdentifiers = { [identifier] = true },
-        startedAt = ctx.now,
-        lastAttempt = ctx.now,
-        attempts = 1,
-        deadline = ctx.now + timeout,
-        absoluteDeadline = ctx.now + absoluteTimeout,
-        cooldownAtStart = SafeValue(Ability.GetCooldown, action.ability),
-        chargesAtStart = type(charges) == "number" and charges or nil,
-        toggleAtStart = SafeValue(Ability.GetToggleState, action.ability),
-        secondsSinceAtStart = SafeValue(Ability.SecondsSinceLastUse, action.ability),
-        originAtStart = SafeValue(Entity.GetAbsOrigin, ctx.controlled),
-        phaseObserved = false,
-        channelObserved = false,
-    }
+function ControlAlly.Utils.protectedActivity(unit, activeAbility)
+	if not unit then
+		return nil
+	end
+	if XHelpers and XHelpers.XNPC and XHelpers.XNPC.GetChannellingAbilityOrItem then
+		local channel = ControlAlly.Utils.call(XHelpers.XNPC.GetChannellingAbilityOrItem, XHelpers.XNPC, unit)
+		if channel then
+			return channel
+		end
+	end
+	local channel = ControlAlly.Utils.call(NPC.GetChannellingAbility, unit)
+	if channel then
+		return channel
+	end
+	if
+		activeAbility
+		and (
+			ControlAlly.Utils.call(Ability.IsChannelling, activeAbility) == true
+			or ControlAlly.Utils.call(Ability.IsInAbilityPhase, activeAbility) == true
+		)
+	then
+		return activeAbility
+	end
+	local index = ControlAlly.Utils.entityIndex(unit)
+	local now = ControlAlly.Utils.gameTime()
+	local cached = index and ControlAlly.Runtime.activityCache[index]
+	if cached and now - cached.at <= 0.01 then
+		return cached.ability
+	end
+	local found
+	for slot = 0, 23 do
+		local ability = ControlAlly.Utils.call(NPC.GetAbilityByIndex, unit, slot)
+		if
+			ability
+			and (
+				ControlAlly.Utils.call(Ability.IsInAbilityPhase, ability) == true
+				or ControlAlly.Utils.call(Ability.IsChannelling, ability) == true
+			)
+		then
+			found = ability
+			break
+		end
+	end
+	if not found then
+		for _, slot in ipairs({ 0, 1, 2, 3, 4, 5, 16 }) do
+			local item = ControlAlly.Utils.call(NPC.GetItemByIndex, unit, slot)
+			if
+				item
+				and (
+					ControlAlly.Utils.call(Ability.IsInAbilityPhase, item) == true
+					or ControlAlly.Utils.call(Ability.IsChannelling, item) == true
+				)
+			then
+				found = item
+				break
+			end
+		end
+	end
+	if index then
+		ControlAlly.Runtime.activityCache[index] = found and { at = now, ability = found } or nil
+	end
+	return found
 end
 
-function Core.ActionRunner.PrepareRetry(pending, now)
-    pending.status = "retrying"
-    pending.attempts = (pending.attempts or 0) + 1
-    pending.lastAttempt = now
-    pending.identifier = Core.ActionRunner.NextIdentifier(pending.tag)
-    pending.attemptIdentifiers = pending.attemptIdentifiers or {}
-    pending.attemptIdentifiers[pending.identifier] = true
+function ControlAlly.Utils.heroDisplayName(unitName)
+	if not unitName then
+		return "Unknown"
+	end
+	local localized = GameLocalizer and ControlAlly.Utils.call(GameLocalizer.FindNPC, unitName)
+	if type(localized) == "string" and localized ~= "" then
+		return localized
+	end
+	local shortName = unitName:gsub("^npc_dota_hero_", ""):gsub("_", " ")
+	return shortName:sub(1, 1):upper() .. shortName:sub(2)
 end
 
-function Core.ActionRunner.DropDependents(abilityId)
-    if not abilityId then
-        return
-    end
-    for i = #Runtime.actionQueue, 1, -1 do
-        if Runtime.actionQueue[i].requiresAction == abilityId then
-            table.remove(Runtime.actionQueue, i)
-        end
-    end
+function ControlAlly.Utils.heroIcon(unitName)
+	if not unitName or unitName == "" then
+		return ""
+	end
+	return "panorama/images/heroes/icons/" .. unitName .. "_png.vtex_c"
 end
 
-local function ConfirmAction(ctx, pending)
-    if not pending or not pending.ability then
-        return true
-    end
-
-    local function abilityWasUsedRecently(ability, startedAt, now)
-        if not ability then
-            return false
-        end
-        local since = SafeValue(Ability.SecondsSinceLastUse, ability)
-        if type(since) ~= "number" or since < 0 then
-            return false
-        end
-        local elapsed = type(startedAt) == "number" and now - startedAt or 0
-        if elapsed < 0.03 then
-            return false
-        end
-        local atStart = pending.secondsSinceAtStart
-        if type(atStart) == "number" then
-            if atStart < 0 then
-                return since <= elapsed + 0.12
-            end
-            return since + 0.02 < atStart
-        end
-        return since <= elapsed + 0.12
-    end
-
-    local function isInvokerCastSpell(abilityId)
-        if not abilityId then
-            return false
-        end
-        for ci = 1, #Core.Catalog.InvokerSteps do
-            if Core.Catalog.InvokerSteps[ci].id == abilityId then
-                return true
-            end
-        end
-        return false
-    end
-
-    local function hasUsageEvidence()
-        if abilityWasUsedRecently(pending.ability, pending.startedAt, ctx.now) then
-            return true
-        end
-        local cooldown = SafeValue(Ability.GetCooldown, pending.ability)
-        if type(pending.cooldownAtStart) == "number"
-            and pending.cooldownAtStart <= 0.05
-            and type(cooldown) == "number" and cooldown > 0.1 then
-            return true
-        end
-        local charges = SafeValue(Ability.GetCurrentCharges, pending.ability)
-        if type(pending.chargesAtStart) == "number"
-            and type(charges) == "number" and charges < pending.chargesAtStart then
-            return true
-        end
-        local toggle = SafeValue(Ability.GetToggleState, pending.ability)
-        if type(pending.toggleAtStart) == "boolean"
-            and type(toggle) == "boolean" and toggle ~= pending.toggleAtStart then
-            return true
-        end
-        if pending.abilityId and pending.abilityId:find("blink", 1, true)
-            and pending.originAtStart and ctx.controlled then
-            local currentOrigin = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-            if currentOrigin and Dist2D(currentOrigin, pending.originAtStart) >= 80 then
-                return true
-            end
-        end
-        return false
-    end
-
-    if SafeValue(Ability.IsInAbilityPhase, pending.ability) then
-        pending.phaseObserved = true
-        return false
-    end
-
-    local function hasOrderAckSettled()
-        if not pending.orderAck then
-            return false
-        end
-        local ackAt = pending.ackAt or pending.startedAt
-        return type(ackAt) == "number" and ctx.now - ackAt >= INVOKER_ORB_ACK_SETTLE
-    end
-
-    local function isNoLongerCastable()
-        if not pending.ability then
-            return false
-        end
-        if ctx.mana ~= nil then
-            local castable = SafeValue(Ability.IsCastable, pending.ability, ctx.mana)
-            if castable == false then
-                return true
-            end
-        end
-        return SafeValue(Ability.CanBeExecuted, pending.ability) ~= ABILITY_CAST_READY
-    end
-
-    local function hasAckCastEvidence()
-        if not hasOrderAckSettled() then
-            return false
-        end
-        if hasUsageEvidence() then
-            return true
-        end
-        if pending.phaseObserved or pending.channelObserved then
-            return isNoLongerCastable()
-        end
-        return isNoLongerCastable()
-    end
-
-    local function confirmDefault()
-        local confirmationPolicy = pending.confirmationPolicy or "usageOrAck"
-        if confirmationPolicy == "usageEvidence" then
-            return hasUsageEvidence()
-        end
-        return hasUsageEvidence() or hasAckCastEvidence()
-    end
-
-    local confirmationPolicy = pending.confirmationPolicy or "usageOrAck"
-    if confirmationPolicy == "orbAck" then
-        return hasOrderAckSettled() or hasUsageEvidence()
-    end
-    if confirmationPolicy == "cooldown" then
-        return hasUsageEvidence()
-    end
-
-    if confirmationPolicy == "linkenState" and ctx.enemy then
-        if isInvokerCastSpell(pending.abilityId) then
-            return not TargetNeedsLinkBreak(ctx.enemy) or hasUsageEvidence()
-        end
-        return not TargetNeedsLinkBreak(ctx.enemy)
-    end
-
-    if confirmationPolicy == "toggleFlip" then
-        local toggle = SafeValue(Ability.GetToggleState, pending.ability)
-        if toggle == true then
-            return true
-        end
-        local skipMod = pending.abilityId and Core.Catalog.SkipWhileSelfModifier[pending.abilityId]
-        if skipMod and ctx.controlled
-            and SafeValue(NPC.HasModifier, ctx.controlled, skipMod) == true then
-            return true
-        end
-        if type(pending.toggleAtStart) == "boolean"
-            and type(toggle) == "boolean"
-            and toggle ~= pending.toggleAtStart
-            and toggle == true then
-            return true
-        end
-        -- GetToggleState is unreliable for some toggles (Rot); after ack settle assume ON.
-        -- usedActions stays sticky for toggles for the bind, so this does not re-flip.
-        if pending.orderAck and hasOrderAckSettled() then
-            local ackAt = pending.ackAt or pending.startedAt
-            if type(ackAt) == "number" and ctx.now - ackAt >= 0.25 then
-                return true
-            end
-        end
-        return false
-    end
-
-    if pending.kind == "lockedEnemy" and pending.target then
-        if Core.Catalog.DisableModifiers[pending.abilityId] then
-            local remaining = GetActiveDisableRemaining(pending.target, pending.abilityId, ctx.now)
-            if remaining and remaining > 0.05 then
-                local chBehaviorEarly = SafeValue(Ability.GetBehavior, pending.ability, true)
-                    or SafeValue(Ability.GetBehavior, pending.ability, false) or 0
-                if not HasAbilityBehaviorFlag(chBehaviorEarly, BEH.DOTA_ABILITY_BEHAVIOR_CHANNELLED) then
-                    return true
-                end
-            end
-        end
-        if Core.Catalog.HexAbilities[pending.abilityId]
-            and SafeValue(NPC.HasState, pending.target, Enum.ModifierState.MODIFIER_STATE_HEXED)
-            and hasOrderAckSettled() then
-            return true
-        end
-        local chBehavior = SafeValue(Ability.GetBehavior, pending.ability, true)
-            or SafeValue(Ability.GetBehavior, pending.ability, false) or 0
-        local isChanneled = HasAbilityBehaviorFlag(chBehavior, BEH.DOTA_ABILITY_BEHAVIOR_CHANNELLED)
-        if isChanneled then
-            if SafeValue(Ability.IsChannelling, pending.ability)
-                or SafeValue(NPC.IsChannellingAbility, ctx.controlled)
-                or SafeValue(Ability.IsInAbilityPhase, pending.ability) then
-                local channel = SafeValue(NPC.GetChannellingAbility, ctx.controlled)
-                if channel == pending.ability
-                    or SafeValue(Ability.IsChannelling, pending.ability)
-                    or SafeValue(Ability.IsInAbilityPhase, pending.ability) then
-                    pending.channelObserved = true
-                    pending.lastChannelAt = ctx.now
-                    return false
-                end
-            end
-            if pending.orderAck and hasUsageEvidence() then
-                pending.channelObserved = true
-                if type(pending.lastChannelAt) ~= "number" then
-                    pending.lastChannelAt = ctx.now
-                end
-                return false
-            end
-            -- Anti-flicker: one false IsChannelling frame must not confirm mid-channel.
-            if pending.channelObserved then
-                local lastAt = pending.lastChannelAt or pending.startedAt
-                if type(lastAt) == "number" and ctx.now - lastAt < 0.2 then
-                    return false
-                end
-                return true
-            end
-            return false
-        end
-        if SafeValue(NPC.IsChannellingAbility, ctx.controlled) then
-            local channel = SafeValue(NPC.GetChannellingAbility, ctx.controlled)
-            if channel == pending.ability then
-                return false
-            end
-        end
-        return confirmDefault()
-    end
-
-    if pending.kind == "localHero" then
-        if pending.target and pending.abilityId == "invoker_alacrity"
-            and SafeValue(NPC.HasModifier, pending.target, "modifier_invoker_alacrity") then
-            return true
-        end
-        return confirmDefault()
-    end
-
-    if pending.kind == "noTarget" or pending.kind == "bestPosition" or pending.kind == "iceWall" then
-        if confirmationPolicy == "invokeSlot" then
-            local awaitId = Runtime.invokerAwaitSpell
-            if awaitId and ctx.controlled then
-                local spell = FindInvokerBarSpell(ctx.controlled, awaitId)
-                if spell and GetAbilityId(spell) == awaitId then
-                    return true
-                end
-            end
-            return hasUsageEvidence()
-        end
-        if isInvokerCastSpell(pending.abilityId) then
-            return hasUsageEvidence()
-        end
-        local chBehavior = SafeValue(Ability.GetBehavior, pending.ability, true)
-            or SafeValue(Ability.GetBehavior, pending.ability, false) or 0
-        local isChanneled = HasAbilityBehaviorFlag(chBehavior, BEH.DOTA_ABILITY_BEHAVIOR_CHANNELLED)
-        if isChanneled then
-            if SafeValue(Ability.IsChannelling, pending.ability)
-                or SafeValue(NPC.IsChannellingAbility, ctx.controlled)
-                or SafeValue(Ability.IsInAbilityPhase, pending.ability) then
-                local channel = SafeValue(NPC.GetChannellingAbility, ctx.controlled)
-                if channel == pending.ability
-                    or SafeValue(Ability.IsChannelling, pending.ability)
-                    or SafeValue(Ability.IsInAbilityPhase, pending.ability) then
-                    pending.channelObserved = true
-                    pending.lastChannelAt = ctx.now
-                    return false
-                end
-            end
-            -- Multishot etc.: API may not report IsChannelling; usage/ack means channel began.
-            if pending.orderAck and hasUsageEvidence() then
-                pending.channelObserved = true
-                if type(pending.lastChannelAt) ~= "number" then
-                    pending.lastChannelAt = ctx.now
-                end
-            end
-            if pending.channelObserved then
-                local lastAt = pending.lastChannelAt or pending.startedAt
-                if type(lastAt) == "number" and ctx.now - lastAt < 0.2 then
-                    return false
-                end
-                -- Still channelling by usage window: hold until quiet or soft timeout.
-                if SafeValue(Ability.IsInAbilityPhase, pending.ability) then
-                    pending.lastChannelAt = ctx.now
-                    return false
-                end
-                return true
-            end
-            -- Soft unblock if channel never surfaced after full channel window.
-            local ackAt = pending.ackAt or pending.startedAt
-            if pending.orderAck and type(ackAt) == "number" and ctx.now - ackAt >= 2.0 then
-                return true
-            end
-            return false
-        end
-        return confirmDefault()
-    end
-
-    return confirmDefault()
+function ControlAlly.Utils.abilityIcon(id)
+	if not id or id == "" or id == "none" then
+		return ""
+	end
+	id = ControlAlly.Profiles.normalizedAbilityId(id) or id
+	if id:sub(1, 5) == "item_" then
+		return "panorama/images/items/" .. id:sub(6) .. "_png.vtex_c"
+	end
+	return "panorama/images/spellicons/" .. id .. "_png.vtex_c"
 end
 
-local function IssueMoveToPosition(ctx, pos, tag)
-    if not ctx or not ctx.controlled or not pos then
-        return false
-    end
-    if Runtime.lastMovePos and ctx.now
-        and Dist2D(Runtime.lastMovePos, pos) <= 18
-        and ctx.now - (Runtime.lastMoveOrderAt or -math.huge) < 0.18 then
-        return false
-    end
-
-    local issued = Core.OrderGateway.Issue(
-        ctx.player,
-        O_MOVE,
-        nil,
-        pos,
-        nil,
-        ctx.controlled,
-        OrderTag(tag)
-    )
-
-    if issued and IsDebugVerbose() then
-        local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-        local moveDist = myPos and Dist2D(myPos, pos) or -1
-        DbgVerbose("move_order","move | tag=%s moveDist=%.0f | %s", tag or "?", moveDist, FormatRangeContext(ctx))
-    end
-    if issued then
-        Runtime.lastMovePos = pos
-        if ctx.now then
-            Runtime.lastMoveOrderAt = ctx.now
-        end
-    end
-
-    return issued
+function ControlAlly.Utils.menuIcon(widget, icon)
+	if widget and icon and widget.Icon then
+		ControlAlly.Utils.call(widget.Icon, widget, icon)
+	end
 end
 
--- Face + short align so Shadowraze (forward cone) lands on the locked enemy.
--- Returns true (ready), false (wait/align), or "drop" (stale/wrong-range -- remove from queue).
-Core.EnsureNevermoreRazeReady = function(ctx, action)
-    if not ctx or not ctx.controlled or not ctx.enemy or not action then
-        return false
-    end
-    local range = action.razeRange
-    if type(range) ~= "number" then
-        for i = 1, #Core.Catalog.Shadowraze do
-            if Core.Catalog.Shadowraze[i].id == action.abilityId then
-                range = Core.Catalog.Shadowraze[i].range
-                break
-            end
-        end
-    end
-    if type(range) ~= "number" then
-        return true
-    end
-
-    local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-    local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-    if not myPos or not enemyPos then
-        return false
-    end
-    local dist = Dist2D(myPos, enemyPos)
-    local err = math.abs(dist - range)
-    local maxWalk = dist < range
-        and (Core.Catalog.ShadowrazeMaxBack or 100)
-        or (Core.Catalog.ShadowrazeMaxClose or 140)
-
-    -- After blink/items the queued raze is often the pre-blink pick (e.g. raze3@700
-    -- while standing at 80). Retarget or drop instead of walking across the map.
-    if err > maxWalk then
-        local pick = Core.PickBestShadowraze(dist)
-        if pick and (pick.id ~= action.abilityId or math.abs(dist - pick.range) + 1 < err) then
-            local ability = FindAbilityEntry(ctx.controlled, pick.id)
-            if ability
-                and IsAbilityEnabled(pick.id)
-                and not IsActionUsed(pick.id)
-                and not IsActionBlocked(pick.id, ctx.now)
-                and SafeValue(Ability.IsCastable, ability, ctx.mana)
-            then
-                Core.DbgEvent(
-                    "sf_raze_retarget | %s@%.0f -> %s@%.0f dist=%.0f | %s",
-                    action.abilityId or "?",
-                    range,
-                    pick.id,
-                    pick.range,
-                    dist,
-                    FormatRangeContext(ctx)
-                )
-                action.ability = ability
-                action.abilityId = pick.id
-                action.razeRange = pick.range
-                action.tag = "kit_" .. pick.id
-                range = pick.range
-                err = math.abs(dist - range)
-                maxWalk = dist < range
-                    and (Core.Catalog.ShadowrazeMaxBack or 100)
-                    or (Core.Catalog.ShadowrazeMaxClose or 140)
-            end
-        end
-        if err > maxWalk then
-            Core.DbgEvent(
-                "sf_raze_drop | id=%s dist=%.0f want=%.0f err=%.0f maxWalk=%.0f | %s",
-                action.abilityId or "?",
-                dist,
-                range,
-                err,
-                maxWalk,
-                FormatRangeContext(ctx)
-            )
-            -- Brief block so planner does not re-queue/drop every tick while approaching.
-            if action.abilityId and ctx.now then
-                Runtime.failedActions[action.abilityId] = ctx.now + 0.45
-            end
-            return "drop"
-        end
-    end
-
-    local alignTol = 55
-    local standPos = enemyPos:Extend2D(myPos, range)
-    local needAlign = err > alignTol
-    local faceTime = SafeValue(NPC.GetTimeToFacePosition, ctx.controlled, enemyPos)
-    local needFace = type(faceTime) == "number" and faceTime > 0.12
-    local hitTol = 120
-
-    if needAlign and standPos then
-        DbgVerbose("sf_raze",
-            "sf_raze_align | id=%s dist=%.0f want=%.0f err=%.0f face=%.2f | %s",
-            action.abilityId or "?",
-            dist,
-            range,
-            err,
-            type(faceTime) == "number" and faceTime or -1,
-            FormatRangeContext(ctx)
-        )
-        IssueMoveToPosition(ctx, standPos, "sf_raze_align")
-        return false
-    end
-    if needFace then
-        local nudge = myPos:Extend2D(enemyPos, math.min(55, math.max(20, dist * 0.08)))
-        DbgVerbose("sf_raze",
-            "sf_raze_face | id=%s dist=%.0f want=%.0f face=%.2f | %s",
-            action.abilityId or "?",
-            dist,
-            range,
-            faceTime,
-            FormatRangeContext(ctx)
-        )
-        IssueMoveToPosition(ctx, nudge, "sf_raze_face")
-        return false
-    end
-    if dist < range - hitTol or dist > range + hitTol then
-        DbgVerbose("sf_raze",
-            "sf_raze_wait | id=%s dist=%.0f want=%.0f hitTol=%.0f face=%.2f | %s",
-            action.abilityId or "?",
-            dist,
-            range,
-            hitTol,
-            type(faceTime) == "number" and faceTime or -1,
-            FormatRangeContext(ctx)
-        )
-        if standPos then
-            IssueMoveToPosition(ctx, standPos, "sf_raze_align")
-        end
-        return false
-    end
-    Core.DbgEvent(
-        "sf_raze_ready | id=%s dist=%.0f want=%.0f face=%.2f | %s",
-        action.abilityId or "?",
-        dist,
-        range,
-        type(faceTime) == "number" and faceTime or -1,
-        FormatRangeContext(ctx)
-    )
-    return true
+function ControlAlly.Utils.healthPct(unit)
+	local health = ControlAlly.Utils.call(Entity.GetHealth, unit) or 0
+	local maximum = ControlAlly.Utils.call(Entity.GetMaxHealth, unit) or 1
+	return maximum > 0 and health * 100 / maximum or 0
 end
 
-Core.DropNevermoreRazesFromQueue = function(reason)
-    local removed = 0
-    for i = #Runtime.actionQueue, 1, -1 do
-        local a = Runtime.actionQueue[i]
-        if a and a.abilityId and a.abilityId:find("nevermore_shadowraze", 1, true) then
-            table.remove(Runtime.actionQueue, i)
-            removed = removed + 1
-        end
-    end
-    if removed > 0 then
-        Core.DbgEvent("sf_raze_queue_clear | reason=%s removed=%d", reason or "?", removed)
-    end
+function ControlAlly.Utils.manaPct(unit)
+	local mana = ControlAlly.Utils.call(NPC.GetMana, unit) or 0
+	local maximum = ControlAlly.Utils.call(NPC.GetMaxMana, unit) or 1
+	return maximum > 0 and mana * 100 / maximum or 0
 end
 
-local function GetActionTargetPos(ctx, ref)
-    if not ref or not ctx then
-        return nil
-    end
-    local positionPolicy = ref.positionPolicy
-        or (ref.kind == "bestPosition" and "dynamicAoe")
-        or (ref.kind == "iceWall" and "sideFacing")
-        or "none"
-    local targetPolicy = ref.targetPolicy
-        or (ref.kind == "localHero" and "localHero")
-        or ((ref.kind == "lockedEnemy" or ref.kind == "linkbreak" or ref.kind == "iceWall")
-            and "lockedEnemy")
-        or "none"
-    if positionPolicy == "dynamicAoe" or positionPolicy == "fixed" then
-        return ref.position
-    end
-    if positionPolicy == "selfOrLocal" then
-        return ref.position or Core.ResolveFriendlyFieldPosition(ctx, ref)
-    end
-    if positionPolicy == "sideFacing" then
-        local target = ref.target or ctx.enemy
-        local enemyPos = target and SafeValue(Entity.GetAbsOrigin, target)
-        local myPos = ctx.controlled and SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-        if not enemyPos or not myPos then
-            return nil
-        end
-        local dx = enemyPos.x - myPos.x
-        local dy = enemyPos.y - myPos.y
-        local distance = math.sqrt(dx * dx + dy * dy)
-        if distance <= 300 or distance <= 0.001 then
-            return enemyPos
-        end
-
-        local ux = dx / distance
-        local uy = dy / distance
-        local forwardRatio = math.min(1, 200 / distance)
-        local sideRatio = math.sqrt(math.max(0, 1 - forwardRatio * forwardRatio))
-        local faceX = ux * forwardRatio - uy * sideRatio
-        local faceY = uy * forwardRatio + ux * sideRatio
-        local alternateX = ux * forwardRatio + uy * sideRatio
-        local alternateY = uy * forwardRatio - ux * sideRatio
-        local rotation = SafeValue(Entity.GetRotation, ctx.controlled)
-        local currentForward = rotation and rotation:GetForward()
-        if currentForward
-            and currentForward.x * alternateX + currentForward.y * alternateY
-                > currentForward.x * faceX + currentForward.y * faceY then
-            faceX = alternateX
-            faceY = alternateY
-        end
-        return Vector(myPos.x + faceX * 800, myPos.y + faceY * 800, myPos.z)
-    end
-    if targetPolicy == "lockedEnemy" then
-        local target = ref.target or ctx.enemy
-        return target and SafeValue(Entity.GetAbsOrigin, target) or nil
-    end
-    if targetPolicy == "localHero" then
-        local target = ref.target or ctx.localHero
-        return target and SafeValue(Entity.GetAbsOrigin, target) or nil
-    end
-    return nil
+function ControlAlly.Utils.hasAnyModifier(unit, modifiers)
+	if not unit or type(modifiers) ~= "table" then
+		return false
+	end
+	for _, modifier in ipairs(modifiers) do
+		if ControlAlly.Utils.call(NPC.HasModifier, unit, modifier) == true then
+			return true
+		end
+	end
+	return false
 end
 
-local function GetFaceTimeToAction(ctx, ref)
-    if not ctx or not ctx.controlled or not ref then
-        return 0
-    end
-    local targetPos = GetActionTargetPos(ctx, ref)
-    if not targetPos then
-        return 0
-    end
-    local faceTime = SafeValue(NPC.GetTimeToFacePosition, ctx.controlled, targetPos)
-    return type(faceTime) == "number" and math.max(0, faceTime) or 0
+function ControlAlly.Utils.clearMotionLock(controller)
+	controller.motionLockUntil = -math.huge
+	controller.motionLockStartedAt = -math.huge
+	controller.motionModifiers = nil
+	controller.motionTarget = nil
 end
 
-local function PrepareActionForExecution(ctx, action)
-    if not action then
-        return false
-    end
-    local rangePolicy = action.rangePolicy or action.kind
-    local positionPolicy = action.positionPolicy
-        or (action.kind == "bestPosition" and "dynamicAoe")
-        or "none"
-    if rangePolicy == "noTarget" and action.requiredHits and action.aoeRadius then
-        local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-        local enemies = GetEnemiesNear(myPos, action.aoeRadius + 50, ctx.controlled)
-        return CountHitsAt(myPos, enemies, action.aoeRadius) >= action.requiredHits
-    end
-    if positionPolicy ~= "dynamicAoe" and positionPolicy ~= "selfOrLocal" then
-        return true
-    end
-    if action.position and ctx.now - (action.positionAt or 0) < (action.positionTtl or 0.12) then
-        return true
-    end
-    local pos = ResolveActionPosition(ctx, action)
-    if not pos then
-        return false
-    end
-    -- Dash abilities with min travel (Astral Step): land through the target, never short of min.
-    do
-        local dashMeta = action.meta or Core.Catalog.AbilityMeta[action.abilityId]
-        if dashMeta and type(dashMeta.minTravel) == "number" and ctx.enemy then
-            local dashFrom = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-            local dashTo = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-            if dashFrom and dashTo and Dist2D(dashFrom, dashTo) >= 1 then
-                local maxTravel = GetCastRange(ctx.controlled, action.ability)
-                if Core.IsUnboundedCastRange(maxTravel) then
-                    maxTravel = dashMeta.minTravel
-                end
-                local overshoot = type(dashMeta.overshoot) == "number" and dashMeta.overshoot or 120
-                local travel = math.min(
-                    maxTravel,
-                    math.max(dashMeta.minTravel, Dist2D(dashFrom, dashTo) + overshoot)
-                )
-                pos = dashFrom:Extend2D(dashTo, travel)
-            end
-        end
-    end
-    action.position = pos
-    action.positionAt = ctx.now
-    return true
+function ControlAlly.Utils.isMotionLocked(controller, now)
+	if not controller or now >= (controller.motionLockUntil or -math.huge) then
+		if controller then
+			ControlAlly.Utils.clearMotionLock(controller)
+		end
+		return false
+	end
+	if controller.motionTarget and ControlAlly.Utils.call(Entity.IsAlive, controller.motionTarget) == false then
+		ControlAlly.Utils.clearMotionLock(controller)
+		return false
+	end
+	if
+		type(controller.motionModifiers) == "table"
+		and now - (controller.motionLockStartedAt or -math.huge) > 0.40
+		and not ControlAlly.Utils.hasAnyModifier(controller.unit, controller.motionModifiers)
+	then
+		ControlAlly.Utils.clearMotionLock(controller)
+		return false
+	end
+	if
+		controller.motionModifiers == nil
+		and now - (controller.motionLockStartedAt or -math.huge) > 0.55
+		and ControlAlly.Utils.call(NPC.IsRunning, controller.unit) ~= true
+		and ControlAlly.Utils.call(NPC.IsTurning, controller.unit) ~= true
+	then
+		ControlAlly.Utils.clearMotionLock(controller)
+		return false
+	end
+	return true
 end
 
-local function IsWithinCastRange(ctx, ref)
-    if not ref then
-        return false
-    end
-    local rangePolicy = ref.rangePolicy or ref.kind
-    if rangePolicy == "noTarget" then
-        local meta = ref.meta or (ref.abilityId and Core.Catalog.AbilityMeta[ref.abilityId])
-        local radius = GetAoeRadius(ref.ability, ref.abilityId, meta)
-        if type(radius) == "number" and radius > 0 and ctx.enemy and ctx.controlled then
-            local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-            local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-            if myPos and enemyPos then
-                return Dist2D(myPos, enemyPos) <= radius + 40
-            end
-        end
-        return true
-    end
-    if not PrepareActionForExecution(ctx, ref) then
-        return false
-    end
-    local targetPos = GetActionTargetPos(ctx, ref)
-    if not targetPos or not ref.ability then
-        return false
-    end
-    local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-    if rangePolicy == "iceWall" then
-        local target = ref.target or ctx.enemy
-        local enemyPos = target and SafeValue(Entity.GetAbsOrigin, target)
-        local distance = myPos and enemyPos and Dist2D(myPos, enemyPos) or math.huge
-        local faceTime = SafeValue(NPC.GetTimeToFacePosition, ctx.controlled, targetPos)
-        return distance >= 95 and distance <= 620
-            and type(faceTime) == "number" and faceTime <= 0.08
-    end
-    local castRange = GetCastRange(ctx.controlled, ref.ability)
-    if Core.IsUnboundedCastRange(castRange) then
-        return true
-    end
-    local target = ref.target
-        or ((rangePolicy == "lockedEnemy" or ref.kind == "lockedEnemy" or ref.kind == "linkbreak")
-            and ctx.enemy)
-        or (ref.kind == "localHero" and (ref.target or ctx.localHero))
-        or nil
-    if target then
-        if target == ctx.controlled then
-            return true
-        end
-        local inRange = SafeValue(NPC.IsEntityInRange, ctx.controlled, target, castRange)
-        if inRange == true then
-            return true
-        end
-        -- Hull-aware API said no; Dist2D with buffer can still lie near the edge.
-        return false
-    end
-    return IsWithinRange2D(myPos, targetPos, castRange)
+function ControlAlly.Utils.hasState(unit, state)
+	return state ~= nil and ControlAlly.Utils.call(NPC.HasState, unit, state) == true
 end
 
-local function EnsureUnitIdleForCast(ctx)
-    if SafeValue(NPC.IsAttacking, ctx.controlled) or SafeValue(NPC.IsRunning, ctx.controlled) then
-        Core.OrderGateway.Issue(
-            ctx.player,
-            O_STOP,
-            nil,
-            nil,
-            nil,
-            ctx.controlled,
-            OrderTag(((Runtime.pending and Runtime.pending.tag) or "cast") .. "_stop")
-        )
-        return false
-    end
-    return true
+function ControlAlly.Utils.isMagicImmune(unit)
+	local states = Enum.ModifierState
+	return states and ControlAlly.Utils.hasState(unit, states.MODIFIER_STATE_MAGIC_IMMUNE)
 end
 
-local function ExecuteAction(ctx, action)
-    if not action or not action.ability then
-        return false
-    end
-    local issuePolicy = action.issuePolicy or action.kind
-
-    if issuePolicy == "localHero" then
-        local target = action.target or ctx.localHero
-        if target then
-            return CastOnTarget(ctx, action.ability, target, action.tag, action.identifier)
-        end
-    end
-
-    if issuePolicy == "linkbreak" and (action.target or ctx.enemy) then
-        local target = action.target or ctx.enemy
-        if not Humanizer or not Humanizer.IsSafeTarget then
-            return false
-        end
-        local ok, safe = TryCall(Humanizer.IsSafeTarget, target)
-        if not ok or safe ~= true then
-            return false
-        end
-        return CastDisableOnEnemy(
-            ctx,
-            action.ability,
-            action.abilityId,
-            target,
-            action.tag,
-            action.identifier
-        )
-    end
-
-    if issuePolicy == "lockedEnemy" and (action.target or ctx.enemy) then
-        local target = action.target or ctx.enemy
-        if not Humanizer or not Humanizer.IsSafeTarget then
-            return false
-        end
-        local ok, safe = TryCall(Humanizer.IsSafeTarget, target)
-        if not ok or safe ~= true then
-            return false
-        end
-        if action.forcePointCast then
-            local pos = FindHexPointCastPosition
-                and FindHexPointCastPosition(ctx, action.ability, action.abilityId, target)
-                or SafeValue(Entity.GetAbsOrigin, target)
-            if not pos then
-                return false
-            end
-            DbgImportant("point cast retry | %s", action.abilityId or action.tag or "?")
-            return CastAtPosition(ctx, action.ability, pos, action.tag, action.identifier)
-        end
-        return CastDisableOnEnemy(
-            ctx,
-            action.ability,
-            action.abilityId,
-            target,
-            action.tag,
-            action.identifier
-        )
-    end
-
-    if issuePolicy == "bestPosition" then
-        local pos = action.position
-        if not pos then
-            pos = ResolveActionPosition(ctx, action)
-        end
-        if not pos then
-            return false
-        end
-        return CastAtPosition(ctx, action.ability, pos, action.tag, action.identifier)
-    end
-
-    if issuePolicy == "noTarget" then
-        return CastNoTarget(ctx, action.ability, action.tag, action.identifier)
-    end
-
-    if issuePolicy == "iceWall" then
-        return CastNoTarget(ctx, action.ability, action.tag, action.identifier)
-    end
-
-    return false
+function ControlAlly.Utils.hasBadState(unit)
+	local states = Enum.ModifierState
+	if not states then
+		return false
+	end
+	return ControlAlly.Utils.hasState(unit, states.MODIFIER_STATE_ROOTED)
+		or ControlAlly.Utils.hasState(unit, states.MODIFIER_STATE_SILENCED)
+		or ControlAlly.Utils.hasState(unit, states.MODIFIER_STATE_DISARMED)
 end
 
-local function IssueAttackEnemy(ctx, tag)
-    if not ctx or not ctx.controlled or not ctx.enemy then
-        return false
-    end
-
-    if SafeValue(NPC.IsAttacking, ctx.controlled) then
-        return true
-    end
-    if ctx.now and ctx.now - (Runtime.lastAttackOrderAt or 0) < (
-        IsRangedAttacker(ctx.controlled)
-            and (Runtime.comboActive and 0.12 or ATTACK_ORDER_INTERVAL)
-            or MELEE_ATTACK_ORDER_INTERVAL
-    ) and Runtime.lastAttackTarget == ctx.enemy then
-        return true
-    end
-
-    local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-    local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-    local dist = myPos and enemyPos and Dist2D(myPos, enemyPos) or -1
-    DbgVerbose("event",
-        "attack_target | tag=%s dist=%.0f atk=%d | %s",
-        tag or "?",
-        dist,
-        GetAttackRange(ctx.controlled),
-        FormatRangeContext(ctx)
-    )
-
-    local pos = enemyPos or SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-    local issued = Core.OrderGateway.Issue(
-        ctx.player,
-        O_ATTACK,
-        ctx.enemy,
-        pos,
-        nil,
-        ctx.controlled,
-        OrderTag(tag)
-    )
-    if issued then
-        Runtime.lastAttackOrderAt = ctx.now
-        Runtime.lastAttackTarget = ctx.enemy
-    end
-    return issued
+function ControlAlly.Utils.isCommandRestricted(unit)
+	local states = Enum.ModifierState
+	if not states then
+		return ControlAlly.Utils.call(NPC.IsStunned, unit) == true
+	end
+	return ControlAlly.Utils.call(NPC.IsStunned, unit) == true
+		or ControlAlly.Utils.hasState(unit, states.MODIFIER_STATE_HEXED)
+		or ControlAlly.Utils.hasState(unit, states.MODIFIER_STATE_NIGHTMARED)
+		or ControlAlly.Utils.hasState(unit, states.MODIFIER_STATE_OUT_OF_GAME)
+		or ControlAlly.Utils.hasState(unit, states.MODIFIER_STATE_COMMAND_RESTRICTED)
 end
 
-local function IssueRangedAttackEnemy(ctx, tag)
-    if not ctx or not ctx.controlled or not ctx.enemy then
-        return false
-    end
-
-    local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-    local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-    if not myPos or not enemyPos then
-        return false
-    end
-
-    local attackRange = GetAttackRange(ctx.controlled)
-    local dist = Dist2D(myPos, enemyPos)
-    local inRange = IsWithinRange2D(myPos, enemyPos, attackRange)
-
-    if inRange then
-        if SafeValue(NPC.IsAttacking, ctx.controlled) then
-            DbgVerbose(
-                "ranged_atk",
-                "hold | already attacking dist=%.0f atk=%d | %s",
-                dist,
-                attackRange,
-                FormatRangeContext(ctx)
-            )
-            return true
-        end
-        if ctx.now - (Runtime.lastAttackOrderAt or 0) < (Runtime.comboActive and 0.12 or ATTACK_ORDER_INTERVAL) and Runtime.lastAttackTarget == ctx.enemy then
-            return true
-        end
-        DbgVerbose("event",
-            "ranged_atk | ATTACK dist=%.0f atk=%d tol=%d | %s",
-            dist,
-            attackRange,
-            RANGE_TOLERANCE,
-            FormatRangeContext(ctx)
-        )
-        return IssueAttackEnemy(ctx, tag)
-    end
-
-    local enterDist = math.max(attackRange - RANGE_ATTACK_BUFFER, 80)
-    DbgVerbose("event",
-        "ranged_atk | MOVE dist=%.0f atk=%d need<=%d enterDist=%.0f | %s",
-        dist,
-        attackRange,
-        attackRange + RANGE_TOLERANCE,
-        enterDist,
-        FormatRangeContext(ctx)
-    )
-    local standPos = enemyPos:Extend2D(myPos, enterDist)
-    return IssueMoveToPosition(ctx, standPos, tag .. "_range")
+function ControlAlly.Utils.canAttack(unit, target)
+	if not unit or not target then
+		return false
+	end
+	local states = Enum.ModifierState
+	if states then
+		if ControlAlly.Utils.hasState(unit, states.MODIFIER_STATE_DISARMED) then
+			return false
+		end
+		for _, stateName in ipairs({
+			"MODIFIER_STATE_INVULNERABLE",
+			"MODIFIER_STATE_OUT_OF_GAME",
+			"MODIFIER_STATE_UNTARGETABLE",
+			"MODIFIER_STATE_UNTARGETABLE_ENEMY",
+			"MODIFIER_STATE_ATTACK_IMMUNE",
+		}) do
+			local state = states[stateName]
+			if state ~= nil and ControlAlly.Utils.hasState(target, state) then
+				return false
+			end
+		end
+	end
+	return not ControlAlly.Utils.hasAnyModifier(target, {
+		"modifier_ghost_state",
+		"modifier_item_ethereal_blade_ethereal",
+		"modifier_pugna_decrepify",
+	})
 end
 
-local function IssueEnemyAttack(ctx, tag)
-    local path = IsRangedAttacker(ctx.controlled) and "ranged" or "melee"
-    DbgVerbose("enemy_atk", "path=%s tag=%s | %s", path, tag or "?", FormatRangeContext(ctx))
-    if path == "ranged" then
-        return IssueRangedAttackEnemy(ctx, tag)
-    end
-    return IssueAttackEnemy(ctx, tag)
+function ControlAlly.Utils.isValidHero(unit, requireAlive)
+	if not unit or ControlAlly.Utils.call(Entity.IsEntity, unit) ~= true then
+		return false
+	end
+	if ControlAlly.Utils.call(NPC.IsHero, unit) ~= true and ControlAlly.Utils.call(Entity.IsHero, unit) ~= true then
+		return false
+	end
+	if requireAlive and ControlAlly.Utils.call(Entity.IsAlive, unit) ~= true then
+		return false
+	end
+	return true
 end
 
--- Circle the target while Trample is up so movement distance procs stomps.
-local function IssueTrampleOrbit(ctx, tag)
-    local enemy = ctx.enemy
-    local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-    local enemyPos = enemy and SafeValue(Entity.GetAbsOrigin, enemy)
-    if not myPos or not enemyPos then
-        return false
-    end
-
-    local dist = Dist2D(myPos, enemyPos)
-    if dist > TRAMPLE_ORBIT_RADIUS + 120 then
-        local approach = enemyPos:Extend2D(myPos, TRAMPLE_ORBIT_RADIUS)
-        return IssueMoveToPosition(ctx, approach, (tag or "trample") .. "_close")
-    end
-
-    local moving = SafeValue(NPC.IsRunning, ctx.controlled) == true
-    -- Keep issuing waypoints for the full Trample duration; only throttle while
-    -- already running toward the previous orbit point.
-    if moving and ctx.now - (Runtime.lastTrampleOrbitAt or 0) < TRAMPLE_ORBIT_INTERVAL then
-        return true
-    end
-
-    local dx = myPos.x - enemyPos.x
-    local dy = myPos.y - enemyPos.y
-    local current = math.atan(dy, dx)
-    local angle = (Runtime.trampleOrbitAngle or current) + TRAMPLE_ORBIT_STEP
-    Runtime.trampleOrbitAngle = angle
-    local dest = Vector(
-        enemyPos.x + math.cos(angle) * TRAMPLE_ORBIT_RADIUS,
-        enemyPos.y + math.sin(angle) * TRAMPLE_ORBIT_RADIUS,
-        enemyPos.z
-    )
-    local issued = IssueMoveToPosition(ctx, dest, tag or "trample_orbit")
-    if issued then
-        Runtime.lastTrampleOrbitAt = ctx.now
-        if IsDebugVerbose() then
-            DbgVerbose("event", "trample orbit | dist=%.0f angle=%.2f | %s",
-                dist, angle, FormatRangeContext(ctx))
-        end
-    end
-    return issued
+function ControlAlly.Utils.isSpiritBear(unit)
+	return XHelpers
+			and XHelpers.XNPC
+			and XHelpers.XNPC.IsSpiritBear
+			and ControlAlly.Utils.call(XHelpers.XNPC.IsSpiritBear, XHelpers.XNPC, unit) == true
+		or false
 end
 
-local function ProcessMovement(ctx)
-    EnsureCtxEnemy(ctx)
-    local moveEnemy = GetMovementEnemy(ctx)
-    if Runtime.comboActive and not moveEnemy and Runtime.lockedEnemy then
-        local holdForChannel = false
-        if Runtime.pending and Runtime.pending.ability then
-            local chBehavior = SafeValue(Ability.GetBehavior, Runtime.pending.ability, true)
-                or SafeValue(Ability.GetBehavior, Runtime.pending.ability, false) or 0
-            if HasAbilityBehaviorFlag(chBehavior, BEH.DOTA_ABILITY_BEHAVIOR_CHANNELLED) then
-                holdForChannel = true
-            end
-        end
-        if not holdForChannel and SafeValue(NPC.IsChannellingAbility, ctx.controlled) then
-            holdForChannel = true
-        end
-        if not holdForChannel then
-            Runtime.lockedEnemy = nil
-            Runtime.lockedEnemyScore = nil
-            Runtime.actionQueue = {}
-        end
-    end
-    local hasEnemy = moveEnemy ~= nil
-
-    if Runtime.comboActive and not hasEnemy then
-        local chase = ResolveTargetByNearest(ctx.controlled, GetTargetSearchRadius(), true)
-        if chase then
-            Runtime.lockedEnemy = chase
-            ctx.enemy = chase
-            moveEnemy = chase
-            hasEnemy = true
-        end
-    end
-
-    if Runtime.pending then
-        -- Never STOP here after a cast was issued: STOP in the same update cancels CAST_TARGET (Lion Hex).
-        if IsDebugVerbose() then
-            DbgTransition("move_block", "pending:" .. (Runtime.pending.tag or "?"),
-                "pending=%s | %s", Runtime.pending.tag or "?", FormatRangeContext(ctx))
-        end
-        return
-    end
-
-    if SafeValue(NPC.IsChannellingAbility, ctx.controlled) then
-        if IsDebugVerbose() then
-            DbgTransition("move_block", "channeling", "channeling | %s", FormatRangeContext(ctx))
-        end
-        return
-    end
-
-    local queueBlocksMove = false
-    if Runtime.comboActive and hasEnemy and #Runtime.actionQueue > 0 then
-        EnsureCtxEnemy(ctx)
-        local head = Runtime.actionQueue[1]
-        if head and head.ability then
-            local headReady = SafeValue(Ability.IsCastable, head.ability, ctx.mana)
-                or SafeValue(Ability.CanBeExecuted, head.ability) == ABILITY_CAST_READY
-            if headReady then
-                if head.kind == "iceWall" then
-                    queueBlocksMove = IsWithinCastRange(ctx, head)
-                elseif head.kind == "noTarget" then
-                    local headTag = head.tag or ""
-                    if headTag:sub(1, 12) ~= "invoker_orb_" then
-                        queueBlocksMove = true
-                    end
-                elseif head.kind == "localHero" then
-                    if IsWithinCastRange(ctx, head) then
-                        queueBlocksMove = true
-                    end
-                elseif head.kind ~= "lockedEnemy" and head.kind ~= "linkbreak" and head.kind ~= "bestPosition" then
-                    queueBlocksMove = false
-                elseif ctx.enemy and IsWithinCastRange(ctx, head) then
-                    queueBlocksMove = true
-                end
-            end
-        end
-    end
-
-    -- While Trample is active, never freeze movement for a "ready" Pulverize --
-    -- orbit must continue for the full buff duration.
-    local tramplingForMove = Runtime.comboActive and IsPrimalBeastTrampling(ctx.controlled)
-    if queueBlocksMove and not tramplingForMove then
-        if IsDebugVerbose() then
-            DbgTransition("move_block", "queue:" .. tostring(#Runtime.actionQueue),
-                "combo ready cast queue=%d | %s", #Runtime.actionQueue, FormatRangeContext(ctx))
-        end
-        return
-    end
-    if queueBlocksMove and tramplingForMove and IsDebugVerbose() then
-        DbgVerbose("move_tick",
-            "trample overrides ready cast | queue=%d | %s",
-            #Runtime.actionQueue,
-            FormatRangeContext(ctx)
-        )
-    end
-    Runtime.debugTransitions.move_block = nil
-
-    local moveInterval = Runtime.comboActive and 0.04 or MOVE_ORDER_INTERVAL
-    if ctx.now - Runtime.lastMoveOrderAt < moveInterval then
-        return
-    end
-
-    local invokerQueueHold = Runtime.pending ~= nil or #Runtime.actionQueue > 0
-    if SafeValue(NPC.GetUnitName, ctx.controlled) == "npc_dota_hero_invoker" then
-        local status = Core.InvokerController.Status(ctx)
-        Runtime.invokerFsm = status
-        if Runtime.invokerAwaitSpell and status.phase == "waitSlot" then
-            invokerQueueHold = true
-        end
-    end
-
-    local issued = false
-    if Runtime.comboActive and hasEnemy and #Runtime.actionQueue > 0 then
-        EnsureCtxEnemy(ctx)
-        local head = Runtime.actionQueue[1]
-        if head then
-            PrepareActionForExecution(ctx, head)
-        end
-        local targetPos = head and GetActionTargetPos(ctx, head) or nil
-        if not targetPos and moveEnemy then
-            targetPos = SafeValue(Entity.GetAbsOrigin, moveEnemy)
-        end
-        if targetPos then
-            local range = head and head.ability and GetCastRange(ctx.controlled, head.ability) or GetAttackRange(ctx.controlled)
-            local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-            if myPos then
-                local dist = Dist2D(myPos, targetPos)
-                if head and head.kind == "iceWall" then
-                    local enemyPos = ctx.enemy and SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-                    local enemyDist = enemyPos and Dist2D(myPos, enemyPos) or math.huge
-                    local faceTime = SafeValue(NPC.GetTimeToFacePosition, ctx.controlled, targetPos)
-                    if enemyPos and (enemyDist < 95 or enemyDist > 620) then
-                        local setupPos
-                        if enemyDist > 0.001 then
-                            setupPos = enemyPos:Extend2D(myPos, enemyDist < 95 and 220 or 550)
-                        else
-                            local rotation = SafeValue(Entity.GetRotation, ctx.controlled)
-                            local forward = rotation and rotation:GetForward()
-                            if forward then
-                                setupPos = Vector(
-                                    enemyPos.x - forward.x * 220,
-                                    enemyPos.y - forward.y * 220,
-                                    enemyPos.z
-                                )
-                            end
-                        end
-                        if setupPos then
-                            DbgVerbose("event", "ice_wall setup | enemyDist=%.0f | %s",
-                                enemyDist, FormatRangeContext(ctx))
-                            issued = IssueMoveToPosition(ctx, setupPos, "ice_wall_setup")
-                        end
-                    elseif type(faceTime) ~= "number" or faceTime > 0.08 then
-                        DbgVerbose("event", "ice_wall side face | enemyDist=%.0f face=%.3f | %s",
-                            enemyDist, type(faceTime) == "number" and faceTime or -1, FormatRangeContext(ctx))
-                        issued = IssueMoveToPosition(ctx, targetPos, "ice_wall_face")
-                    end
-                else
-                    local deferUltForTrample = head
-                        and head.abilityId == "primal_beast_pulverize"
-                        and IsPrimalBeastTrampling(ctx.controlled)
-                    -- Global / unresolved cast range: do not walk into melee for the head action.
-                    if not deferUltForTrample and not Core.IsUnboundedCastRange(range) then
-                        local enterDist = math.max(range - RANGE_CAST_BUFFER, 80)
-                        if dist > enterDist + RANGE_TOLERANCE then
-                            DbgVerbose("event",
-                                "combo_approach | dist=%.0f need<=%d action=%s | %s",
-                                dist,
-                                math.floor(enterDist + RANGE_TOLERANCE),
-                                head and head.abilityId or "?",
-                                FormatRangeContext(ctx)
-                            )
-                            issued = IssueMoveToPosition(ctx, targetPos:Extend2D(myPos, enterDist), "combo_approach")
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    if not issued and hasEnemy then
-        local trampling = IsPrimalBeastTrampling(ctx.controlled)
-        local head = Runtime.actionQueue[1]
-        local deferUltForTrample = trampling
-            and head
-            and head.abilityId == "primal_beast_pulverize"
-        local blockAttack = Runtime.comboActive
-            and (Runtime.pending
-                or SafeValue(NPC.IsChannellingAbility, ctx.controlled)
-                or invokerQueueHold
-                or (queueBlocksMove and not trampling and not deferUltForTrample))
-        if trampling and Runtime.comboActive and (not blockAttack or deferUltForTrample) then
-            DbgVerbose("move_tick", "trample orbit | %s", FormatRangeContext(ctx))
-            issued = WithMovementEnemy(ctx, function(moveCtx)
-                return IssueTrampleOrbit(moveCtx, "trample_orbit")
-            end)
-        elseif not blockAttack then
-            DbgVerbose("move_tick", "attack enemy | %s", FormatRangeContext(ctx))
-            issued = WithMovementEnemy(ctx, function(moveCtx)
-                return IssueEnemyAttack(moveCtx, "attack")
-            end)
-        elseif IsDebugVerbose() then
-            DbgVerbose("move_skip", "combo blocks attack | %s", FormatRangeContext(ctx))
-        end
-    elseif ShouldFollowCursor(ctx) and not invokerQueueHold then
-        local cursorPos = Input and SafeValue(Input.GetWorldCursorPos)
-        if cursorPos then
-            local followReady = ctx.now - (Runtime.lastFollowOrderAt or 0) >= 0.12
-            local followPos = Runtime.lastFollowPos
-            if followPos and Dist2D(followPos, cursorPos) < 90 then
-                followReady = false
-            end
-            if followReady then
-                DbgVerbose("move_tick", "follow cursor | %s", FormatRangeContext(ctx))
-                issued = IssueMoveToPosition(ctx, cursorPos, "follow")
-                if issued then
-                    Runtime.lastFollowOrderAt = ctx.now
-                    Runtime.lastFollowPos = cursorPos
-                end
-            end
-        end
-    elseif Runtime.comboActive and IsDebugVerbose() then
-        DbgVerbose("move_idle", "combo hold (no follow) | %s", FormatRangeContext(ctx))
-    end
-
-    if issued then
-        Runtime.lastMoveOrderAt = ctx.now
-    end
+function ControlAlly.Utils.isNothlProjection(unit)
+	return XHelpers
+			and XHelpers.XNPC
+			and XHelpers.XNPC.IsNothlProjection
+			and ControlAlly.Utils.call(XHelpers.XNPC.IsNothlProjection, XHelpers.XNPC, unit) == true
+		or false
 end
 
-local function ProcessCombo(ctx)
-    EnsureCtxEnemy(ctx)
-
-    local pending = Runtime.pending
-    local invokerChain = false
-    if pending then
-        local deadline = pending.deadline
-        local lastAttempt = pending.lastAttempt
-        local attempts = pending.attempts or 0
-        local tag = pending.tag
-        local abilityId = pending.abilityId
-
-        if deadline and ctx.now >= deadline then
-            local stillChanneling = false
-            if pending.ability and ctx.controlled then
-                local chBehavior = SafeValue(Ability.GetBehavior, pending.ability, true)
-                    or SafeValue(Ability.GetBehavior, pending.ability, false) or 0
-                if HasAbilityBehaviorFlag(chBehavior, BEH.DOTA_ABILITY_BEHAVIOR_CHANNELLED) then
-                    if SafeValue(Ability.IsChannelling, pending.ability)
-                        or SafeValue(NPC.IsChannellingAbility, ctx.controlled) then
-                        local channel = SafeValue(NPC.GetChannellingAbility, ctx.controlled)
-                        if channel == pending.ability or SafeValue(Ability.IsChannelling, pending.ability) then
-                            stillChanneling = true
-                        end
-                    end
-                end
-            end
-            local absDeadline = pending.absoluteDeadline or deadline
-            if stillChanneling and ctx.now < absDeadline then
-                pending.deadline = math.min(ctx.now + 0.75, absDeadline)
-            elseif ConfirmAction(ctx, pending) then
-                -- Soft deadline raced channel quiet / toggle settle; confirm below.
-            elseif pending.channelObserved and ctx.now < absDeadline then
-                -- Channel ended; wait for ConfirmAction quiet window instead of failing.
-                pending.deadline = math.min(ctx.now + 0.3, absDeadline)
-            else
-                local recoveredInvoke = false
-                if abilityId == "invoker_invoke" and ctx.controlled and Runtime.invokerAwaitSpell then
-                    local spell = FindInvokerBarSpell(ctx.controlled, Runtime.invokerAwaitSpell)
-                    if spell and GetAbilityId(spell) == Runtime.invokerAwaitSpell then
-                        recoveredInvoke = true
-                        Runtime.invokerLastInvokeAt = ctx.now
-                        Runtime.nextComboAt = ctx.now + INVOKER_SPELL_GAP
-                        ResetPending()
-                    else
-                        Runtime.invokerAwaitSpell = nil
-                    end
-                end
-                if not recoveredInvoke then
-                    local isOrbTag = tag and tag:sub(1, 12) == "invoker_orb_"
-                    local linkBlocked = ctx.enemy
-                        and TargetNeedsLinkBreak(ctx.enemy)
-                        and (
-                            Core.Catalog.DisableModifiers[abilityId]
-                            or Core.Catalog.HexAbilities[abilityId]
-                        )
-                    DbgImportant("action timeout | %s", tag or "?")
-                    if abilityId and pending.ability then
-                        local liveBeh = SafeValue(Ability.GetBehavior, pending.ability, false)
-                        local staticBeh = SafeValue(Ability.GetBehavior, pending.ability, true)
-                        local cd = SafeValue(Ability.GetCooldown, pending.ability)
-                        local exec = SafeValue(Ability.CanBeExecuted, pending.ability)
-                        local execLabel = tostring(exec)
-                        if exec == ABILITY_CAST_READY then
-                            execLabel = "READY"
-                        end
-                        DbgImportant(
-                            "timeout detail | %s liveBeh=%s staticBeh=%s cd=%.2f exec=%s point=%s",
-                            abilityId,
-                            tostring(liveBeh),
-                            tostring(staticBeh),
-                            type(cd) == "number" and cd or -1,
-                            execLabel,
-                            tostring(AbilityNeedsPointCast(pending.ability, abilityId))
-                        )
-                    end
-                    if not isOrbTag and not linkBlocked then
-                        MarkActionFailed(abilityId or tag, ctx.now)
-                        Core.ActionRunner.DropDependents(abilityId)
-                    elseif linkBlocked then
-                        DbgImportant("skip fail mark | linkens blocked %s", abilityId or tag or "?")
-                    end
-                    if abilityId == "invoker_invoke" then
-                        Runtime.invokerAwaitSpell = nil
-                    end
-                    ResetPending()
-                end
-            end
-        end
-        pending = Runtime.pending
-        if pending and ConfirmAction(ctx, pending) then
-            tag = pending.tag
-            abilityId = pending.abilityId
-            DbgImportant("confirmed | %s", tag or "?")
-            Runtime.comboTrace[#Runtime.comboTrace + 1] = abilityId or tag or "?"
-            if abilityId then
-                local isInvokerOrb = abilityId == "invoker_quas" or abilityId == "invoker_wex"
-                    or abilityId == "invoker_exort" or abilityId == "invoker_invoke"
-                if not isInvokerOrb then
-                    if abilityId == "item_refresher" then
-                        Runtime.usedActions = { item_refresher = true }
-                        Runtime.usedActionCharges = {}
-                        Runtime.failedActions = {}
-                        Runtime.actionQueue = {}
-                        Runtime.invokerAwaitSpell = nil
-                        DbgImportant("refresher confirmed | combo actions reset")
-                    else
-                        if not Core.Catalog.ReusableComboAbilities[abilityId] then
-                            MarkActionUsed(abilityId)
-                        end
-                        if abilityId:find("blink", 1, true) then
-                            Runtime.nextComboAt = ctx.now + BLINK_SETTLE
-                            Core.DropNevermoreRazesFromQueue("post_blink")
-                        end
-                    end
-                    if abilityId == Runtime.invokerAwaitSpell then
-                        Runtime.invokerAwaitSpell = nil
-                    end
-                end
-            end
-            if abilityId == "invoker_invoke" then
-                Runtime.invokerLastInvokeAt = ctx.now
-                Runtime.actionQueue = {}
-                Runtime.snapshotInvalidated = true
-            end
-            if abilityId == "morphling_replicate" or abilityId == "morphling_morph" then
-                if ctx.enemy then
-                    Runtime.morphSourceUnitName = SafeValue(NPC.GetUnitName, ctx.enemy)
-                end
-                local morphAbility = pending.ability
-                local altCast = morphAbility and SafeValue(Ability.GetAltCastState, morphAbility) == true
-                Runtime.morphAwaitReplicate = altCast == true
-                Runtime.morphFormPending = not altCast
-                Runtime.morphFormPendingAt = (not altCast) and ctx.now or nil
-                Runtime.morphAwaitReplicateAt = altCast and ctx.now or nil
-                Runtime.usedActions["morphling_morph_replicate"] = nil
-                Runtime.failedActions["morphling_morph_replicate"] = nil
-                Runtime.actionQueue = {}
-                Runtime.snapshotInvalidated = true
-                Runtime.syncedInventorySig = nil
-                DbgImportant(
-                    "morph cast | source=%s alt=%s awaitAbsorb=%s",
-                    Runtime.morphSourceUnitName or "?",
-                    tostring(altCast),
-                    tostring(Runtime.morphAwaitReplicate)
-                )
-            end
-            if abilityId == "morphling_morph_replicate" then
-                Runtime.morphAwaitReplicate = false
-                Runtime.morphAwaitReplicateAt = nil
-                Runtime.morphFormPending = true
-                Runtime.morphFormPendingAt = ctx.now
-                Runtime.actionQueue = {}
-                Runtime.snapshotInvalidated = true
-                Runtime.syncedInventorySig = nil
-                DbgImportant(
-                    "morph toggle | tag=%s source=%s",
-                    pending.tag or "morphling_morph_replicate",
-                    Runtime.morphSourceUnitName or "?"
-                )
-            end
-            if SafeValue(NPC.GetUnitName, ctx.controlled) == "npc_dota_hero_invoker" then
-                local prepTag = pending.tag or ""
-                local prep = prepTag:sub(1, 12) == "invoker_orb_"
-                local fastChain = abilityId == "invoker_invoke"
-                if not fastChain and abilityId then
-                    for ci = 1, #Core.Catalog.InvokerSteps do
-                        if Core.Catalog.InvokerSteps[ci].id == abilityId then
-                            fastChain = true
-                            break
-                        end
-                    end
-                end
-                if prep or fastChain then
-                    Runtime.nextComboAt = nil
-                    invokerChain = true
-                else
-                    Runtime.nextComboAt = ctx.now + INVOKER_SPELL_GAP
-                end
-            end
-            if abilityId == "sniper_shrapnel" and ctx.enemy then
-                Runtime.shrapnelLastCastAt = ctx.now
-                Runtime.shrapnelLastEnemy = ctx.enemy
-                Runtime.shrapnelLastPos = pending.position
-                    or SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-            end
-            ResetPending()
-        elseif pending and pending.orderAck then
-            local castPoint = SafeValue(Ability.GetCastPoint, pending.ability, true) or 0
-            local faceTime = GetFaceTimeToAction(ctx, pending)
-            local settleFor = math.max(
-                ORDER_ACK_RETRY_DELAY,
-                castPoint + faceTime + 0.25
-            )
-            if ctx.now - (pending.ackAt or pending.startedAt) < settleFor then
-                DbgVerbose("cast_wait", "order ack settle | %s | %s", tag or "?", FormatRangeContext(ctx))
-            elseif faceTime > 0.05
-                or SafeValue(NPC.IsRunning, ctx.controlled)
-                or SafeValue(NPC.IsAttacking, ctx.controlled)
-            then
-                -- Re-issuing CAST while turning/moving cancels zero-cast-point hexes.
-                DbgVerbose("cast_wait", "face/move settle | %s face=%.2f | %s",
-                    tag or "?", faceTime, FormatRangeContext(ctx))
-                if pending.deadline and pending.deadline < ctx.now + faceTime + 0.35 then
-                    pending.deadline = math.min(
-                        (pending.absoluteDeadline or (ctx.now + ACTION_TIMEOUT)),
-                        ctx.now + faceTime + 0.45
-                    )
-                end
-            elseif pending.ability and (
-                SafeValue(Ability.IsInAbilityPhase, pending.ability)
-                or (SafeValue(NPC.IsChannellingAbility, ctx.controlled)
-                    and SafeValue(NPC.GetChannellingAbility, ctx.controlled) == pending.ability)
-            ) then
-                DbgVerbose("cast_wait", "phase/channel | %s | %s", tag or "?", FormatRangeContext(ctx))
-            elseif pending.ability and HasAbilityBehaviorFlag(
-                SafeValue(Ability.GetBehavior, pending.ability, true)
-                    or SafeValue(Ability.GetBehavior, pending.ability, false) or 0,
-                BEH.DOTA_ABILITY_BEHAVIOR_CHANNELLED
-            ) then
-                -- Re-issue cancels Multishot / Epicenter mid-channel.
-                DbgVerbose("cast_wait", "channel wait (no retry) | %s | %s", tag or "?", FormatRangeContext(ctx))
-            elseif pending.ability and HasAbilityBehaviorFlag(
-                SafeValue(Ability.GetBehavior, pending.ability, true)
-                    or SafeValue(Ability.GetBehavior, pending.ability, false) or 0,
-                BEH.DOTA_ABILITY_BEHAVIOR_TOGGLE
-            ) then
-                -- Re-issue flips Rot / Radiance off after a successful ON.
-                DbgVerbose("cast_wait", "toggle wait (no retry) | %s | %s", tag or "?", FormatRangeContext(ctx))
-            elseif ctx.canCast and lastAttempt
-                and ctx.now - lastAttempt >= ACTION_RETRY_INTERVAL and attempts < MAX_ACTION_ATTEMPTS then
-                if IsWithinCastRange(ctx, pending) then
-                    if Core.Catalog.HexAbilities[abilityId] and attempts >= 1 then
-                        pending.forcePointCast = true
-                    end
-                    Core.ActionRunner.PrepareRetry(pending, ctx.now)
-                    local retryResult = ExecuteAction(ctx, pending)
-                    if retryResult == true then
-                        pending.status = "issued"
-                    end
-                end
-            end
-        elseif pending and pending.ability and (
-            SafeValue(Ability.IsInAbilityPhase, pending.ability)
-            or (SafeValue(NPC.IsChannellingAbility, ctx.controlled)
-                and SafeValue(NPC.GetChannellingAbility, ctx.controlled) == pending.ability)
-        ) then
-            DbgVerbose("cast_wait", "phase/channel | %s | %s", tag or "?", FormatRangeContext(ctx))
-        elseif pending and pending.ability and HasAbilityBehaviorFlag(
-            SafeValue(Ability.GetBehavior, pending.ability, true)
-                or SafeValue(Ability.GetBehavior, pending.ability, false) or 0,
-            BEH.DOTA_ABILITY_BEHAVIOR_CHANNELLED
-        ) then
-            DbgVerbose("cast_wait", "channel wait (no retry) | %s | %s", tag or "?", FormatRangeContext(ctx))
-        elseif pending and pending.ability and HasAbilityBehaviorFlag(
-            SafeValue(Ability.GetBehavior, pending.ability, true)
-                or SafeValue(Ability.GetBehavior, pending.ability, false) or 0,
-            BEH.DOTA_ABILITY_BEHAVIOR_TOGGLE
-        ) then
-            DbgVerbose("cast_wait", "toggle wait (no retry) | %s | %s", tag or "?", FormatRangeContext(ctx))
-        elseif pending and ctx.canCast and lastAttempt
-            and ctx.now - lastAttempt >= ACTION_RETRY_INTERVAL and attempts < MAX_ACTION_ATTEMPTS then
-            if IsWithinCastRange(ctx, pending) then
-                if Core.Catalog.HexAbilities[abilityId] and attempts >= 1 then
-                    pending.forcePointCast = true
-                end
-                Core.ActionRunner.PrepareRetry(pending, ctx.now)
-                local retryResult = ExecuteAction(ctx, pending)
-                if retryResult == true then
-                    pending.status = "issued"
-                end
-            end
-        end
-        if not invokerChain then
-            return
-        end
-    end
-
-    if not ctx.canCast then
-        return
-    end
-
-    if Runtime.nextComboAt and ctx.now < Runtime.nextComboAt then
-        return
-    end
-
-    if SafeValue(NPC.IsChannellingAbility, ctx.controlled) and not Runtime.pending and not invokerChain then
-        return
-    end
-
-    Core.TryInjectApproachKitActions(ctx)
-
-    if #Runtime.actionQueue == 0 then
-        local unitName = SafeValue(NPC.GetUnitName, ctx.controlled)
-        ClearUsedActionsWhenReady(ctx)
-        if unitName ~= "npc_dota_hero_invoker" and ctx.now < (Runtime.emptyPlanUntil or 0) then
-            return
-        end
-        Runtime.actionQueue = Core.GenericPlanner.Build(ctx)
-        if #Runtime.actionQueue == 0 and unitName ~= "npc_dota_hero_invoker" then
-            Runtime.emptyPlanUntil = ctx.now + 0.12
-        else
-            Runtime.emptyPlanUntil = 0
-        end
-        if IsDebugVerbose() then
-            Core.DbgEvent(
-                "plan | count=%d [%s] | %s",
-                #Runtime.actionQueue,
-                Core.FormatPlanPreview(Runtime.actionQueue, 8),
-                FormatRangeContext(ctx)
-            )
-        end
-    end
-
-    Core.PruneCloseGapClosers(ctx)
-
-    while #Runtime.actionQueue > 0 do
-        local action = Runtime.actionQueue[1]
-        action = Core.ActionRunner.Normalize(action)
-        if not action or not action.ability then
-            Core.DbgEvent("queue drop | invalid head %s | %s",
-                Core.FormatActionPreview(action), FormatRangeContext(ctx))
-            table.remove(Runtime.actionQueue, 1)
-            goto continue_queue
-        end
-        local castable = SafeValue(Ability.IsCastable, action.ability, ctx.mana)
-            or SafeValue(Ability.CanBeExecuted, action.ability) == ABILITY_CAST_READY
-        if not castable and action.abilityId and ctx.controlled and Runtime.invokerLastInvokeAt
-            and Runtime.invokerLastInvokeAt > 0 then
-            local invokeAge = ctx.now - Runtime.invokerLastInvokeAt
-            if invokeAge >= INVOKER_INVOKE_SETTLE and invokeAge < 0.45 then
-                for ci = 1, #Core.Catalog.InvokerSteps do
-                    if Core.Catalog.InvokerSteps[ci].id == action.abilityId then
-                        local slotSpell = FindInvokerBarSpell(ctx.controlled, action.abilityId)
-                        if slotSpell and GetAbilityId(slotSpell) == action.abilityId then
-                            action.ability = slotSpell
-                            castable = true
-                        end
-                        break
-                    end
-                end
-            end
-        end
-        if not castable then
-            local keepQueued = false
-            local tag = action.tag or ""
-            if tag:sub(1, 12) == "invoker_orb_" or action.abilityId == "invoker_invoke" then
-                keepQueued = true
-            elseif action.abilityId then
-                for ci = 1, #Core.Catalog.InvokerSteps do
-                    if Core.Catalog.InvokerSteps[ci].id == action.abilityId then
-                        keepQueued = true
-                        break
-                    end
-                end
-            end
-            if not keepQueued then
-                local cd = SafeValue(Ability.GetCooldown, action.ability)
-                Core.DbgEvent(
-                    "queue drop | notCastable %s cd=%.1f | %s",
-                    Core.FormatActionPreview(action),
-                    type(cd) == "number" and cd or -1,
-                    FormatRangeContext(ctx)
-                )
-                if action.abilityId and action.abilityId:find("blink", 1, true) then
-                    MarkActionUsed(action.abilityId)
-                    Core.ActionRunner.DropDependents(action.abilityId)
-                end
-                table.remove(Runtime.actionQueue, 1)
-                goto continue_queue
-            end
-            break
-        end
-        if action.kind == "lockedEnemy" and not ctx.enemy then
-            EnsureCtxEnemy(ctx)
-            if not ctx.enemy then
-                table.remove(Runtime.actionQueue, 1)
-                goto continue_queue
-            end
-        end
-        if action.kind == "linkbreak" and (not ctx.enemy or not TargetNeedsLinkBreak(ctx.enemy)) then
-            if action.abilityId then
-                MarkActionUsed(action.abilityId)
-            end
-            table.remove(Runtime.actionQueue, 1)
-            goto continue_queue
-        end
-        if not PrepareActionForExecution(ctx, action) then
-            -- Refresh initiate blink land instead of dropping when resolve fails.
-            if action.tag == "initiate_blink" and ctx.enemy then
-                local landWant = 160
-                local landPos, blink, blinkId = FindBlinkLandNearEnemy(
-                    ctx.controlled, ctx.enemy, landWant)
-                if landPos and blink and blinkId then
-                    action.ability = blink
-                    action.abilityId = blinkId
-                    action.position = landPos
-                    action.positionAt = ctx.now
-                    action.positionTtl = 2.0
-                    action.positionPolicy = "fixed"
-                    action.positionMaxRange = GetCastRange(ctx.controlled, blink)
-                    if PrepareActionForExecution(ctx, action) then
-                        goto continue_queue_after_prepare
-                    end
-                end
-            end
-            Core.DbgEvent(
-                "queue drop | prepareFail %s | %s",
-                Core.FormatActionPreview(action),
-                FormatRangeContext(ctx)
-            )
-            table.remove(Runtime.actionQueue, 1)
-            goto continue_queue
-        end
-        ::continue_queue_after_prepare::
-        if action.kind ~= "noTarget" and not IsWithinCastRange(ctx, action) then
-            -- Blink in for Pulverize when still out of grab range.
-            if action.abilityId == "primal_beast_pulverize"
-                and not IsPrimalBeastTrampling(ctx.controlled)
-                and ctx.enemy
-            then
-                local landPos, blink, blinkId = FindBlinkLandNearEnemy(ctx.controlled, ctx.enemy, 140)
-                if blink and landPos and blinkId then
-                    local blinkAction = {
-                        kind = "bestPosition",
-                        ability = blink,
-                        abilityId = blinkId,
-                        position = landPos,
-                        tag = "primal_beast_pulverize_blink",
-                    }
-                    if PrepareActionForExecution(ctx, blinkAction) then
-                        local pendingBlink = Core.ActionRunner.PreparePending(ctx, blinkAction)
-                        blinkAction.identifier = pendingBlink.identifier
-                        Runtime.pending = pendingBlink
-                        local blinkResult = ExecuteAction(ctx, blinkAction)
-                        if blinkResult then
-                            pendingBlink.status = "issued"
-                            DbgImportant("cast | %s | kind=bestPosition (ult initiate)", blinkId)
-                            DbgVerbose("event",
-                                "pulverize_blink | landDist=140 | %s",
-                                FormatRangeContext(ctx)
-                            )
-                            return
-                        end
-                        Runtime.pending = nil
-                        MarkActionFailed(blinkId, ctx.now)
-                    end
-                end
-            end
-            -- Head is out of range: cast a later in-range action while approaching
-            -- (e.g. global Wrath while closing for Sprout).
-            for j = 2, #Runtime.actionQueue do
-                local later = Runtime.actionQueue[j]
-                if later and later.ability
-                    and PrepareActionForExecution(ctx, later)
-                    and IsWithinCastRange(ctx, later)
-                then
-                    table.remove(Runtime.actionQueue, j)
-                    table.insert(Runtime.actionQueue, 1, later)
-                    DbgVerbose("event",
-                        "cast_while_approach | promote %s over %s | %s",
-                        later.abilityId or "?",
-                        action.abilityId or "?",
-                        FormatRangeContext(ctx)
-                    )
-                    action = later
-                    goto continue_queue_after_prepare
-                end
-            end
-            local targetPos = GetActionTargetPos(ctx, action)
-            local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-            local castRange = GetCastRange(ctx.controlled, action.ability)
-            local dist = myPos and targetPos and Dist2D(myPos, targetPos) or -1
-            if action.kind == "iceWall" then
-                local enemyPos = ctx.enemy and SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-                dist = myPos and enemyPos and Dist2D(myPos, enemyPos) or -1
-                castRange = 620
-            end
-            DbgVerbose("event",
-                "skip_range | %s kind=%s dist=%.0f castRange=%d | %s",
-                action.abilityId or "?",
-                action.kind or "?",
-                dist,
-                castRange,
-                FormatRangeContext(ctx)
-            )
-            break
-        end
-
-        -- Finish Trample orbit before Pulverize channel.
-        -- If still far, blink closer first so stomps and the eventual grab land.
-        if action.abilityId == "primal_beast_pulverize"
-            and IsPrimalBeastTrampling(ctx.controlled) then
-            if ctx.enemy then
-                local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-                local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-                local castRange = GetCastRange(ctx.controlled, action.ability)
-                if Core.IsUnboundedCastRange(castRange) then
-                    castRange = 200
-                end
-                local dist = myPos and enemyPos and Dist2D(myPos, enemyPos) or 0
-                if dist > castRange + 80 then
-                    local landPos, blink, blinkId = FindBlinkLandNearEnemy(ctx.controlled, ctx.enemy, 140)
-                    if blink and landPos and blinkId then
-                        local blinkAction = {
-                            kind = "bestPosition",
-                            ability = blink,
-                            abilityId = blinkId,
-                            position = landPos,
-                            tag = "primal_beast_pulverize_blink",
-                        }
-                        if PrepareActionForExecution(ctx, blinkAction) then
-                            local pendingBlink = Core.ActionRunner.PreparePending(ctx, blinkAction)
-                            blinkAction.identifier = pendingBlink.identifier
-                            Runtime.pending = pendingBlink
-                            local blinkResult = ExecuteAction(ctx, blinkAction)
-                            if blinkResult then
-                                pendingBlink.status = "issued"
-                                DbgImportant("cast | %s | kind=bestPosition (trample close)", blinkId)
-                                return
-                            end
-                            Runtime.pending = nil
-                            MarkActionFailed(blinkId, ctx.now)
-                        end
-                    end
-                end
-            end
-            DbgVerbose("event",
-                "skip_ult | pulverize waits for trample end | %s",
-                FormatRangeContext(ctx)
-            )
-            break
-        end
-
-        if (action.kind == "lockedEnemy" or action.kind == "linkbreak")
-            and ctx.enemy
-            and action.abilityId
-            and (Core.Catalog.DisableModifiers[action.abilityId]
-                or Core.Catalog.HexAbilities[action.abilityId])
-            and not ShouldCastDisable(ctx, ctx.enemy, action.abilityId, action.ability)
-        then
-            -- Do not park the whole queue on a disable that must wait for CC to fade;
-            -- later actions (e.g. Fallen Sky) would never cast until bind release.
-            Core.DbgEvent(
-                "skip_disable | %s | wait/extend active cc | %s",
-                action.abilityId or "?",
-                FormatRangeContext(ctx)
-            )
-            table.remove(Runtime.actionQueue, 1)
-            goto continue_queue
-        end
-        if (action.kind == "lockedEnemy" or action.kind == "linkbreak")
-            and not EnsureUnitIdleForCast(ctx)
-        then
-            DbgImportant("cast wait idle | %s", action.abilityId or "?")
-            return
-        end
-        local pendingAction = Core.ActionRunner.PreparePending(ctx, action)
-        action.identifier = pendingAction.identifier
-        Runtime.pending = pendingAction
-        if action.abilityId
-            and action.abilityId:find("nevermore_shadowraze", 1, true)
-        then
-            local razeReady = Core.EnsureNevermoreRazeReady(ctx, action)
-            if razeReady == "drop" then
-                Runtime.pending = nil
-                table.remove(Runtime.actionQueue, 1)
-                return
-            end
-            if razeReady ~= true then
-                Runtime.pending = nil
-                return
-            end
-        end
-        local result = ExecuteAction(ctx, action)
-        if result then
-            pendingAction.status = "issued"
-            table.remove(Runtime.actionQueue, 1)
-            DbgImportant("cast | %s | kind=%s prio=%d",
-                action.abilityId or "?",
-                action.kind or "?",
-                type(action.priority) == "number" and action.priority or 0)
-            Core.DbgEvent("cast_detail | %s | %s", Core.FormatActionPreview(action), FormatRangeContext(ctx))
-            return
-        end
-        Runtime.pending = nil
-        MarkActionFailed(action.abilityId or action.tag, ctx.now)
-        Core.ActionRunner.DropDependents(action.abilityId)
-        table.remove(Runtime.actionQueue, 1)
-        ::continue_queue::
-    end
+function ControlAlly.Utils.isValidControllerUnit(unit, requireAlive)
+	if ControlAlly.Utils.isValidHero(unit, requireAlive) then
+		return true
+	end
+	return (ControlAlly.Utils.isSpiritBear(unit) or ControlAlly.Utils.isNothlProjection(unit))
+		and ControlAlly.Utils.call(Entity.IsEntity, unit) == true
+		and (not requireAlive or ControlAlly.Utils.call(Entity.IsAlive, unit) == true)
 end
 
---#endregion
-
---#region Menu
-
-local function UpdateControlStates()
-    local enabled = UI.Enabled and UI.Enabled:Get() == true
-    local debugOn = UI.Debug and UI.Debug:Get() == true
-
-    local widgets = {
-        UI.AllyHero,
-        UI.Abilities,
-        UI.Items,
-        UI.SettingsGear,
-        UI.TargetMode,
-        UI.MinClusterHits,
-        UI.ManaThreshold,
-        UI.ExtendDisables,
-        UI.UseLinkBreak,
-        UI.Debug,
-        UI.DrawOverlay,
-    }
-
-    for i = 1, #widgets do
-        local widget = widgets[i]
-        if widget and widget.Visible then
-            widget:Visible(enabled)
-        end
-    end
-
-    -- Nested under Debug: hide verbose unless Control Ally and Debug logs are both on.
-    if UI.DebugVerbose and UI.DebugVerbose.Visible then
-        UI.DebugVerbose:Visible(enabled and debugOn)
-    end
+function ControlAlly.Utils.isTempestDouble(unit)
+	if NPC.IsTempestDouble and ControlAlly.Utils.call(NPC.IsTempestDouble, unit) == true then
+		return true
+	end
+	return ControlAlly.Utils.call(NPC.HasModifier, unit, "modifier_arc_warden_tempest_double") == true
 end
 
-local function InitializeMenu()
-    local group = Menu.Find("Heroes", "", "Settings", "General", "Units Controller")
-    if not group then
-        error(LOG_PREFIX .. "Units Controller menu group not found")
-    end
-
-    local ui = {}
-
-    ui.Enabled = group:Switch(L("Control Ally"), LoadConfigInt("enabled", 0) == 1, Icons.enable)
-    ui.Enabled:ToolTip(L("Control a controllable allied hero while your hero Combo Key is held."))
-
-    ui.AllyHero = group:MultiSelect(L("Ally Hero"), {}, true)
-    MenuIcon(ui.AllyHero, Icons.hero)
-    if ui.AllyHero.OneItemSelection then
-        ui.AllyHero:OneItemSelection(true)
-    end
-    if ui.AllyHero.DragAllowed then
-        ui.AllyHero:DragAllowed(false)
-    end
-    ui.AllyHero:ToolTip(L("Pick which controllable allied hero to command."))
-
-    ui.Abilities = group:MultiSelect(L("Abilities"), {}, true)
-    MenuIcon(ui.Abilities, Icons.abilities)
-    ui.Abilities:ToolTip(L("Toggle which abilities the ally may cast in combo."))
-
-    ui.Items = group:MultiSelect(L("Items"), {}, true)
-    MenuIcon(ui.Items, Icons.items)
-    ui.Items:ToolTip(L("Toggle which items this ally may use (saved per selected ally hero). Buffs/dispels go to your hero."))
-
-    ui.Abilities:SetCallback(function()
-        local widget = UI.Abilities
-        if not widget or not widget.List then
-            return
-        end
-        local listed = SafeValue(widget.List, widget)
-        if type(listed) ~= "table" then
-            return
-        end
-        for i = 1, #listed do
-            local id = listed[i]
-            if id and id ~= "none" then
-                local val = SafeValue(widget.Get, widget, id)
-                if val ~= nil then
-                    SaveConfigInt("abl_" .. id, val == true and 1 or 0)
-                end
-            end
-        end
-    end, false)
-
-    ui.Items:SetCallback(function()
-        local widget = UI.Items
-        if not widget or not widget.List then
-            return
-        end
-        local listed = SafeValue(widget.List, widget)
-        if type(listed) ~= "table" then
-            return
-        end
-        local heroName = Runtime.syncedHeroName
-        for i = 1, #listed do
-            local id = listed[i]
-            if id and id ~= "none" then
-                local val = SafeValue(widget.Get, widget, id)
-                if val ~= nil then
-                    Core.Settings.SaveItemToggle(heroName, id, val == true)
-                end
-            end
-        end
-    end, false)
-
-    local gear = ui.Enabled:Gear(L("Settings"), Icons.gear, true)
-    ui.SettingsGear = gear
-
-    ui.TargetMode = gear:Combo(L("Target Mode"), TARGET_MODE_ITEMS, LoadConfigInt("target_mode", 0))
-    MenuIcon(ui.TargetMode, Icons.target)
-    ui.TargetMode:ToolTip(L(
-        "Cursor: lock/switch only within 100-300 of the mouse (world). Auto Score: threat/cluster scoring. Overrides Heroes Target Selection Style."
-    ))
-
-    ui.MinClusterHits = gear:Slider(L("Min AOE hits"), 1, 5, LoadConfigInt("min_cluster", 2), "%d")
-    MenuIcon(ui.MinClusterHits, Icons.hits)
-    ui.MinClusterHits:ToolTip(L("Minimum enemy heroes an AOE ability should hit before casting (when a better multi-hit spot exists)."))
-
-    ui.ManaThreshold = gear:Slider(L("Min Mana %"), 0, 100, LoadConfigInt("mana_pct", 15), "%d%%")
-    MenuIcon(ui.ManaThreshold, Icons.mana)
-    ui.ManaThreshold:ToolTip(L("Skip spending casts while the ally is below this mana percent (keeps room for movement/attacks)."))
-
-    ui.ExtendDisables = gear:Switch(L("Extend disables"), LoadConfigInt("extend", 1) == 1, Icons.extend)
-    ui.ExtendDisables:ToolTip(L("Chain disables when remaining CC is about to expire."))
-
-    ui.UseLinkBreak = gear:Switch(L("Use Linken's break"), LoadConfigInt("linkbreak", 1) == 1, Icons.link)
-    ui.UseLinkBreak:ToolTip(L("Spend a cheap targeted spell/item first when the locked enemy has Linken's Sphere."))
-
-    ui.Debug = gear:Switch(L("Debug logs"), LoadConfigInt("debug", 0) == 1)
-    MenuIcon(ui.Debug, Icons.bug)
-    ui.Debug:ToolTip(L("Write Control Ally logs to the Umbrella console (casts, confirms, aborts)."))
-
-    ui.DebugVerbose = gear:Switch(L("Verbose debug"), LoadConfigInt("debug_verbose", 0) == 1)
-    MenuIcon(ui.DebugVerbose, Icons.bug)
-    ui.DebugVerbose:ToolTip(L(
-        "Requires Debug logs. Unthrottled plan/cast events with priorities (@N), skip reasons, plus throttled move/attack range ticks."
-    ))
-
-    ui.DrawOverlay = gear:Switch(L("Draw overlay"), LoadConfigInt("draw_overlay", 0) == 1, Icons.draw)
-    ui.DrawOverlay:ToolTip(L("Show on-screen ally/target/queue info while the combo key is held."))
-
-    ui.Enabled:SetCallback(function()
-        if not ui.Enabled then
-            return
-        end
-        SaveConfigInt("enabled", ui.Enabled:Get() and 1 or 0)
-        UpdateControlStates()
-    end, true)
-
-    ui.TargetMode:SetCallback(function()
-        if not ui.TargetMode then
-            return
-        end
-        SaveConfigInt("target_mode", ui.TargetMode:Get())
-    end, true)
-
-    ui.MinClusterHits:SetCallback(function()
-        if not ui.MinClusterHits then
-            return
-        end
-        SaveConfigInt("min_cluster", ui.MinClusterHits:Get())
-    end, true)
-
-    ui.ManaThreshold:SetCallback(function()
-        if not ui.ManaThreshold then
-            return
-        end
-        SaveConfigInt("mana_pct", ui.ManaThreshold:Get())
-    end, true)
-
-    ui.ExtendDisables:SetCallback(function()
-        if not ui.ExtendDisables then
-            return
-        end
-        SaveConfigInt("extend", ui.ExtendDisables:Get() and 1 or 0)
-    end, true)
-
-    ui.UseLinkBreak:SetCallback(function()
-        if not ui.UseLinkBreak then
-            return
-        end
-        SaveConfigInt("linkbreak", ui.UseLinkBreak:Get() and 1 or 0)
-    end, true)
-
-    ui.Debug:SetCallback(function()
-        if not ui.Debug then
-            return
-        end
-        SaveConfigInt("debug", ui.Debug:Get() and 1 or 0)
-        UpdateControlStates()
-    end, true)
-
-    ui.DebugVerbose:SetCallback(function()
-        if not ui.DebugVerbose then
-            return
-        end
-        SaveConfigInt("debug_verbose", ui.DebugVerbose:Get() and 1 or 0)
-    end, true)
-
-    ui.DrawOverlay:SetCallback(function()
-        if not ui.DrawOverlay then
-            return
-        end
-        SaveConfigInt("draw_overlay", ui.DrawOverlay:Get() and 1 or 0)
-    end, true)
-
-    ui.AllyHero:SetCallback(function()
-        local playerId = Core.GetSelectedAllyPlayerIdFromUI()
-        local entry = ResolveAllyEntryByPlayerId(playerId)
-        local samePlayer = entry
-            and type(entry.playerId) == "number"
-            and entry.playerId == Runtime.selectedPlayerId
-        -- Combo sticky: ignore AllyHero flicker onto another ally during Morph/transform.
-        if Runtime.comboActive
-            and type(Runtime.selectedPlayerId) == "number"
-            and entry
-            and type(entry.playerId) == "number"
-            and entry.playerId ~= Runtime.selectedPlayerId
-        then
-            DbgImportant(
-                "ally selection ignored during combo | keep=P%s ignore=P%s",
-                tostring(Runtime.selectedPlayerId),
-                tostring(entry.playerId)
-            )
-            if UI.AllyHero and UI.AllyHero.Set then
-                SafeValue(UI.AllyHero.Set, UI.AllyHero, Core.AllyWidgetId(Runtime.selectedPlayerId), true)
-            end
-            return
-        end
-        if Runtime.sessionHero and entry and entry.hero ~= Runtime.sessionHero and not samePlayer then
-            EndSession("ally selection changed")
-        end
-        if entry and type(entry.playerId) == "number" then
-            SaveConfigInt("ally_player_id", entry.playerId)
-            Runtime.selectedPlayerId = entry.playerId
-        end
-        if samePlayer and entry and entry.hero and Runtime.sessionHero ~= entry.hero then
-            Runtime.sessionHero = entry.hero
-            Runtime.snapshotInvalidated = true
-        end
-        Runtime.syncedAllyPlayerId = nil
-        Runtime.syncedInventorySig = nil
-        Runtime.syncedHeroName = nil
-        Runtime.snapshotInvalidated = true
-        Runtime.catalogCache = nil
-        if entry and entry.hero then
-            SyncAbilityItemWidgets(entry.hero, true)
-        end
-    end, false)
-
-    UI = ui
-    Persistent.ui = ui
-    Persistent.menuReady = true
-    UpdateControlStates()
+function ControlAlly.Utils.isHeroClone(unit, assignedHero)
+	if ControlAlly.Utils.isTempestDouble(unit) then
+		return true
+	end
+	if NPC.IsMeepoClone and ControlAlly.Utils.call(NPC.IsMeepoClone, unit) == true then
+		return true
+	end
+	if ControlAlly.Utils.isNothlProjection(unit) then
+		return true
+	end
+	local name = ControlAlly.Utils.unitName(unit)
+	local assignedName = ControlAlly.Utils.unitName(assignedHero)
+	return unit ~= assignedHero
+		and ControlAlly.Utils.call(NPC.IsIllusion, unit) ~= true
+		and name == assignedName
+		and (name == "npc_dota_hero_arc_warden" or name == "npc_dota_hero_meepo")
 end
 
-local function EnsureMenu()
-    if Persistent.menuReady then
-        return
-    end
-    if not Menu or not Menu.Create then
-        return
-    end
-    InitializeMenu()
+function ControlAlly.Utils.wasRecentlyHurt(unit, now)
+	local lastHurt = ControlAlly.Utils.call(Hero.GetLastHurtTime, unit)
+	if type(lastHurt) == "number" and lastHurt > 0 and now - lastHurt <= 2.2 then
+		return true
+	end
+	local recent = ControlAlly.Utils.call(Hero.GetRecentDamage, unit) or 0
+	local maximum = ControlAlly.Utils.call(Entity.GetMaxHealth, unit) or 1
+	return recent >= maximum * 0.05
 end
 
---#endregion
-
---#region Overlay
-
-local function DrawOverlay(snapshot)
-    if not UI.DrawOverlay or not SafeValue(UI.DrawOverlay.Get, UI.DrawOverlay) then
-        return
-    end
-    if not Render or not Render.Text or not Render.LoadFont then
-        return
-    end
-
-    Persistent.overlayFont = Persistent.overlayFont or SafeValue(Render.LoadFont, "Segoe UI", Enum.FontCreate.FONTFLAG_ANTIALIAS, 500) or 0
-    if Persistent.overlayFont == 0 then
-        Persistent.overlayFont = SafeValue(Render.LoadFont, "Arial", Enum.FontCreate.FONTFLAG_ANTIALIAS, 500) or 0
-    end
-    local font = Persistent.overlayFont
-    if not font or font == 0 then
-        return
-    end
-
-    local lines = {}
-    lines[#lines + 1] = string.format("Ally: %s", snapshot.allyName or "Unknown")
-    if snapshot.targetName then
-        lines[#lines + 1] = string.format("Target: %s", snapshot.targetName)
-    end
-    if snapshot.currentAction and snapshot.currentAction ~= "" then
-        lines[#lines + 1] = "Current: " .. snapshot.currentAction
-    end
-    if snapshot.nextAction and snapshot.nextAction ~= "" then
-        lines[#lines + 1] = "Next: " .. snapshot.nextAction
-    end
-    if snapshot.invokerPhase then
-        lines[#lines + 1] = "Invoker: " .. snapshot.invokerPhase
-    end
-
-    local y = 120
-    for i = 1, #lines do
-        SafeValue(Render.Text, font, 14, lines[i], Vec2(20, y), Color(220, 230, 255, 230))
-        y = y + 18
-    end
+function ControlAlly.Utils.cooldownRemaining(ability)
+	if not ability then
+		return math.huge
+	end
+	if Ability.GetCooldownTimeRemaining then
+		local remaining = ControlAlly.Utils.call(Ability.GetCooldownTimeRemaining, ability)
+		if type(remaining) == "number" then
+			return math.max(0, remaining)
+		end
+	end
+	local remaining = ControlAlly.Utils.call(Ability.GetCooldown, ability)
+	return type(remaining) == "number" and math.max(0, remaining) or 0
 end
 
-Core.Snapshot.Build = BuildContext
-Core.GenericPlanner.Build = BuildActionPlan
-Core.ActionRunner.Process = ProcessCombo
-Core.MovementController.Process = ProcessMovement
--- While approaching an OOR head (Dismember), inject kit actions that just entered range (Rot).
-Core.TryInjectApproachKitActions = function(ctx)
-    if not ctx or not ctx.controlled or not ctx.enemy or Runtime.pending then
-        return
-    end
-    if #Runtime.actionQueue == 0 then
-        return
-    end
-    local head = Runtime.actionQueue[1]
-    if not head or not head.ability then
-        return
-    end
-    if head.kind == "noTarget" then
-        return
-    end
-    if IsWithinCastRange(ctx, head) then
-        return
-    end
-    local unitName = SafeValue(NPC.GetUnitName, ctx.controlled)
-    local kit = Core.Catalog.HeroKits and unitName and Core.Catalog.HeroKits[unitName]
-    if not kit or type(kit.steps) ~= "table" then
-        return
-    end
-    local queuedIds = {}
-    for q = 1, #Runtime.actionQueue do
-        local id = Runtime.actionQueue[q].abilityId
-        if id then
-            queuedIds[id] = true
-        end
-    end
-    local injected = {}
-    for i = 1, #kit.steps do
-        local step = kit.steps[i]
-        if step and step.id and not queuedIds[step.id] and not IsActionUsed(step.id) then
-            AppendKitAbility(ctx, injected, step)
-        end
-    end
-    for i = 1, #injected do
-        local action = injected[i]
-        if action and action.ability and IsWithinCastRange(ctx, action) then
-            Runtime.actionQueue[#Runtime.actionQueue + 1] = action
-            queuedIds[action.abilityId] = true
-            DbgVerbose("event",
-                "approach_inject | %s while waiting on %s | %s",
-                action.abilityId or "?",
-                head.abilityId or "?",
-                FormatRangeContext(ctx)
-            )
-        end
-    end
-end
--- Drop known gap-closers once already in short lockedEnemy range (post-blink).
--- Never prune nukes by attack range (that deleted Zeus Lightning Bolt / Nimbus).
-Core.PruneCloseGapClosers = function(ctx)
-    if not ctx or not ctx.controlled or not ctx.enemy then
-        return
-    end
-    if #Runtime.actionQueue == 0 then
-        return
-    end
-    local myPos = SafeValue(Entity.GetAbsOrigin, ctx.controlled)
-    local enemyPos = SafeValue(Entity.GetAbsOrigin, ctx.enemy)
-    if not myPos or not enemyPos then
-        return
-    end
-    local dist = Dist2D(myPos, enemyPos)
-    local threshold = nil
-    for i = 1, #Runtime.actionQueue do
-        local action = Runtime.actionQueue[i]
-        if action and action.kind == "lockedEnemy" and action.ability then
-            local castRange = GetCastRange(ctx.controlled, action.ability)
-            if type(castRange) == "number"
-                and castRange > 0
-                and castRange <= 350
-                and not Core.IsUnboundedCastRange(castRange) then
-                threshold = castRange + 100
-                break
-            end
-        end
-    end
-    if type(threshold) ~= "number" or dist > threshold then
-        return
-    end
-    local i = 1
-    while i <= #Runtime.actionQueue do
-        local action = Runtime.actionQueue[i]
-        local abilityId = action and action.abilityId or ""
-        local tag = action and action.tag or ""
-        local isBlink = type(abilityId) == "string" and abilityId:find("blink", 1, true) ~= nil
-        local isInitiate = tag == "initiate_blink"
-        local isGap = Core.Catalog.GapCloserAbilities[abilityId] == true
-        if action
-            and action.kind == "bestPosition"
-            and isGap
-            and not isBlink
-            and not isInitiate
-        then
-            DbgVerbose("event",
-                "prune_close | drop %s dist=%.0f thr=%.0f | %s",
-                abilityId,
-                dist,
-                threshold,
-                FormatRangeContext(ctx)
-            )
-            table.remove(Runtime.actionQueue, i)
-        else
-            i = i + 1
-        end
-    end
-end
-Core.Overlay.Draw = DrawOverlay
-
---#endregion
-
---#region Lifecycle
-
-function Script.OnGameEnd()
-    EndSession("game end")
-    Runtime.lastUpdateAt = -math.huge
-    Runtime.lastAllyScanAt = -math.huge
-    Runtime.lastTargetResolveAt = -math.huge
-    Runtime.lastMultiSyncAt = -math.huge
-    Runtime.lastBuiltinSyncAt = -math.huge
-    Runtime.controllableAllies = {}
-    Runtime.sessionHero = nil
-    Runtime.localHero = nil
-    Runtime.localPlayer = nil
-    Runtime.localPlayerId = nil
-    Runtime.selectedPlayerId = nil
-    Runtime.lockedEnemy = nil
-    Runtime.lockedEnemyScore = nil
-    Runtime.actionQueue = {}
-    Runtime.syncedHeroName = nil
-    Runtime.syncedAllyPlayerId = nil
-    Runtime.syncedAllyRosterSig = nil
-    Runtime.syncedInventorySig = nil
-    Runtime.lastMoveOrderAt = -math.huge
-    Runtime.lastAttackOrderAt = -math.huge
-    Runtime.lastAttackTarget = nil
-    Runtime.lastFollowOrderAt = -math.huge
-    Runtime.lastFollowPos = nil
-    Runtime.failedActions = {}
-    Runtime.usedActions = {}
-    Runtime.usedActionCharges = {}
-    Runtime.debugVerboseAt = {}
-    Runtime.shrapnelLastCastAt = 0
-    Runtime.shrapnelLastPos = nil
-    Runtime.shrapnelLastEnemy = nil
-    Runtime.comboReleaseAt = nil
-    Runtime.nextComboAt = 0
-    Runtime.invokerComboEnemy = nil
-    Runtime.invokerLastInvokeAt = 0
-    Runtime.invokerAwaitSpell = nil
-    Runtime.invokerFsm = { phase = "selectStep", spellId = nil }
-    Runtime.renderSnapshot = nil
-    BuiltIn.comboKey = nil
-    BuiltIn.lastHeroMenuName = nil
+function ControlAlly.Utils.specialValueExact(ability, name, fallback)
+	local liveValue
+	if Ability.GetSpecialValueFor then
+		liveValue = ControlAlly.Utils.call(Ability.GetSpecialValueFor, ability, name)
+	end
+	if type(liveValue) == "number" then
+		return liveValue
+	end
+	local levelValue
+	if Ability.GetLevelSpecialValueFor then
+		levelValue = ControlAlly.Utils.call(Ability.GetLevelSpecialValueFor, ability, name, -1)
+	end
+	return type(levelValue) == "number" and levelValue or fallback
 end
 
-function Script.OnScriptsLoaded()
-    Persistent.logger = Logger("ControlAlly")
-    EnsureMenu()
+function ControlAlly.Utils.specialValue(ability, names, fallback)
+	for _, name in ipairs(names) do
+		local value = ControlAlly.Utils.specialValueExact(ability, name, nil)
+		if type(value) == "number" and value > 0 then
+			return value
+		end
+	end
+	return fallback
 end
 
-function Script.OnUpdate()
-    if not SafeValue(Engine.IsInGame) then
-        if Runtime.comboActive or Runtime.pending then
-            EndSession("not in game")
-        end
-        return
-    end
-
-    EnsureMenu()
-    if not UI.Enabled or not UI.Enabled:Get() then
-        if Runtime.comboActive or Runtime.pending then
-            EndSession("disabled")
-        end
-        return
-    end
-    if SafeValue(Input.IsInputCaptured) then
-        if Runtime.comboActive or Runtime.pending then
-            EndSession("input captured")
-        end
-        return
-    end
-
-    local now = GetGameTime()
-    local comboHeldEarly = IsComboKeyHeld()
-    local tickInterval = comboHeldEarly and (UPDATE_INTERVAL * 0.75) or UPDATE_INTERVAL
-    if now - Runtime.lastUpdateAt < tickInterval then
-        return
-    end
-    Runtime.lastUpdateAt = now
-
-    RefreshControllableAllies(now)
-    SyncBuiltinWidgets(false)
-
-    local comboHeld = IsComboKeyHeld()
-    if not comboHeld then
-        if Runtime.comboActive then
-            if not Runtime.comboReleaseAt then
-                Runtime.comboReleaseAt = now
-            elseif now - Runtime.comboReleaseAt >= COMBO_RELEASE_GRACE then
-                EndSession("bind released")
-            end
-        else
-            Runtime.comboReleaseAt = nil
-        end
-        Runtime.comboKeyHeldPrev = false
-        return
-    end
-
-    Runtime.comboReleaseAt = nil
-    Runtime.comboForceResolve = not Runtime.comboKeyHeldPrev
-    if not Runtime.comboKeyHeldPrev then
-        Runtime.comboTrace = {}
-        Runtime.comboStartedAt = now
-        Runtime.emptyPlanUntil = 0
-    end
-    Runtime.comboKeyHeldPrev = true
-    Runtime.comboActive = true
-
-    local ctx = Core.Snapshot.Build(now)
-    Runtime.comboForceResolve = false
-    if not ctx then
-        Runtime.renderSnapshot = nil
-        return
-    end
-
-    if Runtime.syncedAllyPlayerId ~= Runtime.selectedPlayerId then
-        SyncAbilityItemWidgets(ctx.controlled, true)
-    elseif now - Runtime.lastMultiSyncAt >= MULTISELECT_SYNC_INTERVAL then
-        Runtime.lastMultiSyncAt = now
-        SyncAbilityItemWidgets(ctx.controlled, false)
-    end
-
-    Core.ActionRunner.Process(ctx)
-    Core.MovementController.Process(ctx)
-    Runtime.renderSnapshot = {
-        allyName = GetHeroDisplayName(SafeValue(NPC.GetUnitName, ctx.controlled)),
-        targetName = ctx.enemy and GetHeroDisplayName(SafeValue(NPC.GetUnitName, ctx.enemy)) or nil,
-        currentAction = Runtime.pending and string.format(
-            "%s [%s%s]",
-            Runtime.pending.tag or "?",
-            Runtime.pending.status or "pending",
-            Runtime.pending.orderAck and ", ack" or ""
-        ) or "",
-        nextAction = Runtime.actionQueue[1] and Runtime.actionQueue[1].tag or "",
-        invokerPhase = SafeValue(NPC.GetUnitName, ctx.controlled) == "npc_dota_hero_invoker"
-            and Runtime.invokerFsm.phase or nil,
-    }
+function ControlAlly.Utils.ruleValue(ability, rule, literalKey, specialKey, fallback)
+	if rule[literalKey] ~= nil then
+		return rule[literalKey]
+	end
+	local key = rule[specialKey]
+	if key then
+		return ControlAlly.Utils.specialValueExact(ability, key, fallback)
+	end
+	return fallback
 end
 
-function Script.OnDraw()
-    if not Persistent.menuReady or not UI.Enabled or not UI.Enabled:Get() then
-        return
-    end
-    if not Runtime.comboActive then
-        return
-    end
-
-    local snapshot = Runtime.renderSnapshot
-    if snapshot then
-        Core.Overlay.Draw(snapshot)
-    end
+function ControlAlly.Utils.copyTable(source)
+	local result = {}
+	for key, value in pairs(source or {}) do
+		result[key] = value
+	end
+	return result
 end
 
-function Script.OnEntityDestroy(entity)
-    if entity == Runtime.sessionHero or entity == Runtime.localHero then
-        EndSession("controlled entity destroyed")
-    elseif entity == Runtime.lockedEnemy then
-        if Runtime.pending and Runtime.pending.target == entity then
-            EndSession("pending target destroyed")
-        else
-            Runtime.lockedEnemy = nil
-            Runtime.lockedEnemyScore = nil
-        end
-    end
+function ControlAlly.Utils.modifierRemaining(unit, modifierName, now)
+	if not unit or not modifierName or not NPC.GetModifier then
+		return 0
+	end
+	local modifier = ControlAlly.Utils.call(NPC.GetModifier, unit, modifierName)
+	if not modifier then
+		return 0
+	end
+	local dieTime = ControlAlly.Utils.call(Modifier.GetDieTime, modifier)
+	if type(dieTime) == "number" and dieTime > 0 then
+		return math.max(0, dieTime - (now or ControlAlly.Utils.gameTime()))
+	end
+	local duration = ControlAlly.Utils.call(Modifier.GetDuration, modifier)
+	local created = ControlAlly.Utils.call(Modifier.GetCreationTime, modifier)
+	if type(duration) == "number" and duration > 0 and type(created) == "number" then
+		return math.max(0, created + duration - (now or ControlAlly.Utils.gameTime()))
+	end
+	return 0
 end
 
-function Script.OnUnitInventoryUpdated(data)
-    Runtime.snapshotInvalidated = true
-    Runtime.catalogCache = nil
-    Runtime.syncedInventorySig = nil
-    Runtime.emptyPlanUntil = 0
+function ControlAlly.Utils.debug(message, ...)
+	if not ControlAlly.UI.Debug or ControlAlly.UI.Debug:Get() ~= true then
+		return
+	end
+	local text = select("#", ...) > 0 and string.format(message, ...) or message
+	ControlAlly.Utils.call(Log.Write, "[ControlAlly] " .. tostring(text))
 end
 
-function Script.OnSetDormant(npc, type)
-    if type == Enum.DormancyType.ENTITY_NOT_DORMANT then
-        return
-    end
-    if npc == Runtime.sessionHero then
-        EndSession("controlled hero dormant")
-    elseif npc == Runtime.localHero and Runtime.pending and Runtime.pending.target == npc then
-        EndSession("local target dormant")
-    elseif npc == Runtime.lockedEnemy then
-        if Runtime.pending and Runtime.pending.target == npc then
-            EndSession("pending target dormant")
-        else
-            Runtime.lockedEnemy = nil
-            Runtime.lockedEnemyScore = nil
-        end
-    end
+function ControlAlly.Profiles.getAbilityRule(heroName, abilityId)
+	local heroProfile = ControlAlly.Profiles.Heroes[heroName]
+	if heroProfile and heroProfile.abilities and heroProfile.abilities[abilityId] then
+		return heroProfile.abilities[abilityId]
+	end
+	local globalRule = ControlAlly.Profiles.GlobalAbilities[abilityId]
+	if globalRule then
+		return globalRule
+	end
+	if not ControlAlly.Profiles.AbilityRulesById then
+		local rules = {}
+		for _, profile in pairs(ControlAlly.Profiles.Heroes) do
+			for id, rule in pairs(profile.abilities or {}) do
+				rules[id] = rules[id] or rule
+			end
+		end
+		ControlAlly.Profiles.AbilityRulesById = rules
+	end
+	return ControlAlly.Profiles.AbilityRulesById[abilityId]
 end
 
-function Script.OnPrepareUnitOrders(data, player, order, target, position, ability, orderIssuer, npc, queue, showEffects)
-    if IsOurOrder(data) then
-        local id = data.identifier
-        if Runtime.pending and id then
-            local matches = id == Runtime.pending.identifier
-                or (Runtime.pending.attemptIdentifiers
-                    and Runtime.pending.attemptIdentifiers[id])
-            if matches then
-                Runtime.pending.orderAck = true
-                if not Runtime.pending.ackAt then
-                    Runtime.pending.ackAt = GetGameTime()
-                end
-            end
-        end
-        if IsDebugVerbose() and data then
-            DbgVerbose("event","order_callback | id=%s", id or "?")
-        end
-    end
-    return true
+function ControlAlly.Profiles.normalizedAbilityId(abilityId)
+	return ControlAlly.Profiles.AbilityAliases[abilityId] or abilityId
 end
 
---#endregion
+function ControlAlly.Profiles.normalizedItemId(itemId)
+	if type(itemId) ~= "string" then
+		return itemId
+	end
+	if itemId:match("^item_dagon_[2-5]$") then
+		return itemId
+	end
+	return itemId
+end
 
-return Script
+function ControlAlly.Profiles.getItemRule(itemId)
+	local normalized = ControlAlly.Profiles.normalizedItemId(itemId)
+	return ControlAlly.Profiles.Items[normalized] or ControlAlly.Profiles.SupportItems[normalized]
+end
+
+function ControlAlly.Menu.initialize()
+	if ControlAlly.Runtime.initialized then
+		return
+	end
+
+	local icons = {
+		enable = "\u{f00c}",
+		players = "\u{f0c0}",
+		abilities = "\u{f890}",
+		items = "\u{e196}",
+		gear = "\u{f013}",
+		target = "\u{f05b}",
+		search = "\u{f002}",
+		mana = "\u{f043}",
+		clones = "\u{f24d}",
+		attack = "\u{f71c}",
+		follow = "\u{f245}",
+		debug = "\u{f188}",
+		bind = "\u{e1c1}",
+	}
+
+	local group = ControlAlly.Utils.call(Menu.Find, "Heroes", "", "Settings", "General", "Control Ally")
+	if not group then
+		group = Menu.Create("Heroes", "", "Settings", "General", "Control Ally")
+	end
+	if not group then
+		return
+	end
+
+	local ui = ControlAlly.UI
+	ui.Enabled = group:Switch("Enable", false, icons.enable)
+	ui.Enabled:ToolTip(
+		"Control every selected disconnected/shared-control ally with an independent smart combat controller."
+	)
+	ControlAlly.Utils.menuIcon(ui.Enabled, icons.enable)
+
+	ui.ActivationHint = group:Label("Uses your local hero Combo Key", icons.bind)
+	ui.ActivationHint:ToolTip(
+		"Hold the Combo Key from your current hero's Main Settings. No separate Control Key is created."
+	)
+	ControlAlly.Utils.menuIcon(ui.ActivationHint, icons.bind)
+
+	ui.Players = group:MultiSelect("Controlled Players", {}, true)
+	ui.Players:OneItemSelection(false)
+	ui.Players:DragAllowed(false)
+	ui.Players:ToolTip("Select any number of allied player slots. Tempest Doubles and Meepo clones are included.")
+	ControlAlly.Utils.menuIcon(ui.Players, icons.players)
+
+	ui.Abilities = group:MultiSelect("Abilities", {}, true)
+	ui.Abilities:DragAllowed(false)
+	ui.Abilities:ToolTip(
+		"Enabled combat abilities across all selected heroes. Unsafe travel/return skills are omitted."
+	)
+	ControlAlly.Utils.menuIcon(ui.Abilities, icons.abilities)
+	if ui.Abilities.Visible then
+		ui.Abilities:Visible(false)
+	end
+
+	ui.Items = group:MultiSelect("Items", {}, true)
+	ui.Items:DragAllowed(false)
+	ui.Items:ToolTip("Enabled combat items across all selected heroes and clones.")
+	ControlAlly.Utils.menuIcon(ui.Items, icons.items)
+	if ui.Items.Visible then
+		ui.Items:Visible(false)
+	end
+
+	local settings = ui.Enabled:Gear("Settings", icons.gear, true)
+	ui.TargetMode = settings:Combo("Target Mode", { "Cursor", "Smart Score" }, 0)
+	ui.TargetMode:ToolTip(
+		"Cursor follows your intended enemy; Smart Score favors close, low-health, clustered targets."
+	)
+	ControlAlly.Utils.menuIcon(ui.TargetMode, icons.target)
+
+	ui.SearchRadius = settings:Slider("Search Radius", 600, 5000, 2400, "%d")
+	ControlAlly.Utils.menuIcon(ui.SearchRadius, icons.search)
+
+	ui.MinMana = settings:Slider("Minimum Mana", 0, 80, 5, "%d%%")
+	ControlAlly.Utils.menuIcon(ui.MinMana, icons.mana)
+
+	ui.UseAbilities = settings:Switch("Use Abilities", true, icons.abilities)
+	ControlAlly.Utils.menuIcon(ui.UseAbilities, icons.abilities)
+
+	ui.UseItems = settings:Switch("Use Items", true, icons.items)
+	ControlAlly.Utils.menuIcon(ui.UseItems, icons.items)
+
+	ui.ControlClones = settings:Switch("Control Hero Clones", true, icons.clones)
+	ControlAlly.Utils.menuIcon(ui.ControlClones, icons.clones)
+
+	ui.AttackBetweenCasts = settings:Switch("Attack Between Casts", true, icons.attack)
+	ui.AttackBetweenCasts:ToolTip(
+		"Force a real attack after two non-urgent casts and attack whenever no cast is ready."
+	)
+	ControlAlly.Utils.menuIcon(ui.AttackBetweenCasts, icons.attack)
+
+	ui.FollowCursor = settings:Switch("Follow Cursor Without Target", true, icons.follow)
+	ControlAlly.Utils.menuIcon(ui.FollowCursor, icons.follow)
+
+	ui.Debug = settings:Switch("Debug Log", false, icons.debug)
+	ControlAlly.Utils.menuIcon(ui.Debug, icons.debug)
+
+	ControlAlly.Runtime.initialized = true
+end
+
+function ControlAlly.Menu.captureSelections(widget, cache)
+	if not widget or not widget.List or not widget.Get then
+		return
+	end
+	local list = ControlAlly.Utils.call(widget.List, widget) or {}
+	for _, id in ipairs(list) do
+		if id ~= "none" then
+			local enabled = ControlAlly.Utils.call(widget.Get, widget, id)
+			if enabled ~= nil then
+				cache[id] = enabled == true
+			end
+		end
+	end
+end
+
+function ControlAlly.Menu.isAbilityEnabled(abilityId)
+	abilityId = ControlAlly.Profiles.normalizedAbilityId(abilityId)
+	local widget = ControlAlly.UI.Abilities
+	if widget then
+		local enabled = ControlAlly.Utils.call(widget.Get, widget, abilityId)
+		if enabled ~= nil then
+			return enabled == true
+		end
+	end
+	local cached = ControlAlly.Runtime.abilityEnabled[abilityId]
+	return cached == nil or cached == true
+end
+
+function ControlAlly.Menu.isItemEnabled(itemId)
+	local widget = ControlAlly.UI.Items
+	if widget then
+		local enabled = ControlAlly.Utils.call(widget.Get, widget, itemId)
+		if enabled ~= nil then
+			return enabled == true
+		end
+	end
+	local cached = ControlAlly.Runtime.itemEnabled[itemId]
+	return cached == nil or cached == true
+end
+
+function ControlAlly.Menu.syncActionOptions(now, force)
+	if not force and now - ControlAlly.Runtime.lastMenuSyncAt < ControlAlly.Constants.MENU_SYNC_INTERVAL then
+		return
+	end
+	ControlAlly.Runtime.lastMenuSyncAt = now
+
+	ControlAlly.Menu.captureSelections(ControlAlly.UI.Abilities, ControlAlly.Runtime.abilityEnabled)
+	ControlAlly.Menu.captureSelections(ControlAlly.UI.Items, ControlAlly.Runtime.itemEnabled)
+
+	local abilityIds = {}
+	local itemIds = {}
+	local seenUnits = {}
+	for _, entry in ipairs(ControlAlly.Runtime.roster) do
+		if ControlAlly.Runtime.selectedPlayerIds[entry.playerId] then
+			local hero = ControlAlly.Utils.call(Player.GetAssignedHero, entry.player) or entry.hero
+			local index = ControlAlly.Utils.entityIndex(hero)
+			if hero and index and not seenUnits[index] then
+				seenUnits[index] = true
+				ControlAlly.AbilityAI.collectMenuIds(hero, abilityIds, itemIds)
+			end
+		end
+	end
+	for _, controller in ipairs(ControlAlly.Runtime.controllers) do
+		local index = ControlAlly.Utils.entityIndex(controller.unit)
+		if index and not seenUnits[index] then
+			seenUnits[index] = true
+			ControlAlly.AbilityAI.collectMenuIds(controller.unit, abilityIds, itemIds, controller.profileName)
+		end
+	end
+
+	local abilityList = {}
+	for id in pairs(abilityIds) do
+		abilityList[#abilityList + 1] = id
+	end
+	table.sort(abilityList)
+	local abilitySignature = table.concat(abilityList, "|")
+	local hasAbilities = #abilityList > 0
+	if ControlAlly.UI.Abilities and ControlAlly.UI.Abilities.Visible then
+		ControlAlly.Utils.call(ControlAlly.UI.Abilities.Visible, ControlAlly.UI.Abilities, hasAbilities)
+	end
+	if force or abilitySignature ~= ControlAlly.Runtime.actionMenuSignature then
+		ControlAlly.Runtime.actionMenuSignature = abilitySignature
+		if hasAbilities then
+			local rows = {}
+			for _, id in ipairs(abilityList) do
+				local enabled = ControlAlly.Runtime.abilityEnabled[id]
+				if enabled == nil then
+					enabled = true
+					ControlAlly.Runtime.abilityEnabled[id] = true
+				end
+				rows[#rows + 1] = { id, ControlAlly.Utils.abilityIcon(id), enabled }
+			end
+			ControlAlly.Utils.call(ControlAlly.UI.Abilities.Update, ControlAlly.UI.Abilities, rows, true, true)
+		end
+	end
+
+	local itemList = {}
+	for id in pairs(itemIds) do
+		itemList[#itemList + 1] = id
+	end
+	table.sort(itemList)
+	local itemSignature = table.concat(itemList, "|")
+	local hasItems = #itemList > 0
+	if ControlAlly.UI.Items and ControlAlly.UI.Items.Visible then
+		ControlAlly.Utils.call(ControlAlly.UI.Items.Visible, ControlAlly.UI.Items, hasItems)
+	end
+	if force or itemSignature ~= ControlAlly.Runtime.itemMenuSignature then
+		ControlAlly.Runtime.itemMenuSignature = itemSignature
+		if hasItems then
+			local rows = {}
+			for _, id in ipairs(itemList) do
+				local enabled = ControlAlly.Runtime.itemEnabled[id]
+				if enabled == nil then
+					enabled = true
+					ControlAlly.Runtime.itemEnabled[id] = true
+				end
+				rows[#rows + 1] = { id, ControlAlly.Utils.abilityIcon(id), enabled }
+			end
+			ControlAlly.Utils.call(ControlAlly.UI.Items.Update, ControlAlly.UI.Items, rows, true, true)
+		end
+	end
+end
+
+function ControlAlly.Roster.isControllable(unit, playerId)
+	if not unit or playerId == nil then
+		return false
+	end
+	local controllable = ControlAlly.Utils.call(Entity.IsControllableByPlayer, unit, playerId)
+	if controllable == nil and NPC.IsControllableByPlayer then
+		controllable = ControlAlly.Utils.call(NPC.IsControllableByPlayer, unit, playerId)
+	end
+	return controllable == true
+end
+
+function ControlAlly.Roster.connectionLabel(player)
+	local data = ControlAlly.Utils.call(Player.GetPlayerData, player)
+	local state = type(data) == "table" and data.connectionState or nil
+	local labels = {
+		[0] = "Unknown",
+		[1] = "Not connected",
+		[2] = "Connected",
+		[3] = "Disconnected",
+		[4] = "Abandoned",
+		[5] = "Loading",
+		[6] = "Failed",
+	}
+	return labels[state] or (state and ("State " .. tostring(state)) or "Shared control"), state
+end
+
+function ControlAlly.Roster.scanPlayers(now, force)
+	if not force and now - ControlAlly.Runtime.lastRosterScanAt < ControlAlly.Constants.ROSTER_SCAN_INTERVAL then
+		return
+	end
+	ControlAlly.Runtime.lastRosterScanAt = now
+
+	local localPlayer = ControlAlly.Utils.call(Players.GetLocal)
+	local localHero = ControlAlly.Utils.call(Heroes.GetLocal)
+	local localPlayerId = localPlayer and ControlAlly.Utils.call(Player.GetPlayerID, localPlayer)
+	ControlAlly.Runtime.localPlayer = localPlayer
+	ControlAlly.Runtime.localPlayerId = localPlayerId
+	ControlAlly.Runtime.localHero = localHero
+	if not localPlayer or not localHero or localPlayerId == nil then
+		return
+	end
+
+	local previouslySelected = {}
+	if ControlAlly.UI.Players and ControlAlly.UI.Players.ListEnabled then
+		for _, label in ipairs(ControlAlly.Utils.call(ControlAlly.UI.Players.ListEnabled, ControlAlly.UI.Players) or {}) do
+			local oldPlayerId = ControlAlly.Runtime.playerLabelToId[label]
+			if oldPlayerId ~= nil then
+				previouslySelected[oldPlayerId] = true
+			end
+		end
+	end
+
+	local roster = {}
+	for _, player in ipairs(ControlAlly.Utils.call(Players.GetAll) or {}) do
+		local playerId = ControlAlly.Utils.call(Player.GetPlayerID, player)
+		local hero = ControlAlly.Utils.call(Player.GetAssignedHero, player)
+		if
+			playerId ~= nil
+			and playerId ~= localPlayerId
+			and ControlAlly.Utils.isValidHero(hero, false)
+			and ControlAlly.Utils.call(Entity.IsSameTeam, hero, localHero) == true
+			and ControlAlly.Roster.isControllable(hero, localPlayerId)
+		then
+			local unitName = ControlAlly.Utils.unitName(hero) or "unknown"
+			local displayName = ControlAlly.Utils.heroDisplayName(unitName)
+			local label = string.format("%s (P%d)", displayName, playerId + 1)
+			local widgetId = label
+			local connection, connectionState = ControlAlly.Roster.connectionLabel(player)
+			roster[#roster + 1] = {
+				player = player,
+				playerId = playerId,
+				hero = hero,
+				unitName = unitName,
+				label = label,
+				widgetId = widgetId,
+				connection = connection,
+				connectionState = connectionState,
+			}
+		end
+	end
+	table.sort(roster, function(a, b)
+		return a.playerId < b.playerId
+	end)
+
+	local signatureParts = {}
+	local rosterById = {}
+	local labelToId = {}
+	for _, entry in ipairs(roster) do
+		rosterById[entry.playerId] = entry
+		labelToId[entry.widgetId] = entry.playerId
+		signatureParts[#signatureParts + 1] =
+			string.format("%d:%s:%s", entry.playerId, entry.unitName, tostring(entry.connectionState))
+	end
+	local signature = table.concat(signatureParts, "|")
+
+	ControlAlly.Runtime.roster = roster
+	ControlAlly.Runtime.rosterById = rosterById
+	ControlAlly.Runtime.playerLabelToId = labelToId
+	if force or signature ~= ControlAlly.Runtime.rosterSignature then
+		ControlAlly.Runtime.rosterSignature = signature
+		local rows = {}
+		local tooltips = {}
+		for _, entry in ipairs(roster) do
+			local enabled = not ControlAlly.Runtime.rosterInitialized or previouslySelected[entry.playerId] == true
+			rows[#rows + 1] = {
+				entry.widgetId,
+				ControlAlly.Utils.heroIcon(entry.unitName),
+				enabled,
+			}
+			tooltips[entry.widgetId] = string.format(
+				"%s - %s; player slot %d; controllable through disconnected/shared control.",
+				entry.label,
+				entry.connection,
+				entry.playerId + 1
+			)
+		end
+		if #rows == 0 then
+			rows[1] = { "No controllable allies", "", false }
+		end
+		ControlAlly.Utils.call(ControlAlly.UI.Players.Update, ControlAlly.UI.Players, rows, false, true)
+		if ControlAlly.UI.Players.UpdateToolTips then
+			ControlAlly.Utils.call(ControlAlly.UI.Players.UpdateToolTips, ControlAlly.UI.Players, tooltips)
+		end
+		ControlAlly.Runtime.rosterInitialized = true
+	end
+end
+
+function ControlAlly.Roster.readSelectedPlayers()
+	local selected = {}
+	if ControlAlly.UI.Players and ControlAlly.UI.Players.ListEnabled then
+		for _, label in ipairs(ControlAlly.Utils.call(ControlAlly.UI.Players.ListEnabled, ControlAlly.UI.Players) or {}) do
+			local playerId = ControlAlly.Runtime.playerLabelToId[label]
+			if playerId ~= nil then
+				selected[playerId] = true
+			end
+		end
+	end
+	ControlAlly.Runtime.selectedPlayerIds = selected
+	return selected
+end
+
+function ControlAlly.Roster.toggleRegistryRecord(unit, playerId, create)
+	local index = ControlAlly.Utils.entityIndex(unit)
+	if not index then
+		return nil, nil
+	end
+	local heroName = ControlAlly.Utils.unitName(unit)
+	local record = ControlAlly.Runtime.toggleOwnershipRegistry[index]
+	if
+		type(record) ~= "table"
+		or type(record.abilities) ~= "table"
+		or record.unit ~= unit
+		or record.playerId ~= playerId
+		or record.heroName ~= heroName
+	then
+		ControlAlly.Runtime.toggleOwnershipRegistry[index] = nil
+		record = nil
+	end
+	if not record and create then
+		record = {
+			unit = unit,
+			playerId = playerId,
+			heroName = heroName,
+			abilities = {},
+		}
+		ControlAlly.Runtime.toggleOwnershipRegistry[index] = record
+	end
+	return record, index
+end
+
+function ControlAlly.Roster.newControllerState(unit, playerId, isClone, isSummon, profileName)
+	local ownedToggles = {}
+	local toggleRecord = ControlAlly.Roster.toggleRegistryRecord(unit, playerId, false)
+	for id, owned in pairs(toggleRecord and toggleRecord.abilities or {}) do
+		if owned then
+			ownedToggles[id] = true
+		end
+	end
+	return {
+		unit = unit,
+		playerId = playerId,
+		isClone = isClone,
+		isSummon = isSummon == true,
+		detached = false,
+		heroName = ControlAlly.Utils.unitName(unit),
+		profileName = profileName or ControlAlly.Utils.unitName(unit),
+		nextThinkAt = -math.huge,
+		nextOrderAt = -math.huge,
+		busyUntil = -math.huge,
+		lastAttackAt = -math.huge,
+		lastAttackTarget = nil,
+		interleaveTarget = nil,
+		interleaveDeadline = -math.huge,
+		lastMoveAt = -math.huge,
+		lastMovePosition = nil,
+		lastFaceAt = -math.huge,
+		motionLockUntil = -math.huge,
+		motionLockStartedAt = -math.huge,
+		motionModifiers = nil,
+		motionTarget = nil,
+		stopRequested = false,
+		lastIssued = {},
+		pendingCast = nil,
+		castsSinceAttack = 0,
+		activeAbility = nil,
+		catalog = nil,
+		catalogRefreshAt = -math.huge,
+		lastRefreshableCastAt = -math.huge,
+		lastRearmAt = -math.huge,
+		lastRefresherAt = -math.huge,
+		usedAbilitiesSinceRefresh = {},
+		ownedToggles = ownedToggles,
+		invoker = {
+			spellId = nil,
+			orbIndex = 1,
+			nextStepAt = -math.huge,
+			waitUntil = -math.huge,
+			combo = nil,
+			iceWallStand = nil,
+		},
+		meepo = {
+			lastNetAt = -math.huge,
+		},
+		alchemist = {
+			brewing = false,
+			startedAt = -math.huge,
+			target = nil,
+		},
+		techies = {
+			minePlan = nil,
+		},
+		kez = {
+			formCasts = {},
+			lastSwitchAt = -math.huge,
+			castsAfterSwitch = 0,
+		},
+		special = {
+			stage = nil,
+			target = nil,
+			followup = nil,
+			startedAt = -math.huge,
+			lastBallAt = -math.huge,
+		},
+	}
+end
+
+function ControlAlly.Roster.addController(desired, seen, unit, playerId, assignedHero, forceClone, forceSummon)
+	if
+		not ControlAlly.Utils.isValidControllerUnit(unit, true)
+		or ControlAlly.Utils.call(Entity.IsDormant, unit) == true
+		or ControlAlly.Roster.isControllable(unit, ControlAlly.Runtime.localPlayerId) ~= true
+	then
+		return
+	end
+	if
+		unit ~= assignedHero
+		and not forceClone
+		and not forceSummon
+		and ControlAlly.Utils.call(NPC.IsIllusion, unit) == true
+	then
+		return
+	end
+	local index = ControlAlly.Utils.entityIndex(unit)
+	if not index or seen[index] then
+		return
+	end
+	seen[index] = true
+	local isClone = forceClone == true or (unit ~= assignedHero and ControlAlly.Utils.isHeroClone(unit, assignedHero))
+	local isSummon = forceSummon == true
+	local state = ControlAlly.Runtime.controllerStates[index]
+	local heroName = ControlAlly.Utils.unitName(unit)
+	local profileName = forceClone and ControlAlly.Utils.unitName(assignedHero) or heroName
+	if not state or state.unit ~= unit or state.playerId ~= playerId or state.heroName ~= heroName then
+		state = ControlAlly.Roster.newControllerState(unit, playerId, isClone, isSummon, profileName)
+		ControlAlly.Runtime.controllerStates[index] = state
+	else
+		state.unit = unit
+		state.playerId = playerId
+		state.isClone = isClone
+		state.isSummon = isSummon
+		state.heroName = ControlAlly.Utils.unitName(unit)
+		state.profileName = profileName
+		state.detached = false
+	end
+	if ControlAlly.SpecialAI.reconcileController then
+		ControlAlly.SpecialAI.reconcileController(state, ControlAlly.Utils.gameTime())
+	end
+	desired[#desired + 1] = state
+	if isClone then
+		ControlAlly.Runtime.cloneCountByPlayer[playerId] = (ControlAlly.Runtime.cloneCountByPlayer[playerId] or 0) + 1
+	end
+end
+
+function ControlAlly.Roster.refreshControllers(now, force)
+	if
+		not force
+		and now - ControlAlly.Runtime.lastControllerScanAt < ControlAlly.Constants.CONTROLLER_SCAN_INTERVAL
+	then
+		return
+	end
+	ControlAlly.Runtime.lastControllerScanAt = now
+	local selected = ControlAlly.Roster.readSelectedPlayers()
+	local desired = {}
+	local seen = {}
+	ControlAlly.Runtime.cloneCountByPlayer = {}
+	local allHeroes = ControlAlly.Utils.call(Heroes.GetAll) or {}
+
+	for playerId in pairs(selected) do
+		local entry = ControlAlly.Runtime.rosterById[playerId]
+		if entry then
+			local assignedHero = ControlAlly.Utils.call(Player.GetAssignedHero, entry.player) or entry.hero
+			local assignedName = ControlAlly.Utils.unitName(assignedHero)
+			entry.hero = assignedHero
+			ControlAlly.Roster.addController(desired, seen, assignedHero, playerId, assignedHero)
+
+			if ControlAlly.UI.ControlClones and ControlAlly.UI.ControlClones:Get() == true then
+				if
+					assignedName == "npc_dota_hero_dazzle"
+					and XHelpers
+					and XHelpers.XNPC
+					and XHelpers.XNPC.GetNothlProjection
+				then
+					local projection =
+						ControlAlly.Utils.call(XHelpers.XNPC.GetNothlProjection, XHelpers.XNPC, assignedHero)
+					ControlAlly.Roster.addController(desired, seen, projection, playerId, assignedHero, true, false)
+				end
+
+				if assignedName == "npc_dota_hero_lone_druid" and CustomEntities and CustomEntities.GetSpiritBear then
+					local summon = ControlAlly.Utils.call(NPC.GetAbility, assignedHero, "lone_druid_spirit_bear")
+					local bear = summon and ControlAlly.Utils.call(CustomEntities.GetSpiritBear, summon)
+					if bear and ControlAlly.Utils.call(NPC.GetOwnerNPC, bear) == assignedHero then
+						ControlAlly.Roster.addController(desired, seen, bear, playerId, assignedHero, false, true)
+					end
+				end
+
+				if
+					assignedName == "npc_dota_hero_arc_warden"
+					and CustomEntities
+					and CustomEntities.GetTempestDouble
+				then
+					local tempestAbility =
+						ControlAlly.Utils.call(NPC.GetAbility, assignedHero, "arc_warden_tempest_double")
+					local linkedDouble = tempestAbility
+						and ControlAlly.Utils.call(CustomEntities.GetTempestDouble, tempestAbility)
+					ControlAlly.Roster.addController(desired, seen, linkedDouble, playerId, assignedHero)
+				end
+
+				for _, candidate in ipairs(allHeroes) do
+					if candidate ~= assignedHero then
+						local candidatePlayerId = ControlAlly.Utils.call(Hero.GetPlayerID, candidate)
+						if candidatePlayerId == playerId and ControlAlly.Utils.isHeroClone(candidate, assignedHero) then
+							ControlAlly.Roster.addController(desired, seen, candidate, playerId, assignedHero)
+						end
+					end
+				end
+			end
+		end
+	end
+
+	table.sort(desired, function(a, b)
+		if a.playerId ~= b.playerId then
+			return a.playerId < b.playerId
+		end
+		return (ControlAlly.Utils.entityIndex(a.unit) or 0) < (ControlAlly.Utils.entityIndex(b.unit) or 0)
+	end)
+	for index, controller in pairs(ControlAlly.Runtime.controllerStates) do
+		if not seen[index] then
+			local retainForSafety = (controller.alchemist and controller.alchemist.brewing)
+				or next(controller.ownedToggles or {}) ~= nil
+				or controller.pendingCast ~= nil
+				or ControlAlly.Utils.protectedActivity(controller.unit, controller.activeAbility) ~= nil
+				or (ControlAlly.SpecialAI.requiresRetention and ControlAlly.SpecialAI.requiresRetention(controller))
+			if ControlAlly.Runtime.inSession then
+				ControlAlly.Combat.rollbackPendingReservations(controller)
+				controller.stopRequested = true
+				ControlAlly.Orders.stop(controller)
+			end
+			if not retainForSafety and not controller.stopRequested then
+				ControlAlly.Runtime.controllerStates[index] = nil
+			else
+				controller.detached = true
+			end
+		end
+	end
+	ControlAlly.Runtime.controllers = desired
+
+	local signatureParts = {}
+	for _, controller in ipairs(desired) do
+		signatureParts[#signatureParts + 1] = string.format(
+			"%d:%d:%s",
+			controller.playerId,
+			ControlAlly.Utils.entityIndex(controller.unit) or -1,
+			controller.heroName or ""
+		)
+	end
+	local signature = table.concat(signatureParts, "|")
+	if signature ~= ControlAlly.Runtime.controllerSignature then
+		ControlAlly.Runtime.controllerSignature = signature
+		ControlAlly.Runtime.actionMenuSignature = ""
+		ControlAlly.Runtime.itemMenuSignature = ""
+		ControlAlly.Utils.debug("controllers refreshed: %d unit(s)", #desired)
+	end
+end
+
+function ControlAlly.Targeting.refreshBuiltinComboBind(now, force)
+	if
+		not force
+		and now - ControlAlly.Runtime.lastBuiltinBindScanAt < ControlAlly.Constants.BUILTIN_BIND_SCAN_INTERVAL
+	then
+		return
+	end
+	ControlAlly.Runtime.lastBuiltinBindScanAt = now
+	local hero = ControlAlly.Runtime.localHero or ControlAlly.Utils.call(Heroes.GetLocal)
+	local unitName = hero and ControlAlly.Utils.unitName(hero)
+	local heroName = unitName and ControlAlly.Utils.heroDisplayName(unitName)
+	if heroName == ControlAlly.Runtime.builtinComboHeroName and ControlAlly.Runtime.builtinComboBind then
+		return
+	end
+	ControlAlly.Runtime.builtinComboHeroName = heroName
+	ControlAlly.Runtime.builtinComboBind = nil
+	if not heroName then
+		return
+	end
+
+	ControlAlly.Runtime.builtinComboBind = ControlAlly.Utils.call(
+		Menu.Find,
+		"Heroes",
+		"Hero List",
+		heroName,
+		"Main Settings",
+		"Hero Settings",
+		"Combo Key"
+	) or ControlAlly.Utils.call(Menu.Find, "Heroes", "Hero List", heroName, "Main Settings", "General", "Combo Key") or ControlAlly.Utils.call(
+		Menu.Find,
+		"Heroes",
+		"Hero List",
+		heroName,
+		"Main Settings",
+		"Combo Key"
+	)
+end
+
+function ControlAlly.Targeting.isActivationHeld(now)
+	if ControlAlly.Utils.call(Input.IsInputCaptured) == true then
+		return false
+	end
+	ControlAlly.Targeting.refreshBuiltinComboBind(now, false)
+	local builtin = ControlAlly.Runtime.builtinComboBind
+	return builtin ~= nil and ControlAlly.Utils.call(builtin.IsDown, builtin) == true
+end
+
+function ControlAlly.Targeting.isValidEnemy(enemy)
+	local localHero = ControlAlly.Runtime.localHero
+	return ControlAlly.Utils.isValidHero(enemy, true)
+		and localHero ~= nil
+		and ControlAlly.Utils.call(Entity.IsSameTeam, enemy, localHero) == false
+		and ControlAlly.Utils.call(Entity.IsDormant, enemy) ~= true
+		and ControlAlly.Utils.call(NPC.IsVisible, enemy) == true
+		and ControlAlly.Utils.call(NPC.IsIllusion, enemy) ~= true
+end
+
+function ControlAlly.Targeting.refreshEnemies(now, force)
+	now = now or ControlAlly.Utils.gameTime()
+	if
+		not force
+		and now - (ControlAlly.Runtime.lastEnemyScanAt or -math.huge) < ControlAlly.Constants.ENEMY_SCAN_INTERVAL
+	then
+		return ControlAlly.Runtime.enemies
+	end
+	ControlAlly.Runtime.lastEnemyScanAt = now
+	local enemies = {}
+	for _, hero in ipairs(ControlAlly.Utils.call(Heroes.GetAll) or {}) do
+		if ControlAlly.Targeting.isValidEnemy(hero) then
+			enemies[#enemies + 1] = hero
+		end
+	end
+	ControlAlly.Runtime.enemies = enemies
+	return enemies
+end
+
+function ControlAlly.Targeting.minimumControllerDistance(enemy)
+	local enemyPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, enemy)
+	local best = math.huge
+	for _, controller in ipairs(ControlAlly.Runtime.controllers) do
+		local position = ControlAlly.Utils.call(Entity.GetAbsOrigin, controller.unit)
+		best = math.min(best, ControlAlly.Utils.distance2D(position, enemyPosition))
+	end
+	if ControlAlly.Runtime.localHero then
+		local localPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, ControlAlly.Runtime.localHero)
+		best = math.min(best, ControlAlly.Utils.distance2D(localPosition, enemyPosition))
+	end
+	return best
+end
+
+function ControlAlly.Targeting.isWithinSearch(enemy, leashMultiplier)
+	local searchRadius = ControlAlly.UI.SearchRadius and ControlAlly.UI.SearchRadius:Get() or 2400
+	return ControlAlly.Targeting.minimumControllerDistance(enemy) <= searchRadius * (leashMultiplier or 1)
+end
+
+function ControlAlly.Targeting.cursorCandidate()
+	local localHero = ControlAlly.Runtime.localHero
+	local team = localHero and ControlAlly.Utils.call(Entity.GetTeamNum, localHero)
+	if not team then
+		return nil
+	end
+	local candidate = ControlAlly.Utils.call(Input.GetNearestHeroToCursor, team, Enum.TeamType.TEAM_ENEMY)
+	if not ControlAlly.Targeting.isValidEnemy(candidate) or not ControlAlly.Targeting.isWithinSearch(candidate, 1) then
+		return nil
+	end
+	local cursor = ControlAlly.Utils.call(Input.GetWorldCursorPos)
+	local position = ControlAlly.Utils.call(Entity.GetAbsOrigin, candidate)
+	if
+		cursor
+		and position
+		and ControlAlly.Utils.distance2D(cursor, position) > ControlAlly.Constants.TARGET_SWITCH_CURSOR_RADIUS
+	then
+		return nil
+	end
+	return candidate
+end
+
+function ControlAlly.Targeting.clusterCount(enemy, radius)
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, enemy)
+	local count = 0
+	for _, candidate in ipairs(ControlAlly.Runtime.enemies) do
+		local position = ControlAlly.Utils.call(Entity.GetAbsOrigin, candidate)
+		if ControlAlly.Utils.distance2D(origin, position) <= radius then
+			count = count + 1
+		end
+	end
+	return count
+end
+
+function ControlAlly.Targeting.smartScore(enemy)
+	local healthScore = 100 - ControlAlly.Utils.healthPct(enemy)
+	local distance = ControlAlly.Targeting.minimumControllerDistance(enemy)
+	local cluster = ControlAlly.Targeting.clusterCount(enemy, 500)
+	local score = healthScore * 3 - distance * 0.08 + cluster * 90
+	local cursor = ControlAlly.Utils.call(Input.GetWorldCursorPos)
+	local position = ControlAlly.Utils.call(Entity.GetAbsOrigin, enemy)
+	if cursor and position then
+		score = score - math.min(ControlAlly.Utils.distance2D(cursor, position), 1500) * 0.04
+	end
+	if ControlAlly.Utils.isMagicImmune(enemy) then
+		score = score - 130
+	end
+	return score
+end
+
+function ControlAlly.Targeting.resolve(now, force)
+	local locked = ControlAlly.Runtime.lockedTarget
+	if
+		locked
+		and (
+			not ControlAlly.Targeting.isValidEnemy(locked)
+			or not ControlAlly.Targeting.isWithinSearch(locked, ControlAlly.Constants.TARGET_LOCK_LEASH)
+		)
+	then
+		locked = nil
+		ControlAlly.Runtime.lockedTarget = nil
+	end
+
+	local cursorCandidate = ControlAlly.Targeting.cursorCandidate()
+	if cursorCandidate and cursorCandidate ~= locked then
+		local cursor = ControlAlly.Utils.call(Input.GetWorldCursorPos)
+		local candidatePosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, cursorCandidate)
+		local deliberateSwitch = cursor
+			and ControlAlly.Utils.distance2D(cursor, candidatePosition)
+				<= ControlAlly.Constants.TARGET_SWITCH_CURSOR_RADIUS
+		if force or not locked or (deliberateSwitch and now - ControlAlly.Runtime.lastTargetSwitchAt >= 0.12) then
+			locked = cursorCandidate
+			ControlAlly.Runtime.lockedTarget = cursorCandidate
+			ControlAlly.Runtime.lastTargetSwitchAt = now
+		end
+	end
+
+	if locked then
+		return locked
+	end
+	if ControlAlly.UI.TargetMode and ControlAlly.UI.TargetMode:Get() == 0 then
+		return nil
+	end
+
+	local bestTarget
+	local bestScore = -math.huge
+	for _, enemy in ipairs(ControlAlly.Runtime.enemies) do
+		if ControlAlly.Targeting.isWithinSearch(enemy, 1) then
+			local score = ControlAlly.Targeting.smartScore(enemy)
+			if score > bestScore then
+				bestTarget = enemy
+				bestScore = score
+			end
+		end
+	end
+	ControlAlly.Runtime.lockedTarget = bestTarget
+	return bestTarget
+end
+
+function ControlAlly.Targeting.predictPosition(target, ability, rule)
+	local position = ControlAlly.Utils.call(Entity.GetAbsOrigin, target)
+	if not position then
+		return nil
+	end
+	local castPoint = ControlAlly.Utils.call(Ability.GetCastPoint, ability, true)
+		or ControlAlly.Utils.call(Ability.GetCastPoint, ability)
+		or 0
+	local owner = ControlAlly.Utils.call(Ability.GetOwner, ability)
+	local ownerPosition = owner and ControlAlly.Utils.call(Entity.GetAbsOrigin, owner)
+	local faceTime = owner and ControlAlly.Utils.call(NPC.GetTimeToFacePosition, owner, position) or 0
+	faceTime = type(faceTime) == "number" and math.max(0, faceTime) or 0
+	local delay = ControlAlly.Utils.ruleValue(ability, rule, "lead", "delaySpecial", 0) or 0
+	local projectileSpeed = ControlAlly.Utils.ruleValue(ability, rule, "projectileSpeed", "projectileSpeedSpecial", 0)
+		or 0
+	local travelTime = 0
+	if projectileSpeed > 0 then
+		local distance = ControlAlly.Utils.distance2D(ownerPosition, position)
+		travelTime = distance < math.huge and distance / projectileSpeed or 0
+	end
+	local lead = math.max(0, faceTime + castPoint + delay + travelTime)
+	local states = Enum.ModifierState
+	local immobile = ControlAlly.Utils.call(NPC.IsStunned, target) == true
+		or (states and ControlAlly.Utils.hasState(target, states.MODIFIER_STATE_ROOTED))
+		or ControlAlly.Utils.modifierRemaining(target, "modifier_invoker_tornado", ControlAlly.Utils.gameTime()) > 0
+	if lead > 0 and ControlAlly.Utils.call(NPC.IsRunning, target) == true then
+		local speed = immobile and 0 or (ControlAlly.Utils.call(NPC.GetMoveSpeed, target) or 0)
+		for _ = 1, 8 do
+			local previousLead = lead
+			local forward = ControlAlly.Utils.call(Entity.GetForwardPosition, target, speed * lead)
+			if not forward then
+				break
+			end
+			position = forward
+			local refinedFace = owner and ControlAlly.Utils.call(NPC.GetTimeToFacePosition, owner, position) or 0
+			refinedFace = type(refinedFace) == "number" and math.max(0, refinedFace) or 0
+			local refinedDistance = ControlAlly.Utils.distance2D(ownerPosition, position)
+			local refinedTravel = projectileSpeed > 0
+					and refinedDistance < math.huge
+					and refinedDistance / projectileSpeed
+				or 0
+			lead = math.max(0, refinedFace + castPoint + delay + refinedTravel)
+			if math.abs(lead - previousLead) <= 0.015 then
+				break
+			end
+		end
+	end
+	return position
+end
+
+function ControlAlly.Targeting.bestAoePosition(context, ability, rule, radius, castRange)
+	local target = context.target
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local primary = ControlAlly.Targeting.predictPosition(target, ability, rule)
+	if not origin or not primary then
+		return nil, 0
+	end
+
+	local candidates = { primary }
+	local nearby = {}
+	for _, enemy in ipairs(ControlAlly.Runtime.enemies) do
+		local predicted = ControlAlly.Targeting.predictPosition(enemy, ability, rule)
+		if predicted and ControlAlly.Utils.distance2D(predicted, primary) <= radius * 2.2 then
+			nearby[#nearby + 1] = predicted
+			candidates[#candidates + 1] = predicted
+		end
+	end
+	if #nearby >= 2 then
+		local x, y, z = 0, 0, 0
+		for _, position in ipairs(nearby) do
+			x = x + position.x
+			y = y + position.y
+			z = z + (position.z or 0)
+		end
+		candidates[#candidates + 1] = Vector(x / #nearby, y / #nearby, z / #nearby)
+	end
+
+	local bestPosition
+	local bestHits = -1
+	local bestScore = -math.huge
+	for _, candidate in ipairs(candidates) do
+		local distance = ControlAlly.Utils.distance2D(origin, candidate)
+		if rule.global or distance <= castRange + radius then
+			local castPosition = candidate
+			if not rule.global and distance > castRange then
+				castPosition = ControlAlly.Utils.positionToward(origin, candidate, castRange)
+			end
+			local allyHits = 0
+			if rule.avoidAllies then
+				for _, hero in ipairs(ControlAlly.Utils.call(Heroes.GetAll) or {}) do
+					if
+						ControlAlly.Utils.isValidHero(hero, true)
+						and ControlAlly.Utils.call(Entity.IsSameTeam, hero, context.unit) == true
+						and (hero ~= context.unit or not rule.ignoreCaster)
+						and ControlAlly.Utils.distance2D(
+								castPosition,
+								ControlAlly.Utils.call(Entity.GetAbsOrigin, hero)
+							)
+							<= radius
+					then
+						allyHits = allyHits + 1
+					end
+				end
+			end
+			if not rule.avoidAllies or allyHits <= (rule.maxAlliesHit or 0) then
+				local hits = 0
+				local includesPrimary = false
+				for _, enemy in ipairs(ControlAlly.Runtime.enemies) do
+					local predicted = ControlAlly.Targeting.predictPosition(enemy, ability, rule)
+					if predicted and ControlAlly.Utils.distance2D(castPosition, predicted) <= radius then
+						hits = hits + 1
+						if enemy == target then
+							includesPrimary = true
+						end
+					end
+				end
+				local score = hits * 100 + (includesPrimary and 75 or 0) - allyHits * 250
+				if
+					(not rule.requirePrimary or includesPrimary)
+					and (hits > bestHits or (hits == bestHits and score > bestScore))
+				then
+					bestPosition = castPosition
+					bestHits = hits
+					bestScore = score
+				end
+			end
+		end
+	end
+	return bestPosition, math.max(0, bestHits)
+end
+
+function ControlAlly.Targeting.hardDisableRemaining(target)
+	local modifierStates = Enum.ModifierState
+	if not target or not modifierStates or not NPC.GetStatesDuration then
+		return 0
+	end
+	local requested = {}
+	for _, stateName in ipairs({
+		"MODIFIER_STATE_STUNNED",
+		"MODIFIER_STATE_HEXED",
+		"MODIFIER_STATE_NIGHTMARED",
+		"MODIFIER_STATE_FROZEN",
+		"MODIFIER_STATE_ROOTED",
+	}) do
+		local state = modifierStates[stateName]
+		if state ~= nil then
+			requested[state] = true
+		end
+	end
+	local durations = ControlAlly.Utils.call(NPC.GetStatesDuration, target, requested, true)
+	local remaining = 0
+	if type(durations) == "table" then
+		for _, duration in pairs(durations) do
+			if type(duration) == "number" then
+				remaining = math.max(remaining, duration)
+			end
+		end
+	end
+	return remaining
+end
+
+function ControlAlly.Orders.nextIdentifier(controller, tag)
+	ControlAlly.Runtime.orderSequence = ControlAlly.Runtime.orderSequence + 1
+	return string.format(
+		"control_ally:%d:%d:%d:%s",
+		ControlAlly.Runtime.sessionGeneration or 0,
+		ControlAlly.Utils.entityIndex(controller.unit) or -1,
+		ControlAlly.Runtime.orderSequence,
+		tag or "order"
+	)
+end
+
+function ControlAlly.Orders.canOrder(controller)
+	return controller ~= nil
+		and ControlAlly.Runtime.localPlayer ~= nil
+		and ControlAlly.Runtime.localPlayerId ~= nil
+		and ControlAlly.Utils.isValidControllerUnit(controller.unit, true)
+		and ControlAlly.Utils.call(Entity.IsDormant, controller.unit) ~= true
+		and not ControlAlly.Utils.isCommandRestricted(controller.unit)
+		and ControlAlly.Roster.isControllable(controller.unit, ControlAlly.Runtime.localPlayerId)
+end
+
+function ControlAlly.Orders.issue(controller, orderType, target, position, ability, tag, executeFast, orderGap)
+	local now = ControlAlly.Utils.gameTime()
+	if
+		ControlAlly.Runtime.orderBudget <= 0
+		or now < (controller.nextOrderAt or -math.huge)
+		or not ControlAlly.Orders.canOrder(controller)
+	then
+		return false
+	end
+	position = position or ControlAlly.Utils.call(Entity.GetAbsOrigin, controller.unit) or Vector(0, 0, 0)
+	local identifier = ControlAlly.Orders.nextIdentifier(controller, tag)
+	local ok = ControlAlly.Utils.try(
+		Player.PrepareUnitOrders,
+		ControlAlly.Runtime.localPlayer,
+		orderType,
+		target,
+		position,
+		ability,
+		Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_PASSED_UNIT_ONLY,
+		controller.unit,
+		false,
+		false,
+		false,
+		executeFast == true,
+		identifier,
+		true
+	)
+	if not ok then
+		return false
+	end
+	controller.nextOrderAt = now + (orderGap or ControlAlly.Constants.ORDER_GAP)
+	ControlAlly.Runtime.orderBudget = ControlAlly.Runtime.orderBudget - 1
+	return true
+end
+
+function ControlAlly.Orders.stop(controller)
+	local now = ControlAlly.Utils.gameTime()
+	if
+		not controller
+		or ControlAlly.Runtime.orderBudget <= 0
+		or not ControlAlly.Orders.canOrder(controller)
+		or ControlAlly.Utils.isMotionLocked(controller, now)
+		or ControlAlly.Utils.protectedActivity(controller.unit, controller.activeAbility) ~= nil
+	then
+		return false
+	end
+	local position = ControlAlly.Utils.call(Entity.GetAbsOrigin, controller.unit) or Vector(0, 0, 0)
+	local ok = ControlAlly.Utils.try(
+		Player.PrepareUnitOrders,
+		ControlAlly.Runtime.localPlayer,
+		Enum.UnitOrder.DOTA_UNIT_ORDER_STOP,
+		nil,
+		position,
+		nil,
+		Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_PASSED_UNIT_ONLY,
+		controller.unit,
+		false,
+		false,
+		false,
+		false,
+		ControlAlly.Orders.nextIdentifier(controller, "stop"),
+		true
+	)
+	if ok then
+		controller.nextOrderAt = now + ControlAlly.Constants.ORDER_GAP
+		controller.stopRequested = false
+		ControlAlly.Runtime.orderBudget = ControlAlly.Runtime.orderBudget - 1
+	end
+	return ok
+end
+
+function ControlAlly.Orders.issueVectorCast(
+	controller,
+	ability,
+	startPosition,
+	endPosition,
+	tag,
+	finalOrderType,
+	target,
+	orderGap
+)
+	local now = ControlAlly.Utils.gameTime()
+	if
+		ControlAlly.Runtime.orderBudget < 2
+		or now < (controller.nextOrderAt or -math.huge)
+		or not ControlAlly.Orders.canOrder(controller)
+	then
+		return false
+	end
+	local player = ControlAlly.Runtime.localPlayer
+	local issuer = Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_PASSED_UNIT_ONLY
+	local vectorOk = ControlAlly.Utils.try(
+		Player.PrepareUnitOrders,
+		player,
+		Enum.UnitOrder.DOTA_UNIT_ORDER_VECTOR_TARGET_POSITION,
+		target,
+		endPosition,
+		ability,
+		issuer,
+		controller.unit,
+		false,
+		true,
+		false,
+		true,
+		ControlAlly.Orders.nextIdentifier(controller, tag .. "_vector"),
+		true
+	)
+	if not vectorOk then
+		return false
+	end
+	ControlAlly.Runtime.orderBudget = ControlAlly.Runtime.orderBudget - 1
+	local castOk = ControlAlly.Utils.try(
+		Player.PrepareUnitOrders,
+		player,
+		finalOrderType or Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_POSITION,
+		target,
+		startPosition,
+		ability,
+		issuer,
+		controller.unit,
+		false,
+		true,
+		false,
+		true,
+		ControlAlly.Orders.nextIdentifier(controller, tag .. "_cast"),
+		true
+	)
+	if not castOk then
+		controller.nextOrderAt = now + (orderGap or ControlAlly.Constants.ORDER_GAP)
+		return false
+	end
+	controller.nextOrderAt = now + (orderGap or ControlAlly.Constants.ORDER_GAP)
+	ControlAlly.Runtime.orderBudget = ControlAlly.Runtime.orderBudget - 1
+	return true
+end
+
+function ControlAlly.Orders.cast(controller, action, now)
+	if
+		ControlAlly.Utils.protectedActivity(controller.unit, controller.activeAbility) ~= nil
+		and action.allowDuringProtected ~= true
+	then
+		return false
+	end
+	local orderType
+	local target
+	local position
+	if action.policy == "enemy" or action.policy == "self" or action.policy == "ally" then
+		orderType = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_TARGET
+		target = action.target
+	elseif
+		action.policy == "point"
+		or action.policy == "allyPoint"
+		or action.policy == "selfPosition"
+		or action.policy == "gapclose"
+	then
+		orderType = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_POSITION
+		position = action.position
+	elseif action.policy == "noTarget" then
+		orderType = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_NO_TARGET
+	elseif action.policy == "vector" then
+		position = action.position
+	elseif action.policy == "vectorTarget" then
+		target = action.target
+		position = action.position
+	elseif action.policy == "tree" then
+		orderType = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_TARGET_TREE
+		target = action.target
+	elseif action.policy == "toggle" then
+		orderType = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_TOGGLE
+	elseif action.policy == "toggleAlt" then
+		orderType = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_TOGGLE_ALT
+	else
+		return false
+	end
+
+	local dedupeKey = action.dedupeKey or action.id
+	local dedupeInterval = action.allowRapid and 0.035 or ControlAlly.Constants.CAST_DEDUP_INTERVAL
+	if now - (controller.lastIssued[dedupeKey] or -math.huge) < dedupeInterval then
+		return false
+	end
+	local cooldownBefore = ControlAlly.Utils.cooldownRemaining(action.ability)
+	local chargesBefore = ControlAlly.Utils.call(Ability.GetCurrentCharges, action.ability)
+	local secondsBefore = ControlAlly.Utils.call(Ability.SecondsSinceLastUse, action.ability)
+	local castStartBefore = ControlAlly.Utils.call(Ability.GetCastStartTime, action.ability)
+	local hiddenBefore = ControlAlly.Utils.call(Ability.IsHidden, action.ability)
+	local toggleBefore = ControlAlly.Utils.call(Ability.GetToggleState, action.ability)
+	local altBefore = Ability.GetAltCastState and ControlAlly.Utils.call(Ability.GetAltCastState, action.ability)
+	local behavior = ControlAlly.Utils.call(Ability.GetBehavior, action.ability) or 0
+	local channelled = ControlAlly.Utils.hasFlag(behavior, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_CHANNELLED)
+	local channelTime = 0
+	if channelled then
+		channelTime = ControlAlly.Utils.specialValue(
+			action.ability,
+			{ "AbilityChannelTime", "channel_time", "channel_duration" },
+			0
+		)
+	end
+	local refreshCooldownsBefore
+	if action.isRearm then
+		channelTime = ControlAlly.TinkerAI.rearmChannelTime(action.ability)
+		refreshCooldownsBefore = {}
+		for _, entry in ipairs(ControlAlly.AbilityAI.catalog(controller, now).abilities) do
+			if ControlAlly.Profiles.RefreshableTinkerActions[entry.id] then
+				refreshCooldownsBefore[entry.id] = ControlAlly.Utils.cooldownRemaining(entry.ability)
+			end
+		end
+	elseif action.isRefresher then
+		refreshCooldownsBefore = {}
+		for id in pairs(controller.usedAbilitiesSinceRefresh) do
+			local refreshed = ControlAlly.AbilityAI.findAbility(controller, id, now)
+			refreshCooldownsBefore[id] = ControlAlly.Utils.cooldownRemaining(refreshed)
+		end
+	end
+	local issued
+	if action.policy == "vector" or action.policy == "vectorTarget" then
+		issued = ControlAlly.Orders.issueVectorCast(
+			controller,
+			action.ability,
+			action.position,
+			action.vectorEnd,
+			"cast_" .. tostring(action.id),
+			action.policy == "vectorTarget" and Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_TARGET
+				or Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_POSITION,
+			action.target,
+			action.orderGap
+		)
+	else
+		issued = ControlAlly.Orders.issue(
+			controller,
+			orderType,
+			target,
+			position,
+			action.ability,
+			"cast_" .. tostring(action.id),
+			action.executeFast == true,
+			action.orderGap
+		)
+	end
+	if not issued then
+		return false
+	end
+
+	controller.lastIssued[dedupeKey] = now
+	controller.activeAbility = action.ability
+	local castPoint = ControlAlly.Utils.call(Ability.GetCastPoint, action.ability) or 0
+	controller.busyUntil = (action.internal or action.fastCombo) and (now + math.max(0.008, castPoint + 0.008))
+		or (now + math.max(0.08, castPoint + 0.14))
+	if action.attackModifier then
+		controller.busyUntil = math.max(
+			controller.busyUntil,
+			now + (ControlAlly.Utils.call(NPC.GetAttackAnimPoint, controller.unit) or 0) + 0.12
+		)
+	end
+	controller.pendingCast = {
+		ability = action.ability,
+		id = action.id,
+		issuedAt = now,
+		sessionGeneration = ControlAlly.Runtime.sessionGeneration,
+		dedupeKey = dedupeKey,
+		cooldownBefore = cooldownBefore,
+		chargesBefore = chargesBefore,
+		secondsBefore = secondsBefore,
+		castStartBefore = castStartBefore,
+		hiddenBefore = hiddenBefore,
+		channelled = channelled,
+		channelTime = channelTime,
+		started = false,
+		wasChanneling = false,
+		refreshCooldownsBefore = refreshCooldownsBefore,
+		refreshable = ControlAlly.Profiles.RefreshableTinkerActions[action.id] == true,
+		isRearm = action.isRearm == true,
+		internal = action.internal == true,
+		invokerStage = action.invokerStage,
+		invokerSpellId = action.invokerSpellId,
+		invokerCountTracking = action.invokerCountTracking,
+		orbSignatureBefore = action.orbSignatureBefore,
+		source = action.source,
+		isRefresher = action.isRefresher == true,
+		isMeepoNet = action.isMeepoNet == true,
+		meepoTargetIndex = action.meepoTargetIndex,
+		meepoImpactAt = action.meepoImpactAt,
+		meepoRootDuration = action.meepoRootDuration,
+		invokerComboSpell = action.invokerComboSpell,
+		invokerComboSetup = action.invokerComboSetup == true,
+		castTarget = action.reservationTarget or action.target,
+		castPosition = action.position,
+		supportFamily = action.supportFamily,
+		positionReservationFamily = action.positionReservationFamily,
+		disable = action.disable == true,
+		breaksLinkens = action.breaksLinkens == true,
+		attackModifier = action.attackModifier == true,
+		treadsBefore = action.treadsBefore,
+		impactPosition = action.impactPosition,
+		groupPoof = action.groupPoof == true,
+		alchemistStage = action.alchemistStage,
+		toggleBefore = toggleBefore,
+		altBefore = altBefore,
+		desiredToggle = action.desiredToggle,
+		desiredAlt = action.desiredAlt,
+		specialStage = action.specialStage,
+		specialTravelTime = action.specialTravelTime,
+		earthFollowup = action.earthFollowup,
+		techiesMine = action.techiesMine == true,
+		techiesMineIndex = action.techiesMineIndex,
+		techiesMineTargetIndex = action.techiesMineTargetIndex,
+		committedMotion = action.committedMotion == true or (action.rule and action.rule.committedMotion == true),
+	}
+	if action.committedMotion or (action.rule and action.rule.committedMotion) then
+		local motionRule = action.rule or {}
+		local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, controller.unit)
+		local destination = action.vectorEnd
+			or action.position
+			or (action.target and ControlAlly.Utils.call(Entity.GetAbsOrigin, action.target))
+		local distance = ControlAlly.Utils.distance2D(origin, destination)
+		local speed = ControlAlly.Utils.ruleValue(
+			action.ability,
+			motionRule,
+			"motionSpeed",
+			"projectileSpeedSpecial",
+			0
+		) or 0
+		if speed <= 0 then
+			speed = ControlAlly.Utils.specialValue(action.ability, {
+				"speed",
+				"movement_speed",
+				"charge_speed",
+				"ball_lightning_move_speed",
+				"projectile_speed",
+			}, 0)
+		end
+		if speed <= 0 then
+			speed = ControlAlly.Utils.call(NPC.GetMoveSpeed, controller.unit) or 0
+		end
+		local duration = ControlAlly.Utils.ruleValue(action.ability, motionRule, "motionDuration", "durationSpecial", 0)
+			or 0
+		if duration <= 0 then
+			duration = ControlAlly.Utils.specialValue(action.ability, {
+				"total_duration",
+				"movement_duration",
+				"charge_duration",
+				"duration",
+			}, 0)
+		end
+		local travelTime = destination and speed > 0 and distance < math.huge and distance / speed or 0
+		local extraDuration = ControlAlly.Utils.ruleValue(
+			action.ability,
+			motionRule,
+			"motionExtraDuration",
+			"motionExtraDurationSpecial",
+			0
+		) or 0
+		local motionTime = (duration > 0 and duration or travelTime) + math.max(0, extraDuration)
+		motionTime = math.min(motionTime, ControlAlly.Constants.MOTION_LOCK_MAX)
+		controller.motionLockUntil = now + math.max(motionTime, castPoint + 0.20)
+		controller.motionLockStartedAt = now
+		controller.motionModifiers = motionRule.motionModifiers
+		controller.motionTarget = action.reservationTarget or action.target
+	end
+	if action.internal or action.fastCombo then
+		ControlAlly.Runtime.invokerFastUntil = now + math.max(0.35, castPoint + 0.35)
+		controller.nextThinkAt =
+			math.min(controller.nextThinkAt or math.huge, now + ControlAlly.Constants.INVOKER_INTERNAL_ORDER_GAP)
+	end
+	local reservationTarget = action.reservationTarget or action.target
+	if action.disable and reservationTarget then
+		local targetIndex = ControlAlly.Utils.entityIndex(reservationTarget)
+		if targetIndex then
+			ControlAlly.Runtime.disableReservations[targetIndex] = now + (action.reservationDuration or 0.40)
+		end
+	end
+	if action.breaksLinkens and reservationTarget then
+		local targetIndex = ControlAlly.Utils.entityIndex(reservationTarget)
+		if targetIndex then
+			ControlAlly.Runtime.linkensReservations[targetIndex] = now + 0.45
+		end
+	end
+	if action.effectReservationKey then
+		ControlAlly.Runtime.effectReservations[action.effectReservationKey] = now
+			+ math.max(action.reservationDuration or 0, castPoint + 0.30, 0.45)
+	end
+	if action.supportFamily then
+		ControlAlly.SupportAI.reserve(action, now)
+	end
+	if action.isMeepoNet and action.meepoTargetIndex then
+		ControlAlly.Runtime.meepoNetChains[action.meepoTargetIndex] = {
+			target = action.reservationTarget,
+			casterIndex = ControlAlly.Utils.entityIndex(controller.unit),
+			impactAt = action.meepoImpactAt,
+			inFlightUntil = (action.meepoImpactAt or now) + ControlAlly.Constants.MEEPO_NET_HIT_GRACE,
+		}
+	end
+	if action.groupPoof then
+		local poofTime = ControlAlly.Utils.call(Ability.GetCastPoint, action.ability) or 0
+		for _, other in ipairs(ControlAlly.Runtime.controllers) do
+			if other.playerId == controller.playerId and other.heroName == "npc_dota_hero_meepo" then
+				other.busyUntil = math.max(other.busyUntil, now + poofTime + 0.20)
+			end
+		end
+	end
+	if action.positionReservationFamily and action.position then
+		local reservations = ControlAlly.Runtime.positionReservations[action.positionReservationFamily] or {}
+		reservations[#reservations + 1] = {
+			position = action.position,
+			expiresAt = now + math.max(0.5, action.positionReservationDuration or 0.5),
+		}
+		ControlAlly.Runtime.positionReservations[action.positionReservationFamily] = reservations
+	end
+	ControlAlly.Utils.debug(
+		"%s%s cast %s",
+		ControlAlly.Utils.heroDisplayName(controller.heroName),
+		controller.isClone and " clone" or "",
+		action.id
+	)
+	return true
+end
+
+function ControlAlly.Orders.attack(controller, target, now, forceInterleave)
+	if not target or not ControlAlly.Utils.canAttack(controller.unit, target) then
+		return false
+	end
+	local targetIndex = ControlAlly.Utils.entityIndex(target)
+	local attackPoint = ControlAlly.Utils.call(NPC.GetAttackAnimPoint, controller.unit) or 0.25
+	local unitPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, controller.unit)
+	local targetPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, target)
+	local distance = ControlAlly.Utils.distance2D(unitPosition, targetPosition)
+	local attackRange = ControlAlly.Utils.call(NPC.GetAttackRange, controller.unit) or 150
+	local moveSpeed = math.max(ControlAlly.Utils.call(NPC.GetMoveSpeed, controller.unit) or 300, 1)
+	local approachTime = math.max(0, distance - attackRange - 40) / moveSpeed
+	local inAttackRange = distance <= attackRange + 85
+	if forceInterleave and controller.interleaveTarget ~= target then
+		controller.interleaveTarget = target
+		controller.interleaveDeadline = now + ControlAlly.Utils.clamp(approachTime + attackPoint + 0.75, 0.80, 3.50)
+	end
+	if
+		controller.lastAttackTarget == targetIndex
+		and ControlAlly.Utils.call(NPC.IsAttacking, controller.unit) == true
+		and inAttackRange
+	then
+		if forceInterleave then
+			controller.busyUntil =
+				math.max(controller.busyUntil, now + ControlAlly.Utils.clamp(attackPoint + 0.10, 0.20, 0.78))
+			controller.interleaveTarget = nil
+			controller.interleaveDeadline = -math.huge
+		end
+		controller.castsSinceAttack = 0
+		return true
+	end
+	if now - controller.lastAttackAt < ControlAlly.Constants.ATTACK_RESEND_INTERVAL then
+		return forceInterleave and controller.interleaveTarget ~= nil
+	end
+	if
+		not ControlAlly.Orders.issue(
+			controller,
+			Enum.UnitOrder.DOTA_UNIT_ORDER_ATTACK_TARGET,
+			target,
+			nil,
+			nil,
+			forceInterleave and "attack_interleave" or "attack",
+			false
+		)
+	then
+		return forceInterleave and controller.interleaveTarget ~= nil
+	end
+	controller.lastAttackAt = now
+	controller.lastAttackTarget = targetIndex
+	if forceInterleave then
+		controller.busyUntil = now + ControlAlly.Utils.clamp(approachTime + attackPoint + 0.10, 0.20, 1.60)
+	else
+		controller.castsSinceAttack = 0
+	end
+	return true
+end
+
+function ControlAlly.Orders.move(controller, position, now)
+	if not position or now - controller.lastMoveAt < ControlAlly.Constants.MOVE_RESEND_INTERVAL then
+		return false
+	end
+	local states = Enum.ModifierState
+	if states and ControlAlly.Utils.hasState(controller.unit, states.MODIFIER_STATE_ROOTED) then
+		return false
+	end
+	if controller.lastMovePosition and ControlAlly.Utils.distance2D(controller.lastMovePosition, position) < 80 then
+		local current = ControlAlly.Utils.call(Entity.GetAbsOrigin, controller.unit)
+		if
+			ControlAlly.Utils.call(NPC.IsRunning, controller.unit) == true
+			or ControlAlly.Utils.distance2D(current, position) < 100
+		then
+			return false
+		end
+	end
+	if
+		not ControlAlly.Orders.issue(
+			controller,
+			Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_POSITION,
+			nil,
+			position,
+			nil,
+			"follow_cursor",
+			false
+		)
+	then
+		return false
+	end
+	controller.lastMoveAt = now
+	controller.lastMovePosition = position
+	return true
+end
+
+function ControlAlly.Orders.face(controller, direction, now)
+	if not direction or now - (controller.lastFaceAt or -math.huge) < ControlAlly.Constants.FACE_RESEND_INTERVAL then
+		return false
+	end
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, controller.unit)
+	if not origin then
+		return false
+	end
+	local point = Vector(origin.x + direction.x * 100, origin.y + direction.y * 100, origin.z or 0)
+	if
+		not ControlAlly.Orders.issue(
+			controller,
+			Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_DIRECTION,
+			nil,
+			point,
+			nil,
+			"face_ability",
+			true
+		)
+	then
+		return false
+	end
+	controller.lastFaceAt = now
+	return true
+end
+
+function ControlAlly.AbilityAI.collectAbilities(unit)
+	local abilities = {}
+	local seen = {}
+	for slot = 0, 23 do
+		local ability = ControlAlly.Utils.call(NPC.GetAbilityByIndex, unit, slot)
+		local id = ability and ControlAlly.Utils.abilityName(ability)
+		if id and id:sub(1, 5) ~= "item_" and not seen[id] then
+			seen[id] = true
+			abilities[#abilities + 1] = { ability = ability, id = id, slot = slot }
+		end
+	end
+	return abilities
+end
+
+function ControlAlly.AbilityAI.collectItems(unit)
+	local items = {}
+	local seen = {}
+	for _, slot in ipairs({ 0, 1, 2, 3, 4, 5, 16 }) do
+		local item = ControlAlly.Utils.call(NPC.GetItemByIndex, unit, slot)
+		local id = item and ControlAlly.Utils.abilityName(item)
+		if id and id:sub(1, 5) == "item_" and not seen[id] then
+			seen[id] = true
+			items[#items + 1] = { ability = item, id = id, slot = slot }
+		end
+	end
+	return items
+end
+
+function ControlAlly.AbilityAI.collectMenuIds(unit, abilityIds, itemIds, profileName)
+	local heroName = profileName or ControlAlly.Utils.unitName(unit)
+	for _, entry in ipairs(ControlAlly.AbilityAI.collectAbilities(unit)) do
+		local ability = entry.ability
+		local id = entry.id
+		local explicitRule = ControlAlly.Profiles.getAbilityRule(heroName, id)
+		local rule = explicitRule or ControlAlly.AbilityAI.genericRule(ability, id)
+		local hidden = ControlAlly.Utils.call(Ability.IsHidden, ability) == true
+		local passive = ControlAlly.Utils.call(Ability.IsPassive, ability) == true
+		local attributes = ControlAlly.Utils.call(Ability.IsAttributes, ability) == true
+		if
+			(not ControlAlly.Profiles.HiddenAbilities[id] or explicitRule ~= nil)
+			and rule ~= nil
+			and rule.policy ~= "disabled"
+			and not passive
+			and not attributes
+			and not id:find("special_bonus", 1, true)
+			and (not hidden or (explicitRule and rule.menuVisible == true))
+		then
+			abilityIds[ControlAlly.Profiles.normalizedAbilityId(id)] = true
+		end
+	end
+	if heroName == "npc_dota_hero_invoker" then
+		for id in pairs(ControlAlly.Profiles.InvokerSpells) do
+			abilityIds[id] = true
+		end
+	end
+	for _, entry in ipairs(ControlAlly.AbilityAI.collectItems(unit)) do
+		if
+			ControlAlly.Profiles.getItemRule(entry.id)
+			and ControlAlly.Utils.call(Ability.IsHidden, entry.ability) ~= true
+		then
+			itemIds[entry.id] = true
+		end
+	end
+end
+
+function ControlAlly.AbilityAI.catalog(controller, now)
+	if controller.catalog and now < controller.catalogRefreshAt then
+		return controller.catalog
+	end
+	local abilities = ControlAlly.AbilityAI.collectAbilities(controller.unit)
+	local items = ControlAlly.AbilityAI.collectItems(controller.unit)
+	local abilitiesById = {}
+	for _, entry in ipairs(abilities) do
+		abilitiesById[entry.id] = entry.ability
+	end
+	controller.catalog = {
+		abilities = abilities,
+		items = items,
+		abilitiesById = abilitiesById,
+	}
+	for _, entry in ipairs(abilities) do
+		entry.rule = ControlAlly.Profiles.getAbilityRule(controller.profileName or controller.heroName, entry.id)
+			or ControlAlly.AbilityAI.genericRule(entry.ability, entry.id)
+	end
+	controller.catalogRefreshAt = now + 0.45
+	return controller.catalog
+end
+
+function ControlAlly.AbilityAI.findAbility(controller, abilityId, now)
+	local catalog = ControlAlly.AbilityAI.catalog(controller, now)
+	return catalog.abilitiesById[abilityId] or ControlAlly.Utils.call(NPC.GetAbility, controller.unit, abilityId)
+end
+
+function ControlAlly.AbilityAI.isReady(controller, ability, id, allowHidden, isItem, ignoreManaFloor, allowUnlearned)
+	if not ability then
+		return false
+	end
+	if not isItem then
+		local level = ControlAlly.Utils.call(Ability.GetLevel, ability) or 0
+		if (level <= 0 and not allowUnlearned) or ControlAlly.Utils.call(Ability.IsAttributes, ability) == true then
+			return false
+		end
+		if
+			not ignoreManaFloor
+			and ControlAlly.UI.MinMana
+			and ControlAlly.Utils.manaPct(controller.unit) < ControlAlly.UI.MinMana:Get()
+		then
+			return false
+		end
+		if ControlAlly.Utils.call(NPC.IsSilenced, controller.unit) == true then
+			local behavior = ControlAlly.Utils.call(Ability.GetBehavior, ability) or 0
+			local ignoreSilence = Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_IGNORE_SILENCE
+			if not ControlAlly.Utils.hasFlag(behavior, ignoreSilence) then
+				return false
+			end
+		end
+	elseif Item and Item.IsItemEnabled and ControlAlly.Utils.call(Item.IsItemEnabled, ability) == false then
+		return false
+	end
+	if isItem and Enum.ModifierState then
+		local muted = Enum.ModifierState.MODIFIER_STATE_MUTED
+		if muted and ControlAlly.Utils.hasState(controller.unit, muted) then
+			local behavior = ControlAlly.Utils.call(Ability.GetBehavior, ability) or 0
+			local ignoreMuted = Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_IGNORE_MUTED
+			if not ControlAlly.Utils.hasFlag(behavior, ignoreMuted) then
+				return false
+			end
+		end
+	end
+	if not allowHidden and ControlAlly.Utils.call(Ability.IsHidden, ability) == true then
+		return false
+	end
+	if ControlAlly.Utils.call(Ability.IsPassive, ability) == true then
+		return false
+	end
+	local activated = ControlAlly.Utils.call(Ability.IsActivated, ability)
+	if activated == false then
+		return false
+	end
+	if ControlAlly.Utils.cooldownRemaining(ability) > 0.03 then
+		return false
+	end
+	local isReady = ControlAlly.Utils.call(Ability.IsReady, ability)
+	if isReady == false then
+		return false
+	end
+	local castResult = ControlAlly.Utils.call(Ability.CanBeExecuted, ability)
+	local readyResult = Enum.AbilityCastResult and Enum.AbilityCastResult.READY or -1
+	if castResult ~= nil and castResult ~= readyResult and castResult ~= -1 then
+		return false
+	end
+	local mana = ControlAlly.Utils.call(NPC.GetMana, controller.unit) or 0
+	return ControlAlly.Utils.call(Ability.IsCastable, ability, mana) == true
+end
+
+function ControlAlly.AbilityAI.isCombatName(id)
+	local patterns = {
+		"stun",
+		"strike",
+		"blast",
+		"bolt",
+		"nuke",
+		"impale",
+		"fissure",
+		"ravage",
+		"roar",
+		"hex",
+		"shackle",
+		"silence",
+		"root",
+		"nova",
+		"wave",
+		"meteor",
+		"spear",
+		"hook",
+		"arena",
+		"chronosphere",
+		"black_hole",
+		"burrowstrike",
+		"dismember",
+		"duel",
+		"finger",
+		"laguna",
+	}
+	for _, pattern in ipairs(patterns) do
+		if id:find(pattern, 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+function ControlAlly.AbilityAI.isDisable(id, rule)
+	if rule and rule.disable ~= nil then
+		return rule.disable == true
+	end
+	local patterns = {
+		"stun",
+		"hex",
+		"shackle",
+		"impale",
+		"fissure",
+		"ravage",
+		"roar",
+		"chronosphere",
+		"black_hole",
+		"burrowstrike",
+		"dismember",
+		"duel",
+		"cold_snap",
+		"tornado",
+		"deafening_blast",
+		"hookshot",
+	}
+	for _, pattern in ipairs(patterns) do
+		if id:find(pattern, 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+function ControlAlly.AbilityAI.genericRule(ability, id)
+	local behavior = ControlAlly.Utils.call(Ability.GetBehavior, ability) or 0
+	local flags = Enum.AbilityBehavior
+	if
+		ControlAlly.Utils.hasFlag(behavior, flags.DOTA_ABILITY_BEHAVIOR_PASSIVE)
+		or ControlAlly.Utils.hasFlag(behavior, flags.DOTA_ABILITY_BEHAVIOR_TOGGLE)
+		or ControlAlly.Utils.hasFlag(behavior, flags.DOTA_ABILITY_BEHAVIOR_VECTOR_TARGETING)
+		or ControlAlly.Utils.hasFlag(behavior, flags.DOTA_ABILITY_BEHAVIOR_FREE_DRAW_TARGETING)
+		or ControlAlly.Utils.hasFlag(behavior, flags.DOTA_ABILITY_BEHAVIOR_ROOT_DISABLES)
+	then
+		return nil
+	end
+
+	local targetTeam = ControlAlly.Utils.call(Ability.GetTargetTeam, ability) or 0
+	local targetTeams = Enum.TargetTeam
+	local targetType = ControlAlly.Utils.call(Ability.GetTargetType, ability) or 0
+	local damage = ControlAlly.Utils.call(Ability.GetDamage, ability) or 0
+	if damage <= 0 then
+		damage = ControlAlly.Utils.specialValue(ability, {
+			"damage",
+			"base_damage",
+			"main_damage",
+			"poof_damage",
+			"quill_base_damage",
+			"damage_per_second",
+			"damage_percent",
+			"drop_damage",
+			"fling_damage",
+			"max_damage",
+		}, 0)
+	end
+	local isUltimate = ControlAlly.Utils.call(Ability.IsUltimate, ability) == true
+	local combatLike = damage > 0 or ControlAlly.AbilityAI.isCombatName(id)
+	if ControlAlly.Utils.hasFlag(behavior, flags.DOTA_ABILITY_BEHAVIOR_UNIT_TARGET) then
+		if
+			(
+				ControlAlly.Utils.hasFlag(targetTeam, targetTeams.DOTA_UNIT_TARGET_TEAM_ENEMY)
+				or targetTeam == targetTeams.DOTA_UNIT_TARGET_TEAM_BOTH
+			)
+			and ControlAlly.Utils.hasFlag(targetType, Enum.TargetType.DOTA_UNIT_TARGET_HERO)
+			and combatLike
+		then
+			return {
+				policy = "enemy",
+				priority = isUltimate and 104
+					or (ControlAlly.Utils.hasFlag(behavior, flags.DOTA_ABILITY_BEHAVIOR_ATTACK) and 70 or 64),
+				attackModifier = ControlAlly.Utils.hasFlag(behavior, flags.DOTA_ABILITY_BEHAVIOR_ATTACK),
+				estimatedDamage = damage,
+			}
+		end
+		return nil
+	end
+	if isUltimate then
+		return nil
+	end
+	if ControlAlly.Utils.hasFlag(behavior, flags.DOTA_ABILITY_BEHAVIOR_POINT) and combatLike then
+		return { policy = "point", priority = 62, estimatedDamage = damage }
+	end
+	if ControlAlly.Utils.hasFlag(behavior, flags.DOTA_ABILITY_BEHAVIOR_NO_TARGET) and combatLike then
+		return { policy = "noTarget", priority = 58, estimatedDamage = damage }
+	end
+	return nil
+end
+
+function ControlAlly.AbilityAI.castRange(unit, ability, rule)
+	if rule.global then
+		return math.huge
+	end
+	local range = ControlAlly.Utils.ruleValue(ability, rule, "castRange", "castRangeSpecial", nil)
+		or ControlAlly.Utils.call(Ability.GetCastRange, ability)
+		or 0
+	if range <= 0 then
+		range = ControlAlly.Utils.specialValue(
+			ability,
+			{ "cast_range", "range", "distance", "max_distance", "travel_distance" },
+			0
+		)
+	end
+	if range <= 0 then
+		range = ControlAlly.Constants.DEFAULT_CAST_RANGE
+	end
+	return range + (rule.ignoreCastRangeBonus and 0 or (ControlAlly.Utils.call(NPC.GetCastRangeBonus, unit) or 0))
+end
+
+function ControlAlly.AbilityAI.radius(ability, rule)
+	local configured = ControlAlly.Utils.ruleValue(ability, rule, "radius", "radiusSpecial", nil)
+	if configured and configured > 0 then
+		return configured
+	end
+	return ControlAlly.Utils.specialValue(ability, {
+		"radius",
+		"aoe",
+		"area_of_effect",
+		"effect_radius",
+		"damage_radius",
+		"impact_radius",
+		"search_radius",
+		"launch_radius",
+		"drop_aoe_radius",
+		"barrier_radius",
+		"explosion_radius",
+		"width",
+	}, ControlAlly.Constants.DEFAULT_POINT_RADIUS)
+end
+
+function ControlAlly.AbilityAI.targetIsIsolated(context, ability, rule)
+	local targetPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+	local team = ControlAlly.Utils.call(Entity.GetTeamNum, context.target)
+	if not targetPosition or team == nil then
+		return false
+	end
+	local units = ControlAlly.Utils.call(
+		NPCs.InRadius,
+		targetPosition,
+		ControlAlly.Utils.ruleValue(ability, rule, "isolationRadius", "isolationRadiusSpecial", 300),
+		team,
+		Enum.TeamType.TEAM_FRIEND,
+		false,
+		true
+	) or {}
+	for _, unit in ipairs(units) do
+		if
+			unit ~= context.target
+			and ControlAlly.Utils.call(Entity.IsAlive, unit) == true
+			and (ControlAlly.Utils.call(NPC.IsHero, unit) == true or ControlAlly.Utils.call(NPC.IsCreep, unit) == true)
+		then
+			return false
+		end
+	end
+	return true
+end
+
+function ControlAlly.AbilityAI.rulePasses(context, ability, rule)
+	local unit = context.unit
+	local target = context.target
+	local distance = target
+			and ControlAlly.Utils.distance2D(
+				ControlAlly.Utils.call(Entity.GetAbsOrigin, unit),
+				ControlAlly.Utils.call(Entity.GetAbsOrigin, target)
+			)
+		or math.huge
+	if rule.requiresTarget and not target then
+		return false
+	end
+	if rule.mainOnly and context.controller.isClone then
+		return false
+	end
+	if rule.requiresNoClone and (ControlAlly.Runtime.cloneCountByPlayer[context.controller.playerId] or 0) > 0 then
+		return false
+	end
+	if
+		ControlAlly.Utils.hasAnyModifier(unit, rule.selfModifiers)
+		or (not rule.allowStacking and ControlAlly.Utils.hasAnyModifier(target, rule.targetModifiers))
+	then
+		return false
+	end
+	if rule.defensiveHealthPct and ControlAlly.Utils.healthPct(unit) > rule.defensiveHealthPct then
+		return false
+	end
+	if rule.minimumHealthPct and ControlAlly.Utils.healthPct(unit) < rule.minimumHealthPct then
+		return false
+	end
+	if rule.attackModifier then
+		local healthCostPct = ControlAlly.Utils.specialValue(ability, { "max_health_cost", "health_cost_pct" }, 0)
+		if healthCostPct > 0 and ControlAlly.Utils.healthPct(unit) <= healthCostPct + 28 then
+			return false
+		end
+	end
+	if rule.requiresRecentDamage and not ControlAlly.Utils.wasRecentlyHurt(unit, context.now) then
+		return false
+	end
+	if
+		rule.requiresCombatPressure
+		and distance > 550
+		and not ControlAlly.Utils.wasRecentlyHurt(unit, context.now)
+		and ControlAlly.Utils.call(NPC.IsAttacking, unit) ~= true
+	then
+		return false
+	end
+	if rule.requiresFacing and target then
+		local targetPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, target)
+		local faceTime = targetPosition and ControlAlly.Utils.call(NPC.GetTimeToFacePosition, unit, targetPosition)
+		if type(faceTime) == "number" and faceTime > 0.10 then
+			return false
+		end
+	end
+	if rule.requiresBadState and not ControlAlly.Utils.hasBadState(unit) then
+		return false
+	end
+	if
+		rule.requiresImmobile
+		and target
+		and ControlAlly.Targeting.hardDisableRemaining(target) <= 0
+		and not (Enum.ModifierState and ControlAlly.Utils.hasState(target, Enum.ModifierState.MODIFIER_STATE_ROOTED))
+	then
+		return false
+	end
+	local enemyRadius = ControlAlly.Utils.ruleValue(ability, rule, "enemyRadius", "enemyRadiusSpecial", nil)
+	local maxDistance = ControlAlly.Utils.ruleValue(ability, rule, "maxDistance", "maxDistanceSpecial", nil)
+	if enemyRadius and distance > enemyRadius then
+		return false
+	end
+	if maxDistance and distance > maxDistance then
+		return false
+	end
+	if rule.minDistance and distance < rule.minDistance then
+		return false
+	end
+	if rule.combatBuff and distance > 1100 then
+		return false
+	end
+	if rule.targetManaMinPct and ControlAlly.Utils.manaPct(target) < rule.targetManaMinPct then
+		return false
+	end
+	if rule.requiresIsolated and not ControlAlly.AbilityAI.targetIsIsolated(context, ability, rule) then
+		return false
+	end
+	return true
+end
+
+function ControlAlly.AbilityAI.gapclosePosition(context, ability, rule)
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local targetPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+	if not origin or not targetPosition then
+		return nil
+	end
+	local range = ControlAlly.AbilityAI.castRange(context.unit, ability, rule)
+	local distance = ControlAlly.Utils.distance2D(origin, targetPosition)
+	if distance > range + 80 or distance < (rule.minDistance or 450) then
+		return nil
+	end
+	local landingDistance = math.max(0, distance - 135)
+	return ControlAlly.Utils.positionToward(origin, targetPosition, math.min(range, landingDistance))
+end
+
+function ControlAlly.AbilityAI.unitTargetIsSafe(target, allowLinkensBreaker)
+	if not target then
+		return false
+	end
+	local states = Enum.ModifierState
+	if states then
+		for _, stateName in ipairs({
+			"MODIFIER_STATE_INVULNERABLE",
+			"MODIFIER_STATE_OUT_OF_GAME",
+			"MODIFIER_STATE_UNTARGETABLE",
+			"MODIFIER_STATE_UNTARGETABLE_ENEMY",
+		}) do
+			local state = states[stateName]
+			if state and ControlAlly.Utils.hasState(target, state) then
+				return false
+			end
+		end
+	end
+	if NPC.IsMirrorProtected and ControlAlly.Utils.call(NPC.IsMirrorProtected, target) == true then
+		return false
+	end
+	local linkensProtected = ControlAlly.Utils.call(NPC.IsLinkensProtected, target) == true
+	if Humanizer and Humanizer.IsSafeTarget then
+		local safe = ControlAlly.Utils.call(Humanizer.IsSafeTarget, target)
+		if safe == false and not (allowLinkensBreaker and linkensProtected) then
+			return false
+		end
+	end
+	return true
+end
+
+function ControlAlly.AbilityAI.bestAllyTarget(context, ability, rule)
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local enemyPosition = context.target and ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+	local range = ControlAlly.AbilityAI.castRange(context.unit, ability, rule)
+	local best
+	local bestScore = -math.huge
+	for _, ally in ipairs(ControlAlly.Runtime.allies) do
+		local position = ControlAlly.Utils.call(Entity.GetAbsOrigin, ally)
+		if origin and position and ControlAlly.Utils.distance2D(origin, position) <= range + 35 then
+			local healthPct = ControlAlly.Utils.healthPct(ally)
+			local hurt = ControlAlly.Utils.wasRecentlyHurt(ally, context.now)
+			local modifierBlocked = ControlAlly.Utils.hasAnyModifier(ally, rule.allyModifiers or rule.targetModifiers)
+			local nearEnemy = enemyPosition
+				and ControlAlly.Utils.distance2D(position, enemyPosition)
+					<= (ControlAlly.Utils.call(NPC.GetAttackRange, ally) or 150) + 450
+			local attacking = ControlAlly.Utils.call(NPC.IsAttacking, ally) == true and nearEnemy
+			local threshold = rule.allyHealthPct or 72
+			local eligible = false
+			if rule.allyMode == "save" then
+				eligible = healthPct <= threshold and (hurt or healthPct <= threshold * 0.65)
+			elseif rule.allyMode == "heal" then
+				eligible = healthPct <= threshold or nearEnemy == true
+			elseif rule.allyMode == "buff" then
+				eligible = attacking or (ally == context.unit and nearEnemy == true)
+			else
+				eligible = ally == context.unit or attacking or healthPct <= threshold
+			end
+			if eligible and not modifierBlocked then
+				local score = (100 - healthPct) * (rule.allyMode == "save" and 1.5 or 0.45)
+					+ (hurt and 18 or 0)
+					+ (attacking and 14 or 0)
+				if score > bestScore then
+					best = ally
+					bestScore = score
+				end
+			end
+		end
+	end
+	return best, bestScore
+end
+
+function ControlAlly.AbilityAI.toggleDesired(context, ability, rule, radius)
+	if rule.toggleMode == "heal" then
+		local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+		for _, ally in ipairs(ControlAlly.Runtime.allies) do
+			if
+				ControlAlly.Utils.healthPct(ally) <= (rule.allyHealthPct or 78)
+				and ControlAlly.Utils.distance2D(origin, ControlAlly.Utils.call(Entity.GetAbsOrigin, ally))
+					<= radius
+			then
+				return true
+			end
+		end
+		return false
+	end
+	if rule.minimumHealthPct and ControlAlly.Utils.healthPct(context.unit) < rule.minimumHealthPct then
+		return false
+	end
+	return context.target ~= nil
+		and ControlAlly.Utils.distance2D(
+				ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit),
+				ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+			)
+			<= radius
+end
+
+function ControlAlly.AbilityAI.wouldBeUsableIfReady(context, ability, rule)
+	if not rule or not ControlAlly.AbilityAI.rulePasses(context, ability, rule) then
+		return false
+	end
+	local policy = rule.policy
+	if
+		policy == "self"
+		or policy == "selfPosition"
+		or policy == "ally"
+		or policy == "allyPoint"
+		or policy == "toggle"
+	then
+		return true
+	end
+	if policy == "noTarget" and rule.alwaysNoTarget then
+		return true
+	end
+	if not context.target then
+		return false
+	end
+	if
+		ControlAlly.Utils.isMagicImmune(context.target)
+		and not rule.allowMagicImmune
+		and (policy == "enemy" or policy == "point")
+	then
+		return false
+	end
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local targetPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+	local distance = ControlAlly.Utils.distance2D(origin, targetPosition)
+	local range = ControlAlly.AbilityAI.castRange(context.unit, ability, rule)
+	if policy == "enemy" then
+		return distance <= range + ControlAlly.Constants.CAST_RANGE_BUFFER
+			and ControlAlly.Utils.call(NPC.IsLinkensProtected, context.target) ~= true
+			and ControlAlly.AbilityAI.unitTargetIsSafe(context.target, false)
+	end
+	if policy == "point" then
+		if rule.lineProjectile then
+			local travelDistance = ControlAlly.Utils.ruleValue(
+				ability,
+				rule,
+				"travelDistance",
+				"travelDistanceSpecial",
+				range
+			) or range
+			return distance <= travelDistance + ControlAlly.AbilityAI.radius(ability, rule)
+		end
+		return distance <= range + ControlAlly.AbilityAI.radius(ability, rule)
+	end
+	if policy == "noTarget" then
+		local radius = rule.radius
+			or math.max(ControlAlly.AbilityAI.radius(ability, rule), ControlAlly.Constants.DEFAULT_NO_TARGET_RADIUS)
+		return distance <= radius
+	end
+	if policy == "gapclose" then
+		return ControlAlly.AbilityAI.gapclosePosition(context, ability, rule) ~= nil
+	end
+	return false
+end
+
+function ControlAlly.AbilityAI.buildAction(context, ability, id, rule, source)
+	if not rule or rule.policy == "disabled" or rule.policy == "special" then
+		return nil
+	end
+	local isItem = source == "item"
+	if
+		not ControlAlly.AbilityAI.isReady(context.controller, ability, id, rule.allowHidden == true, isItem)
+		or not ControlAlly.AbilityAI.rulePasses(context, ability, rule)
+	then
+		return nil
+	end
+	if
+		rule.policy ~= "self"
+		and rule.policy ~= "selfPosition"
+		and rule.policy ~= "noTarget"
+		and rule.policy ~= "ally"
+		and rule.policy ~= "allyPoint"
+		and rule.policy ~= "toggle"
+		and not context.target
+	then
+		return nil
+	end
+	if
+		context.target
+		and ControlAlly.Utils.isMagicImmune(context.target)
+		and not rule.allowMagicImmune
+		and (rule.policy == "enemy" or rule.policy == "point")
+	then
+		return nil
+	end
+	if
+		rule.policy == "enemy"
+		and not (
+			rule.attackModifier and ControlAlly.Utils.canAttack(context.unit, context.target)
+			or (
+				not rule.attackModifier
+				and ControlAlly.AbilityAI.unitTargetIsSafe(
+					context.target,
+					source == "item" and rule.linkPriority ~= nil
+				)
+			)
+		)
+	then
+		return nil
+	end
+	local effectReservationKey
+	if context.target and rule.targetModifiers and not rule.allowStacking then
+		local targetIndex = ControlAlly.Utils.entityIndex(context.target)
+		if targetIndex then
+			effectReservationKey = tostring(targetIndex) .. ":" .. id
+			if (ControlAlly.Runtime.effectReservations[effectReservationKey] or -math.huge) > context.now then
+				return nil
+			end
+		end
+	end
+
+	local action = {
+		ability = ability,
+		id = id,
+		policy = rule.policy,
+		rule = rule,
+		source = source,
+		disable = ControlAlly.AbilityAI.isDisable(id, rule),
+		urgent = rule.urgent == true,
+		attackModifier = rule.attackModifier == true,
+		reservationTarget = context.target,
+		effectReservationKey = effectReservationKey,
+		specialStage = rule.specialStage,
+	}
+	local range = ControlAlly.AbilityAI.castRange(context.unit, ability, rule)
+	local radius = ControlAlly.AbilityAI.radius(ability, rule)
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local targetPosition = context.target and ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+	local distance = ControlAlly.Utils.distance2D(origin, targetPosition)
+	local aoeHits = 1
+
+	if rule.policy == "enemy" then
+		if distance > range + ControlAlly.Constants.CAST_RANGE_BUFFER then
+			return nil
+		end
+		action.target = context.target
+	elseif rule.policy == "self" then
+		action.target = context.unit
+	elseif rule.policy == "ally" then
+		local ally, allyScore = ControlAlly.AbilityAI.bestAllyTarget(context, ability, rule)
+		if not ally then
+			return nil
+		end
+		action.target = ally
+		action.reservationTarget = ally
+		action.scoreBonus = allyScore
+	elseif rule.policy == "allyPoint" then
+		local ally, allyScore = ControlAlly.AbilityAI.bestAllyTarget(context, ability, rule)
+		if not ally then
+			return nil
+		end
+		action.position = ControlAlly.Utils.call(Entity.GetAbsOrigin, ally)
+		action.reservationTarget = ally
+		action.scoreBonus = allyScore
+	elseif rule.policy == "selfPosition" then
+		action.position = origin
+	elseif rule.policy == "gapclose" then
+		action.position = ControlAlly.AbilityAI.gapclosePosition(context, ability, rule)
+		if not action.position then
+			return nil
+		end
+	elseif rule.policy == "point" then
+		if rule.lineProjectile then
+			local predicted = ControlAlly.Targeting.predictPosition(context.target, ability, rule)
+			local predictedDistance = ControlAlly.Utils.distance2D(origin, predicted)
+			local travelDistance = ControlAlly.Utils.ruleValue(
+				ability,
+				rule,
+				"travelDistance",
+				"travelDistanceSpecial",
+				range
+			) or range
+			if predictedDistance > travelDistance + radius then
+				return nil
+			end
+			action.position = predictedDistance > range and ControlAlly.Utils.positionToward(origin, predicted, range)
+				or predicted
+			action.impactPosition = predicted
+		else
+			action.position, aoeHits = ControlAlly.Targeting.bestAoePosition(context, ability, rule, radius, range)
+		end
+		if not action.position then
+			return nil
+		end
+	elseif rule.policy == "noTarget" then
+		local noTargetRadius = math.max(radius, ControlAlly.Constants.DEFAULT_NO_TARGET_RADIUS)
+		if not rule.alwaysNoTarget and distance > noTargetRadius then
+			return nil
+		end
+	elseif rule.policy == "toggle" then
+		local toggleRadius = math.max(radius, ControlAlly.Constants.DEFAULT_NO_TARGET_RADIUS)
+		local desired = ControlAlly.AbilityAI.toggleDesired(context, ability, rule, toggleRadius)
+		if not desired and context.controller.ownedToggles[id] ~= true then
+			return nil
+		end
+		if ControlAlly.Utils.call(Ability.GetToggleState, ability) == desired then
+			return nil
+		end
+		action.desiredToggle = desired
+		action.urgent = desired == false
+	elseif rule.policy == "vector" or rule.policy == "vectorTarget" then
+		local predicted = ControlAlly.Targeting.predictPosition(context.target, ability, rule)
+		if not predicted then
+			return nil
+		end
+		local direction = ControlAlly.Utils.normalized2D(origin, predicted)
+		if not direction then
+			return nil
+		end
+		if rule.policy == "vectorTarget" then
+			action.policy = "vectorTarget"
+			action.target = context.target
+			action.position = origin
+			action.vectorEnd = Vector(
+				predicted.x + direction.x * math.max(radius, 180),
+				predicted.y + direction.y * math.max(radius, 180),
+				predicted.z or 0
+			)
+		else
+			local start = ControlAlly.Utils.positionToward(origin, predicted, math.min(range, distance))
+			if rule.vectorPerpendicular then
+				local perpendicular = Vector(-direction.y, direction.x, 0)
+				local half = math.min(range, math.max(radius * 2, 300)) * 0.5
+				start =
+					Vector(predicted.x - perpendicular.x * half, predicted.y - perpendicular.y * half, predicted.z or 0)
+				action.vectorEnd =
+					Vector(predicted.x + perpendicular.x * half, predicted.y + perpendicular.y * half, predicted.z or 0)
+			else
+				action.vectorEnd = predicted
+			end
+			action.position = start
+		end
+	else
+		return nil
+	end
+
+	if rule.positionReservationFamily and action.position then
+		local family = rule.positionReservationFamily
+		local reservations = ControlAlly.Runtime.positionReservations[family] or {}
+		local spacing = ControlAlly.Utils.specialValue(ability, { "min_distance" }, radius * 0.55)
+		local active = {}
+		for _, reservation in ipairs(reservations) do
+			if reservation.expiresAt > context.now then
+				active[#active + 1] = reservation
+				if ControlAlly.Utils.distance2D(reservation.position, action.position) < spacing then
+					ControlAlly.Runtime.positionReservations[family] = active
+					return nil
+				end
+			end
+		end
+		ControlAlly.Runtime.positionReservations[family] = active
+		action.positionReservationFamily = family
+		action.positionReservationDuration = ControlAlly.Utils.ruleValue(
+			ability,
+			rule,
+			"duration",
+			"durationSpecial",
+			ControlAlly.Utils.specialValue(ability, { "activation_delay" }, 1) + 1
+		)
+	end
+
+	if action.disable and context.target then
+		local targetIndex = ControlAlly.Utils.entityIndex(context.target)
+		local reservedUntil = targetIndex and ControlAlly.Runtime.disableReservations[targetIndex] or -math.huge
+		if
+			not rule.allowDisabledTarget
+			and (reservedUntil > context.now or ControlAlly.Targeting.hardDisableRemaining(context.target) > 0.32)
+		then
+			return nil
+		end
+	end
+	if action.disable then
+		local travelTime = 0
+		local projectileSpeed = ControlAlly.Utils.ruleValue(
+			ability,
+			rule,
+			"projectileSpeed",
+			"projectileSpeedSpecial",
+			0
+		) or 0
+		local impactDistance = ControlAlly.Utils.distance2D(origin, action.impactPosition or targetPosition)
+		if projectileSpeed > 0 and impactDistance < math.huge then
+			travelTime = impactDistance / projectileSpeed
+		end
+		local effectDelay = ControlAlly.Utils.ruleValue(ability, rule, "lead", "delaySpecial", 0) or 0
+		local faceTime = action.position
+				and ControlAlly.Utils.call(NPC.GetTimeToFacePosition, context.unit, action.position)
+			or 0
+		faceTime = type(faceTime) == "number" and math.max(0, faceTime) or 0
+		action.reservationDuration = math.max(
+			0.40,
+			faceTime + (ControlAlly.Utils.call(Ability.GetCastPoint, ability) or 0) + effectDelay + travelTime + 0.15
+		)
+	end
+
+	local score = (rule.priority or 60) + (action.scoreBonus or 0)
+	local damage = rule.estimatedDamage or ControlAlly.Utils.call(Ability.GetDamage, ability) or 0
+	if damage <= 0 then
+		damage = ControlAlly.Utils.specialValue(ability, {
+			"damage",
+			"base_damage",
+			"main_damage",
+			"poof_damage",
+			"quill_base_damage",
+			"damage_per_second",
+			"damage_percent",
+			"drop_damage",
+			"max_damage",
+		}, 0)
+	end
+	score = score + math.min(math.max(damage, 0) / 25, 18)
+	if action.disable then
+		score = score + 18
+	end
+	if aoeHits > 1 then
+		score = score + (aoeHits - 1) * 12
+	end
+	if context.target then
+		score = score + (100 - ControlAlly.Utils.healthPct(context.target)) * 0.08
+	end
+	if
+		rule.preferDisabledTarget
+		and context.target
+		and ControlAlly.Targeting.hardDisableRemaining(context.target) > 0.15
+	then
+		score = score + 24
+	end
+	if rule.preferLowHealth and context.target then
+		score = score + (100 - ControlAlly.Utils.healthPct(context.target)) * 0.35
+	end
+
+	if
+		rule.policy == "enemy"
+		and not rule.attackModifier
+		and context.target
+		and ControlAlly.Utils.call(NPC.IsLinkensProtected, context.target) == true
+	then
+		local targetIndex = ControlAlly.Utils.entityIndex(context.target)
+		if targetIndex and (ControlAlly.Runtime.linkensReservations[targetIndex] or -math.huge) > context.now then
+			return nil
+		end
+		if source == "item" and rule.linkPriority then
+			score = 200 + rule.linkPriority
+			action.breaksLinkens = true
+		else
+			return nil
+		end
+	end
+	action.score = score
+	return action
+end
+
+function ControlAlly.AbilityAI.bestAbilityAction(context)
+	if not ControlAlly.UI.UseAbilities or ControlAlly.UI.UseAbilities:Get() ~= true then
+		return nil
+	end
+	local best
+	local catalog = ControlAlly.AbilityAI.catalog(context.controller, context.now)
+	for _, entry in ipairs(catalog.abilities) do
+		local id = entry.id
+		if
+			ControlAlly.Menu.isAbilityEnabled(id)
+			and not ControlAlly.Profiles.HiddenAbilities[id]
+			and not (context.controller.heroName == "npc_dota_hero_invoker" and ControlAlly.Profiles.InvokerSpells[id])
+		then
+			local rule = entry.rule
+			local action = ControlAlly.AbilityAI.buildAction(context, entry.ability, id, rule, "ability")
+			if action and (not best or action.score > best.score) then
+				best = action
+			end
+		end
+	end
+	return best
+end
+
+function ControlAlly.ItemAI.bestAction(context)
+	if not ControlAlly.UI.UseItems or ControlAlly.UI.UseItems:Get() ~= true then
+		return nil
+	end
+	local best
+	local catalog = ControlAlly.AbilityAI.catalog(context.controller, context.now)
+	for _, entry in ipairs(catalog.items) do
+		local rule = ControlAlly.Profiles.getItemRule(entry.id)
+		if rule and not ControlAlly.Profiles.SupportItems[entry.id] and ControlAlly.Menu.isItemEnabled(entry.id) then
+			local action = ControlAlly.AbilityAI.buildAction(context, entry.ability, entry.id, rule, "item")
+			if action and (not best or action.score > best.score) then
+				best = action
+			end
+		end
+	end
+	return best
+end
+
+function ControlAlly.ItemAI.refresherAction(context, currentAction)
+	if
+		currentAction
+		or not context.target
+		or not ControlAlly.UI.UseItems
+		or ControlAlly.UI.UseItems:Get() ~= true
+		or (context.controller.heroName == "npc_dota_hero_tinker" and ControlAlly.Menu.isAbilityEnabled("tinker_rearm"))
+	then
+		return nil
+	end
+	local refresherEntry
+	for _, entry in ipairs(ControlAlly.AbilityAI.catalog(context.controller, context.now).items) do
+		if
+			(entry.id == "item_refresher" or entry.id == "item_refresher_shard")
+			and ControlAlly.Menu.isItemEnabled(entry.id)
+			and ControlAlly.AbilityAI.isReady(context.controller, entry.ability, entry.id, false, true)
+		then
+			refresherEntry = entry
+			break
+		end
+	end
+	if not refresherEntry then
+		return nil
+	end
+	local useful = 0
+	local totalCooldown = 0
+	local followupMana = 0
+	for id in pairs(context.controller.usedAbilitiesSinceRefresh) do
+		local ability = ControlAlly.AbilityAI.findAbility(context.controller, id, context.now)
+		local remaining = ControlAlly.Utils.cooldownRemaining(ability)
+		if ability and ControlAlly.Menu.isAbilityEnabled(id) and remaining > 0.10 then
+			local rule = ControlAlly.Profiles.getAbilityRule(
+				context.controller.profileName or context.controller.heroName,
+				id
+			) or ControlAlly.Profiles.InvokerSpells[id] or ControlAlly.AbilityAI.genericRule(ability, id)
+			if rule and ControlAlly.AbilityAI.wouldBeUsableIfReady(context, ability, rule) then
+				useful = useful + 1
+				totalCooldown = totalCooldown + remaining
+				followupMana = followupMana + (ControlAlly.Utils.call(Ability.GetManaCost, ability) or 0)
+			end
+		end
+	end
+	if useful < 2 or totalCooldown < ControlAlly.Constants.REFRESHER_MIN_TOTAL_COOLDOWN then
+		return nil
+	end
+	local mana = ControlAlly.Utils.call(NPC.GetMana, context.unit) or 0
+	local cost = ControlAlly.Utils.call(Ability.GetManaCost, refresherEntry.ability) or 0
+	if mana < cost + followupMana then
+		return nil
+	end
+	return {
+		ability = refresherEntry.ability,
+		id = refresherEntry.id,
+		policy = "noTarget",
+		score = 138,
+		urgent = true,
+		source = "item",
+		isRefresher = true,
+	}
+end
+
+function ControlAlly.SupportAI.refreshAllies(now, force)
+	now = now or ControlAlly.Utils.gameTime()
+	if
+		not force
+		and now - (ControlAlly.Runtime.lastAllyScanAt or -math.huge) < ControlAlly.Constants.ALLY_SCAN_INTERVAL
+	then
+		return ControlAlly.Runtime.allies
+	end
+	ControlAlly.Runtime.lastAllyScanAt = now
+	local allies = {}
+	local localHero = ControlAlly.Runtime.localHero
+	for _, hero in ipairs(ControlAlly.Utils.call(Heroes.GetAll) or {}) do
+		local states = Enum.ModifierState
+		local invalidState = states
+			and (
+				ControlAlly.Utils.hasState(hero, states.MODIFIER_STATE_INVULNERABLE)
+				or ControlAlly.Utils.hasState(hero, states.MODIFIER_STATE_OUT_OF_GAME)
+				or ControlAlly.Utils.hasState(hero, states.MODIFIER_STATE_UNTARGETABLE)
+			)
+		if
+			ControlAlly.Utils.isValidHero(hero, true)
+			and ControlAlly.Utils.call(Entity.IsDormant, hero) ~= true
+			and ControlAlly.Utils.call(NPC.IsIllusion, hero) ~= true
+			and not invalidState
+			and localHero
+			and ControlAlly.Utils.call(Entity.IsSameTeam, hero, localHero) == true
+		then
+			allies[#allies + 1] = hero
+		end
+	end
+	ControlAlly.Runtime.allies = allies
+	return allies
+end
+
+function ControlAlly.SupportAI.reservationAvailable(rule, now)
+	local family = rule.family
+	return not family or (ControlAlly.Runtime.supportReservations[family] or -math.huge) <= now
+end
+
+function ControlAlly.SupportAI.reserve(action, now)
+	local family = action.supportFamily
+	if not family then
+		return
+	end
+	local duration = ControlAlly.Utils.ruleValue(action.ability, action.rule, "duration", "durationSpecial", 0.65)
+		or 0.65
+	ControlAlly.Runtime.supportReservations[family] = now + math.max(0.65, duration)
+end
+
+function ControlAlly.SupportAI.allyTargetAction(context, ability, id, rule)
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local range = ControlAlly.AbilityAI.castRange(context.unit, ability, rule)
+	local bestTarget
+	local bestScore = -math.huge
+	for _, ally in ipairs(ControlAlly.Runtime.allies) do
+		local allyPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, ally)
+		local reservationKey = rule.family .. ":" .. tostring(ControlAlly.Utils.entityIndex(ally) or -1)
+		if
+			(ControlAlly.Runtime.supportReservations[reservationKey] or -math.huge) <= context.now
+			and origin
+			and allyPosition
+			and ControlAlly.Utils.distance2D(origin, allyPosition) <= range + 40
+		then
+			local healthPct = ControlAlly.Utils.healthPct(ally)
+			local hurt = ControlAlly.Utils.wasRecentlyHurt(ally, context.now)
+			local enemyPosition = context.target and ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+			local fighting = ControlAlly.Utils.call(NPC.IsAttacking, ally) == true
+				and enemyPosition
+				and ControlAlly.Utils.distance2D(allyPosition, enemyPosition)
+					<= (ControlAlly.Utils.call(NPC.GetAttackRange, ally) or 150) + 350
+			local threshold = rule.defensiveHealthPct or 75
+			if (hurt and healthPct <= threshold) or (id == "item_solar_crest" and fighting and context.target) then
+				local score = (rule.priority or 100) + (100 - healthPct) * 0.7 + (hurt and 18 or 0)
+				if score > bestScore then
+					bestTarget = ally
+					bestScore = score
+				end
+			end
+		end
+	end
+	if not bestTarget then
+		return nil
+	end
+	return {
+		ability = ability,
+		id = id,
+		policy = "ally",
+		target = bestTarget,
+		score = bestScore,
+		urgent = rule.urgent == true,
+		source = "item",
+		rule = rule,
+		supportFamily = rule.family .. ":" .. tostring(ControlAlly.Utils.entityIndex(bestTarget) or -1),
+	}
+end
+
+function ControlAlly.SupportAI.noTargetAction(context, ability, id, rule)
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local radius = ControlAlly.AbilityAI.radius(ability, rule)
+	local need = 0
+	local fighting = 0
+	local critical = false
+	for _, ally in ipairs(ControlAlly.Runtime.allies) do
+		local position = ControlAlly.Utils.call(Entity.GetAbsOrigin, ally)
+		if origin and position and ControlAlly.Utils.distance2D(origin, position) <= radius then
+			local healthPct = ControlAlly.Utils.healthPct(ally)
+			local mana = ControlAlly.Utils.call(NPC.GetMana, ally) or 0
+			local maxMana = ControlAlly.Utils.call(NPC.GetMaxMana, ally) or 0
+			local missingMana = math.max(0, maxMana - mana)
+			local missingHealth = math.max(
+				0,
+				(ControlAlly.Utils.call(Entity.GetMaxHealth, ally) or 0)
+					- (ControlAlly.Utils.call(Entity.GetHealth, ally) or 0)
+			)
+			if id == "item_arcane_boots" then
+				local amount = ControlAlly.Utils.ruleValue(ability, rule, "amount", "amountSpecial", 0) or 0
+				if missingMana >= amount * 0.65 then
+					need = need + 1
+				end
+				critical = critical or missingMana >= amount * 1.5
+			elseif id == "item_guardian_greaves" then
+				local heal = ControlAlly.Utils.ruleValue(ability, rule, "heal", "healSpecial", 0) or 0
+				local manaAmount = ControlAlly.Utils.ruleValue(ability, rule, "amount", "amountSpecial", 0) or 0
+				if missingHealth >= heal * 0.55 or missingMana >= manaAmount * 0.65 then
+					need = need + 1
+				end
+				critical = critical or healthPct <= 32
+			elseif id == "item_pipe" then
+				if
+					ControlAlly.Utils.wasRecentlyHurt(ally, context.now)
+					and healthPct <= (rule.defensiveHealthPct or 75)
+				then
+					need = need + 1
+				end
+				critical = critical or (healthPct <= 36 and ControlAlly.Utils.wasRecentlyHurt(ally, context.now))
+			elseif ControlAlly.Utils.call(NPC.IsAttacking, ally) == true and context.target then
+				local enemyPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+				if
+					enemyPosition
+					and ControlAlly.Utils.distance2D(position, enemyPosition)
+						<= (ControlAlly.Utils.call(NPC.GetAttackRange, ally) or 150) + 350
+				then
+					fighting = fighting + 1
+				end
+			end
+		end
+	end
+	if id == "item_boots_of_bearing" then
+		need = fighting
+	end
+	if need < 2 and not critical then
+		return nil
+	end
+	return {
+		ability = ability,
+		id = id,
+		policy = "noTarget",
+		score = (rule.priority or 80) + need * 12,
+		urgent = rule.urgent == true,
+		source = "item",
+		rule = rule,
+		supportFamily = rule.family,
+	}
+end
+
+function ControlAlly.SupportAI.bestAction(context)
+	if not ControlAlly.UI.UseItems or ControlAlly.UI.UseItems:Get() ~= true then
+		return nil
+	end
+	local best
+	for _, entry in ipairs(ControlAlly.AbilityAI.catalog(context.controller, context.now).items) do
+		local rule = ControlAlly.Profiles.SupportItems[entry.id]
+		if
+			rule
+			and rule.policy ~= "refresher"
+			and ControlAlly.Menu.isItemEnabled(entry.id)
+			and ControlAlly.SupportAI.reservationAvailable(rule, context.now)
+			and ControlAlly.AbilityAI.isReady(context.controller, entry.ability, entry.id, false, true)
+		then
+			local action
+			if rule.policy == "ally" then
+				action = ControlAlly.SupportAI.allyTargetAction(context, entry.ability, entry.id, rule)
+			elseif
+				rule.policy == "allyNoTarget"
+				or rule.policy == "manaBoots"
+				or rule.policy == "greaves"
+				or rule.policy == "combatBoots"
+			then
+				action = ControlAlly.SupportAI.noTargetAction(context, entry.ability, entry.id, rule)
+			elseif rule.policy == "chaseBoots" and context.target then
+				local distance = ControlAlly.Utils.distance2D(
+					ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit),
+					ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+				)
+				local attackRange = ControlAlly.Utils.call(NPC.GetAttackRange, context.unit) or 150
+				if distance > attackRange + 120 then
+					action = {
+						ability = entry.ability,
+						id = entry.id,
+						policy = "noTarget",
+						score = rule.priority,
+						source = "item",
+						rule = rule,
+						supportFamily = rule.family .. ":" .. tostring(
+							ControlAlly.Utils.entityIndex(context.unit) or -1
+						),
+					}
+				end
+			elseif
+				rule.policy == "powerTreads"
+				and PowerTreads
+				and PowerTreads.GetStats
+				and Hero.GetPrimaryAttribute
+			then
+				local current = ControlAlly.Utils.call(PowerTreads.GetStats, entry.ability)
+				local desired = ControlAlly.Utils.call(Hero.GetPrimaryAttribute, context.unit)
+				if desired == Enum.Attributes.DOTA_ATTRIBUTE_ALL then
+					if ControlAlly.Utils.healthPct(context.unit) < 50 then
+						desired = Enum.Attributes.DOTA_ATTRIBUTE_STRENGTH
+					elseif ControlAlly.Utils.manaPct(context.unit) < 28 then
+						desired = Enum.Attributes.DOTA_ATTRIBUTE_INTELLECT
+					else
+						desired = Enum.Attributes.DOTA_ATTRIBUTE_AGILITY
+					end
+				end
+				if current ~= nil and desired ~= nil and current ~= desired then
+					action = {
+						ability = entry.ability,
+						id = entry.id,
+						policy = "noTarget",
+						score = rule.priority,
+						source = "item",
+						rule = rule,
+						supportFamily = rule.family .. ":" .. tostring(
+							ControlAlly.Utils.entityIndex(context.unit) or -1
+						),
+						treadsBefore = current,
+					}
+				end
+			end
+			if action and (not best or action.score > best.score) then
+				best = action
+			end
+		end
+	end
+	return best
+end
+
+function ControlAlly.MeepoAI.netTiming(controller, target, ability, rule)
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, controller.unit)
+	local targetPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, target)
+	if not origin or not targetPosition then
+		return nil
+	end
+	local range = ControlAlly.AbilityAI.castRange(controller.unit, ability, rule)
+	local radius = ControlAlly.AbilityAI.radius(ability, rule)
+	local speed = ControlAlly.Utils.ruleValue(ability, rule, "projectileSpeed", "projectileSpeedSpecial", 0) or 0
+	if speed <= 0 then
+		return nil
+	end
+	local position = ControlAlly.Targeting.predictPosition(target, ability, rule)
+	local predictedDistance = ControlAlly.Utils.distance2D(origin, position)
+	if predictedDistance > range + radius then
+		return nil
+	end
+	local castPosition = predictedDistance > range and ControlAlly.Utils.positionToward(origin, position, range)
+		or position
+	local castPoint = ControlAlly.Utils.call(Ability.GetCastPoint, ability, true)
+		or ControlAlly.Utils.call(Ability.GetCastPoint, ability)
+		or 0
+	local faceTime = ControlAlly.Utils.call(NPC.GetTimeToFacePosition, controller.unit, castPosition) or 0
+	local impactDelay = math.max(0, faceTime) + castPoint + ControlAlly.Utils.distance2D(origin, castPosition) / speed
+	return impactDelay, castPosition
+end
+
+function ControlAlly.MeepoAI.bestNetCaster(context, target)
+	local bestController
+	local bestAbility
+	local bestDelay = math.huge
+	local bestPosition
+	local rule = ControlAlly.Profiles.Heroes.npc_dota_hero_meepo.abilities.meepo_earthbind
+	for _, controller in ipairs(ControlAlly.Runtime.controllers) do
+		if
+			controller.playerId == context.controller.playerId
+			and controller.heroName == "npc_dota_hero_meepo"
+			and not controller.pendingCast
+			and context.now >= controller.busyUntil
+			and not ControlAlly.Utils.isCommandRestricted(controller.unit)
+		then
+			local ability = ControlAlly.AbilityAI.findAbility(controller, "meepo_earthbind", context.now)
+			if
+				ControlAlly.Menu.isAbilityEnabled("meepo_earthbind")
+				and ControlAlly.AbilityAI.isReady(controller, ability, "meepo_earthbind", false, false)
+			then
+				local delay, position = ControlAlly.MeepoAI.netTiming(controller, target, ability, rule)
+				if delay and delay < bestDelay then
+					bestController = controller
+					bestAbility = ability
+					bestDelay = delay
+					bestPosition = position
+				end
+			end
+		end
+	end
+	return bestController, bestAbility, bestDelay, bestPosition, rule
+end
+
+function ControlAlly.MeepoAI.sharedPlan(context)
+	if not context.target then
+		return nil
+	end
+	local targetIndex = ControlAlly.Utils.entityIndex(context.target)
+	if not targetIndex then
+		return nil
+	end
+	local key = tostring(context.controller.playerId) .. ":" .. tostring(targetIndex)
+	local plan = ControlAlly.Runtime.meepoPlans[key]
+	if
+		plan
+		and plan.target == context.target
+		and plan.expiresAt > context.now
+		and ControlAlly.Utils.isValidControllerUnit(plan.controller and plan.controller.unit, true)
+	then
+		return plan
+	end
+	local controller, ability, delay, position, rule = ControlAlly.MeepoAI.bestNetCaster(context, context.target)
+	if not controller then
+		ControlAlly.Runtime.meepoPlans[key] = nil
+		return nil
+	end
+	plan = {
+		key = key,
+		target = context.target,
+		targetIndex = targetIndex,
+		controller = controller,
+		casterIndex = ControlAlly.Utils.entityIndex(controller.unit),
+		ability = ability,
+		delay = delay,
+		position = position,
+		rule = rule,
+		expiresAt = context.now + 0.12,
+	}
+	ControlAlly.Runtime.meepoPlans[key] = plan
+	return plan
+end
+
+function ControlAlly.MeepoAI.netAction(context)
+	local states = Enum.ModifierState
+	local invalidTarget = states
+		and (
+			ControlAlly.Utils.hasState(context.target, states.MODIFIER_STATE_INVULNERABLE)
+			or ControlAlly.Utils.hasState(context.target, states.MODIFIER_STATE_OUT_OF_GAME)
+		)
+	if
+		not ControlAlly.UI.UseAbilities
+		or ControlAlly.UI.UseAbilities:Get() ~= true
+		or context.controller.heroName ~= "npc_dota_hero_meepo"
+		or not context.target
+		or ControlAlly.Utils.isMagicImmune(context.target)
+		or invalidTarget
+	then
+		return nil
+	end
+	local targetIndex = ControlAlly.Utils.entityIndex(context.target)
+	if not targetIndex then
+		return nil
+	end
+	local chain = ControlAlly.Runtime.meepoNetChains[targetIndex]
+	if chain and chain.target ~= context.target then
+		ControlAlly.Runtime.meepoNetChains[targetIndex] = nil
+		chain = nil
+	end
+	if chain and chain.inFlightUntil and context.now <= chain.inFlightUntil then
+		return nil
+	end
+	if chain and chain.inFlightUntil and context.now > chain.inFlightUntil then
+		if ControlAlly.Utils.modifierRemaining(context.target, "modifier_meepo_earthbind", context.now) <= 0 then
+			ControlAlly.Runtime.meepoNetChains[targetIndex] = nil
+			chain = nil
+		else
+			chain.inFlightUntil = nil
+			chain.casterIndex = nil
+		end
+	end
+
+	local plan = ControlAlly.MeepoAI.sharedPlan(context)
+	if not plan or plan.controller ~= context.controller or not plan.ability or not plan.position then
+		return nil
+	end
+	local ability = plan.ability
+	local impactDelay = plan.delay
+	local position = plan.position
+	local rule = plan.rule
+	local rootRemaining = ControlAlly.Utils.modifierRemaining(context.target, "modifier_meepo_earthbind", context.now)
+	if rootRemaining > impactDelay + ControlAlly.Constants.MEEPO_NET_CHAIN_OVERLAP then
+		return nil
+	end
+	local duration = ControlAlly.Utils.ruleValue(ability, rule, "duration", "durationSpecial", 0) or 0
+	return {
+		ability = ability,
+		id = "meepo_earthbind",
+		policy = "point",
+		position = position,
+		score = 154,
+		urgent = rootRemaining > 0,
+		source = "ability",
+		rule = rule,
+		isMeepoNet = true,
+		meepoTargetIndex = targetIndex,
+		meepoImpactAt = context.now + impactDelay,
+		meepoRootDuration = duration,
+		reservationTarget = context.target,
+		dedupeKey = "meepo_earthbind:" .. tostring(targetIndex),
+	}
+end
+
+function ControlAlly.MeepoAI.onCastResult(controller, pending, success, now)
+	if not pending.isMeepoNet or not pending.meepoTargetIndex then
+		return
+	end
+	local chain = ControlAlly.Runtime.meepoNetChains[pending.meepoTargetIndex]
+	if not chain or chain.casterIndex ~= ControlAlly.Utils.entityIndex(controller.unit) then
+		return
+	end
+	if not success then
+		ControlAlly.Runtime.meepoNetChains[pending.meepoTargetIndex] = nil
+		return
+	end
+	chain.confirmed = true
+	chain.inFlightUntil = (pending.meepoImpactAt or now) + ControlAlly.Constants.MEEPO_NET_HIT_GRACE
+	controller.meepo.lastNetAt = now
+end
+
+function ControlAlly.MeepoAI.poofAction(context)
+	if
+		not ControlAlly.UI.UseAbilities
+		or ControlAlly.UI.UseAbilities:Get() ~= true
+		or context.controller.heroName ~= "npc_dota_hero_meepo"
+		or not context.target
+		or not ControlAlly.Menu.isAbilityEnabled("meepo_poof")
+	then
+		return nil
+	end
+	local ability = ControlAlly.AbilityAI.findAbility(context.controller, "meepo_poof", context.now)
+	if not ControlAlly.AbilityAI.isReady(context.controller, ability, "meepo_poof", false, false) then
+		return nil
+	end
+	local groupPoof = Ability.GetAltCastState and ControlAlly.Utils.call(Ability.GetAltCastState, ability) == true
+	if groupPoof then
+		return {
+			ability = ability,
+			id = "meepo_poof_group_toggle",
+			policy = "toggleAlt",
+			score = 190,
+			urgent = true,
+			source = "ability",
+			rule = { policy = "toggleAlt" },
+			desiredAlt = false,
+			allowRapid = true,
+			dedupeKey = "meepo_poof_group_toggle",
+		}
+	end
+	local plan = ControlAlly.MeepoAI.sharedPlan(context)
+	if plan and plan.casterIndex == ControlAlly.Utils.entityIndex(context.controller.unit) then
+		local anotherPoof = false
+		for _, other in ipairs(ControlAlly.Runtime.controllers) do
+			if
+				other ~= context.controller
+				and other.playerId == context.controller.playerId
+				and other.heroName == "npc_dota_hero_meepo"
+			then
+				local candidate = ControlAlly.AbilityAI.findAbility(other, "meepo_poof", context.now)
+				if ControlAlly.AbilityAI.isReady(other, candidate, "meepo_poof", false, false) then
+					anotherPoof = true
+					break
+				end
+			end
+		end
+		if anotherPoof then
+			return nil
+		end
+	end
+	local rule = ControlAlly.Profiles.Heroes.npc_dota_hero_meepo.abilities.meepo_poof
+	local radius = ControlAlly.AbilityAI.radius(ability, rule)
+	local targetPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+	local destination
+	local destinationDistance = math.huge
+	for _, controller in ipairs(ControlAlly.Runtime.controllers) do
+		if controller.playerId == context.controller.playerId and controller.heroName == "npc_dota_hero_meepo" then
+			local position = ControlAlly.Utils.call(Entity.GetAbsOrigin, controller.unit)
+			local distance = ControlAlly.Utils.distance2D(position, targetPosition)
+			if distance <= radius and distance < destinationDistance then
+				destination = controller.unit
+				destinationDistance = distance
+			end
+		end
+	end
+	if not destination then
+		return nil
+	end
+	return {
+		ability = ability,
+		id = "meepo_poof",
+		policy = "ally",
+		target = destination,
+		score = 84,
+		source = "ability",
+		rule = rule,
+		groupPoof = groupPoof,
+	}
+end
+
+function ControlAlly.AlchemistAI.syncBrewing(controller, now)
+	local state = controller.alchemist
+	local throw = ControlAlly.AbilityAI.findAbility(controller, "alchemist_unstable_concoction_throw", now)
+	local visible = throw and ControlAlly.Utils.call(Ability.IsHidden, throw) ~= true
+	if visible and not state.brewing then
+		state.brewing = true
+		local modifier =
+			ControlAlly.Utils.call(NPC.GetModifier, controller.unit, "modifier_alchemist_unstable_concoction")
+		local created = modifier and ControlAlly.Utils.call(Modifier.GetCreationTime, modifier)
+		state.startedAt = type(created) == "number" and created or now
+	end
+	if state.brewing and not visible then
+		local start = ControlAlly.AbilityAI.findAbility(controller, "alchemist_unstable_concoction", now)
+		local explosionTime = ControlAlly.Utils.specialValueExact(start, "brew_explosion", 0) or 0
+		if explosionTime <= 0 then
+			local brewTime = ControlAlly.Utils.specialValueExact(start, "brew_time", 5.5) or 5.5
+			explosionTime = math.max(brewTime + 2.0, ControlAlly.Constants.ALCHEMIST_BREW_FALLBACK)
+		end
+		if now - state.startedAt > explosionTime + 0.50 then
+			state.brewing = false
+			state.startedAt = -math.huge
+			state.target = nil
+		end
+	end
+	return state.brewing, throw
+end
+
+function ControlAlly.AlchemistAI.throwTarget(controller, preferred, throw, now)
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, controller.unit)
+	local range = ControlAlly.AbilityAI.castRange(controller.unit, throw, {})
+	local function valid(target)
+		local states = Enum.ModifierState
+		local invalidState = states
+			and (
+				ControlAlly.Utils.hasState(target, states.MODIFIER_STATE_INVULNERABLE)
+				or ControlAlly.Utils.hasState(target, states.MODIFIER_STATE_OUT_OF_GAME)
+				or ControlAlly.Utils.hasState(target, states.MODIFIER_STATE_UNTARGETABLE)
+			)
+		return ControlAlly.Targeting.isValidEnemy(target)
+			and not ControlAlly.Utils.isMagicImmune(target)
+			and not invalidState
+			and ControlAlly.Utils.distance2D(origin, ControlAlly.Utils.call(Entity.GetAbsOrigin, target)) <= range
+	end
+	if valid(preferred) then
+		return preferred
+	end
+	local best
+	local bestTime = math.huge
+	for _, enemy in ipairs(ControlAlly.Runtime.enemies) do
+		if valid(enemy) then
+			local position = ControlAlly.Utils.call(Entity.GetAbsOrigin, enemy)
+			local faceTime = ControlAlly.Utils.call(NPC.GetTimeToFacePosition, controller.unit, position) or 0
+			if faceTime < bestTime then
+				best = enemy
+				bestTime = faceTime
+			end
+		end
+	end
+	return best
+end
+
+function ControlAlly.AlchemistAI.nextAction(context, emergency)
+	if context.controller.heroName ~= "npc_dota_hero_alchemist" then
+		return nil
+	end
+	local controller = context.controller
+	local state = controller.alchemist
+	local brewing, throw = ControlAlly.AlchemistAI.syncBrewing(controller, context.now)
+	if brewing then
+		if
+			not throw
+			or not ControlAlly.AbilityAI.isReady(
+				controller,
+				throw,
+				"alchemist_unstable_concoction_throw",
+				true,
+				false,
+				true,
+				true
+			)
+		then
+			return nil
+		end
+		local start = ControlAlly.AbilityAI.findAbility(controller, "alchemist_unstable_concoction", context.now)
+		local brewTime = ControlAlly.Utils.specialValueExact(start, "brew_time", 0) or 0
+		local explosionTime = ControlAlly.Utils.specialValueExact(start, "brew_explosion", brewTime) or brewTime
+		local elapsed = math.max(0, context.now - state.startedAt)
+		local target =
+			ControlAlly.AlchemistAI.throwTarget(controller, state.target or context.target, throw, context.now)
+		if not target then
+			return nil
+		end
+		local castPoint = ControlAlly.Utils.call(Ability.GetCastPoint, throw) or 0
+		local faceTime = ControlAlly.Utils.call(
+			NPC.GetTimeToFacePosition,
+			controller.unit,
+			ControlAlly.Utils.call(Entity.GetAbsOrigin, target)
+		) or 0
+		local shouldThrow = emergency
+			or elapsed >= brewTime * 0.78
+			or elapsed + math.max(0, faceTime) + castPoint + 0.12 >= explosionTime
+		if not shouldThrow then
+			return nil
+		end
+		return {
+			ability = throw,
+			id = "alchemist_unstable_concoction_throw",
+			policy = "enemy",
+			target = target,
+			reservationTarget = target,
+			score = 520,
+			urgent = true,
+			source = "ability",
+			allowRapid = true,
+			alchemistStage = "throw",
+		}
+	end
+	if
+		emergency
+		or not ControlAlly.UI.UseAbilities
+		or ControlAlly.UI.UseAbilities:Get() ~= true
+		or not context.target
+		or not ControlAlly.Menu.isAbilityEnabled("alchemist_unstable_concoction")
+		or not ControlAlly.Menu.isAbilityEnabled("alchemist_unstable_concoction_throw")
+	then
+		return nil
+	end
+	local start = ControlAlly.AbilityAI.findAbility(controller, "alchemist_unstable_concoction", context.now)
+	if not ControlAlly.AbilityAI.isReady(controller, start, "alchemist_unstable_concoction", false, false) then
+		return nil
+	end
+	local target = ControlAlly.AlchemistAI.throwTarget(controller, context.target, throw, context.now)
+	if not target then
+		return nil
+	end
+	return {
+		ability = start,
+		id = "alchemist_unstable_concoction",
+		policy = "noTarget",
+		reservationTarget = target,
+		score = 88,
+		source = "ability",
+		alchemistStage = "start",
+	}
+end
+
+function ControlAlly.AlchemistAI.onCastResult(controller, pending, success, now)
+	if not pending.alchemistStage then
+		return
+	end
+	local state = controller.alchemist
+	if pending.alchemistStage == "start" then
+		state.brewing = success
+		state.startedAt = success and now or -math.huge
+		state.target = success and pending.castTarget or nil
+	elseif pending.alchemistStage == "throw" and success then
+		state.brewing = false
+		state.startedAt = -math.huge
+		state.target = nil
+	end
+end
+
+function ControlAlly.AlchemistAI.finishBrews(now)
+	for _, controller in pairs(ControlAlly.Runtime.controllerStates) do
+		if controller.heroName == "npc_dota_hero_alchemist" then
+			ControlAlly.Combat.confirmPendingCast(controller, now)
+			local brewing = ControlAlly.AlchemistAI.syncBrewing(controller, now)
+			if brewing and not controller.pendingCast and now >= controller.busyUntil then
+				local action = ControlAlly.AlchemistAI.nextAction({
+					controller = controller,
+					unit = controller.unit,
+					target = controller.alchemist.target,
+					now = now,
+				}, true)
+				if action and ControlAlly.Orders.cast(controller, action, now) then
+					return true
+				end
+			end
+		end
+	end
+	return false
+end
+
+function ControlAlly.TechiesAI.createMinePlan(context, ability, rule)
+	local targetPosition = ControlAlly.Targeting.predictPosition(context.target, ability, rule)
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	if not targetPosition or not origin then
+		return nil
+	end
+	local direction = ControlAlly.Utils.normalized2D(origin, targetPosition)
+	if not direction then
+		return nil
+	end
+	local radius = ControlAlly.AbilityAI.radius(ability, rule)
+	local minimumSpacing = ControlAlly.Utils.specialValue(ability, { "min_distance", "minimum_proximity" }, radius)
+	local triggerRadius = ControlAlly.Utils.specialValue(ability, { "radius", "trigger_radius" }, radius)
+	local reanchorRadius = ControlAlly.Utils.specialValue(ability, { "placement_radius", "radius" }, radius)
+	local ringRadius = math.max(minimumSpacing + 12, triggerRadius * 0.55)
+	local range = ControlAlly.AbilityAI.castRange(context.unit, ability, rule)
+	local edgeBuffer = math.min(24, range * 0.05)
+	if ringRadius + edgeBuffer >= range then
+		return nil
+	end
+	local targetDistance = ControlAlly.Utils.distance2D(origin, targetPosition)
+	if targetDistance > range + triggerRadius then
+		return nil
+	end
+	local maximumCenterDistance = math.max(0, range - ringRadius - edgeBuffer)
+	local center = targetDistance > maximumCenterDistance
+			and ControlAlly.Utils.positionToward(origin, targetPosition, maximumCenterDistance)
+		or targetPosition
+	local points = {}
+	for index = 1, 3 do
+		local offset = ControlAlly.Utils.rotate2D(direction, (index - 1) * math.pi * 2 / 3)
+		points[index] = Vector(center.x + offset.x * ringRadius, center.y + offset.y * ringRadius, center.z or 0)
+	end
+	return {
+		target = context.target,
+		targetIndex = ControlAlly.Utils.entityIndex(context.target),
+		points = points,
+		nextIndex = 1,
+		completed = false,
+		anchor = targetPosition,
+		triggerRadius = triggerRadius,
+		reanchorRadius = reanchorRadius,
+		createdAt = context.now,
+	}
+end
+
+function ControlAlly.TechiesAI.mineAction(context)
+	if
+		(context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_techies"
+		or not context.target
+		or not ControlAlly.UI.UseAbilities
+		or ControlAlly.UI.UseAbilities:Get() ~= true
+		or not ControlAlly.Menu.isAbilityEnabled("techies_land_mines")
+	then
+		return nil
+	end
+	local ability = ControlAlly.AbilityAI.findAbility(context.controller, "techies_land_mines", context.now)
+	local rule = ControlAlly.Profiles.Heroes.npc_dota_hero_techies.abilities.techies_land_mines
+	if
+		not ability
+		or not ControlAlly.AbilityAI.isReady(context.controller, ability, "techies_land_mines", false, false)
+	then
+		return nil
+	end
+	local state = context.controller.techies
+	local targetIndex = ControlAlly.Utils.entityIndex(context.target)
+	local liveTargetPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+	if
+		state.minePlan
+		and (
+			context.now - state.minePlan.createdAt > 5.0
+			or (
+				state.minePlan.nextIndex == 1
+				and ControlAlly.Utils.distance2D(state.minePlan.anchor, liveTargetPosition)
+					> state.minePlan.reanchorRadius * 0.75
+			)
+		)
+	then
+		state.minePlan = nil
+	end
+	if not state.minePlan or state.minePlan.target ~= context.target or state.minePlan.targetIndex ~= targetIndex then
+		state.minePlan = ControlAlly.TechiesAI.createMinePlan(context, ability, rule)
+	end
+	local plan = state.minePlan
+	if not plan or plan.completed then
+		return nil
+	end
+	local position = plan.points[plan.nextIndex]
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local range = ControlAlly.AbilityAI.castRange(context.unit, ability, rule)
+	if
+		not position
+		or ControlAlly.Utils.distance2D(origin, position) > range + ControlAlly.Constants.CAST_RANGE_BUFFER
+	then
+		state.minePlan = nil
+		return nil
+	end
+	return {
+		ability = ability,
+		id = "techies_land_mines",
+		policy = "point",
+		position = position,
+		score = 148,
+		urgent = true,
+		source = "ability",
+		rule = rule,
+		techiesMine = true,
+		techiesMineIndex = plan.nextIndex,
+		techiesMineTargetIndex = targetIndex,
+		dedupeKey = "techies_mine_plan:" .. tostring(targetIndex) .. ":" .. tostring(plan.nextIndex),
+	}
+end
+
+function ControlAlly.TechiesAI.onCastResult(controller, pending, success)
+	if not pending.techiesMine then
+		return
+	end
+	local plan = controller.techies.minePlan
+	if not plan or plan.targetIndex ~= pending.techiesMineTargetIndex or plan.nextIndex ~= pending.techiesMineIndex then
+		return
+	end
+	if not success then
+		controller.techies.minePlan = nil
+		return
+	end
+	plan.nextIndex = plan.nextIndex + 1
+	plan.completed = plan.nextIndex > #plan.points
+end
+
+function ControlAlly.SpecialAI.invalidateCatalog(controller)
+	controller.catalog = nil
+	controller.catalogRefreshAt = -math.huge
+	ControlAlly.Runtime.lastMenuSyncAt = -math.huge
+end
+
+function ControlAlly.SpecialAI.exposedAbility(controller, id)
+	local ability = ControlAlly.Utils.call(NPC.GetAbility, controller.unit, id)
+	if not ability or ControlAlly.Utils.call(Ability.IsActivated, ability) == false then
+		return nil
+	end
+	return ControlAlly.Utils.call(Ability.IsHidden, ability) ~= true and ability or nil
+end
+
+function ControlAlly.SpecialAI.reconcileController(controller, now)
+	if controller.special.stage then
+		return
+	end
+	local profileName = controller.profileName or controller.heroName
+	local stageByAbility = {
+		npc_dota_hero_ancient_apparition = {
+			id = "ancient_apparition_ice_blast_release",
+			stage = "aa_release",
+		},
+		npc_dota_hero_morphling = { id = "morphling_morph_replicate", stage = "morph_copied" },
+		npc_dota_hero_spectre = { id = "spectre_reality", stage = "spectre_reality" },
+		npc_dota_hero_ember_spirit = {
+			id = "ember_spirit_activate_fire_remnant",
+			stage = "ember_activate",
+		},
+		npc_dota_hero_monkey_king = { id = "monkey_king_primal_spring", stage = "monkey_spring" },
+	}
+	local transition = stageByAbility[profileName]
+	if transition and ControlAlly.SpecialAI.exposedAbility(controller, transition.id) then
+		controller.special.stage = transition.stage
+		controller.special.startedAt = now
+		return
+	end
+	if
+		profileName == "npc_dota_hero_dazzle"
+		and not ControlAlly.Utils.isNothlProjection(controller.unit)
+		and XHelpers
+		and XHelpers.XNPC
+		and XHelpers.XNPC.GetNothlProjection
+	then
+		local projection = ControlAlly.Utils.call(XHelpers.XNPC.GetNothlProjection, XHelpers.XNPC, controller.unit)
+		if ControlAlly.Utils.isValidControllerUnit(projection, true) then
+			controller.special.stage = "dazzle_active"
+			controller.special.startedAt = now
+		end
+	end
+end
+
+function ControlAlly.SpecialAI.requiresRetention(controller)
+	local special = controller.special
+	local stage = special and special.stage
+	if not stage then
+		return false
+	end
+	if stage == "aa_release" then
+		return true
+	end
+	if stage == "dazzle_active" then
+		local projection = XHelpers
+			and XHelpers.XNPC
+			and XHelpers.XNPC.GetNothlProjection
+			and ControlAlly.Utils.call(XHelpers.XNPC.GetNothlProjection, XHelpers.XNPC, controller.unit)
+		if ControlAlly.Utils.isValidControllerUnit(projection, true) then
+			return true
+		end
+		special.stage = nil
+		return false
+	end
+	local abilityByStage = {
+		morph_copied = "morphling_morph_replicate",
+		spectre_reality = "spectre_reality",
+		ember_activate = "ember_spirit_activate_fire_remnant",
+		monkey_spring = "monkey_king_primal_spring",
+	}
+	local id = abilityByStage[stage]
+	if id and ControlAlly.SpecialAI.exposedAbility(controller, id) then
+		return true
+	end
+	if ControlAlly.Utils.gameTime() - (special.startedAt or -math.huge) <= 2.0 then
+		return true
+	end
+	special.stage = nil
+	return false
+end
+
+function ControlAlly.SpecialAI.ready(context, id, allowHidden, ignoreManaFloor, allowUnlearned)
+	if not ControlAlly.Menu.isAbilityEnabled(id) then
+		return nil
+	end
+	local ability = ControlAlly.AbilityAI.findAbility(context.controller, id, context.now)
+	if
+		not ControlAlly.AbilityAI.isReady(
+			context.controller,
+			ability,
+			id,
+			allowHidden == true,
+			false,
+			ignoreManaFloor == true,
+			allowUnlearned == true
+		)
+	then
+		return nil
+	end
+	return ability
+end
+
+function ControlAlly.SpecialAI.loneDruidAction(context)
+	if (context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_lone_druid" then
+		return nil
+	end
+	local summon = ControlAlly.SpecialAI.ready(context, "lone_druid_spirit_bear", false)
+	if not summon then
+		return nil
+	end
+	local bear = CustomEntities
+		and CustomEntities.GetSpiritBear
+		and ControlAlly.Utils.call(CustomEntities.GetSpiritBear, summon)
+	if ControlAlly.Utils.isValidControllerUnit(bear, true) then
+		return nil
+	end
+	return {
+		ability = summon,
+		id = "lone_druid_spirit_bear",
+		policy = "noTarget",
+		score = 142,
+		urgent = true,
+		source = "ability",
+		specialStage = "lone_summon",
+	}
+end
+
+function ControlAlly.KezAI.switchAction(context)
+	if (context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_kez" then
+		return nil
+	end
+	local state = context.controller.kez
+	if
+		context.now - state.lastSwitchAt < 0.35
+		or (state.lastSwitchAt > -math.huge and state.castsAfterSwitch <= 0 and context.now - state.lastSwitchAt < 1.5)
+	then
+		return nil
+	end
+	local ability = ControlAlly.SpecialAI.ready(context, "kez_switch_weapons", false)
+	if not ability then
+		return nil
+	end
+	local forms = {
+		katana = { "kez_echo_slash", "kez_grappling_claw", "kez_kazurai_katana", "kez_raptor_dance" },
+		sai = { "kez_falcon_rush", "kez_talon_toss", "kez_shodo_sai", "kez_ravens_veil" },
+	}
+	local currentForm = ControlAlly.Utils.call(NPC.HasModifier, context.unit, "modifier_kez_sai") == true and "sai"
+		or "katana"
+	local otherForm = currentForm == "katana" and "sai" or "katana"
+	local mana = ControlAlly.Utils.call(NPC.GetMana, context.unit) or 0
+	local function variants(id)
+		return { id, id .. "_ad" }
+	end
+	local currentReady = false
+	for _, logicalId in ipairs(forms[currentForm]) do
+		if ControlAlly.Menu.isAbilityEnabled(logicalId) then
+			for _, id in ipairs(variants(logicalId)) do
+				local candidate = ControlAlly.Utils.call(NPC.GetAbility, context.unit, id)
+				if ControlAlly.AbilityAI.isReady(context.controller, candidate, id, true, false) then
+					currentReady = true
+					break
+				end
+			end
+		end
+		if currentReady then
+			break
+		end
+	end
+	if currentReady then
+		return nil
+	end
+	local otherUseful = false
+	for _, logicalId in ipairs(forms[otherForm]) do
+		if ControlAlly.Menu.isAbilityEnabled(logicalId) then
+			for _, id in ipairs(variants(logicalId)) do
+				local candidate = ControlAlly.Utils.call(NPC.GetAbility, context.unit, id)
+				local level = candidate and (ControlAlly.Utils.call(Ability.GetLevel, candidate) or 0) or 0
+				local cost = candidate and (ControlAlly.Utils.call(Ability.GetManaCost, candidate) or 0) or math.huge
+				if level > 0 and ControlAlly.Utils.cooldownRemaining(candidate) <= 0.03 and mana >= cost then
+					otherUseful = true
+					break
+				end
+			end
+		end
+		if otherUseful then
+			break
+		end
+	end
+	if not otherUseful then
+		return nil
+	end
+	return {
+		ability = ability,
+		id = "kez_switch_weapons",
+		policy = "noTarget",
+		score = 18,
+		source = "ability",
+		specialStage = "kez_switch",
+		dedupeKey = "kez_switch_weapons:" .. otherForm,
+	}
+end
+
+function ControlAlly.SpecialAI.spectreAction(context)
+	if
+		(context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_spectre" or not context.target
+	then
+		return nil
+	end
+	local state = context.controller.special
+	if state.stage == "spectre_reality" then
+		local reality = ControlAlly.SpecialAI.ready(context, "spectre_reality", true)
+		if reality then
+			return {
+				ability = reality,
+				id = "spectre_reality",
+				policy = "point",
+				position = ControlAlly.Targeting.predictPosition(context.target, reality, {}),
+				score = 190,
+				urgent = true,
+				source = "ability",
+				specialStage = "spectre_reality",
+				allowRapid = true,
+			}
+		end
+		if context.now - state.startedAt > 1.25 then
+			state.stage = nil
+		end
+		return nil
+	end
+	local distance = ControlAlly.Utils.distance2D(
+		ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit),
+		ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+	)
+	local attackRange = ControlAlly.Utils.call(NPC.GetAttackRange, context.unit) or 150
+	if distance <= attackRange + 250 then
+		return nil
+	end
+	local haunt = ControlAlly.SpecialAI.ready(context, "spectre_haunt", false)
+	if haunt then
+		return {
+			ability = haunt,
+			id = "spectre_haunt",
+			policy = "noTarget",
+			reservationTarget = context.target,
+			score = 118,
+			source = "ability",
+			specialStage = "spectre_open",
+		}
+	end
+	local shadowStep = ControlAlly.SpecialAI.ready(context, "spectre_shadow_step", false)
+	if shadowStep then
+		return {
+			ability = shadowStep,
+			id = "spectre_shadow_step",
+			policy = "enemy",
+			target = context.target,
+			reservationTarget = context.target,
+			score = 118,
+			source = "ability",
+			specialStage = "spectre_open",
+		}
+	end
+	return nil
+end
+
+function ControlAlly.SpecialAI.emberAction(context)
+	if
+		(context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_ember_spirit"
+		or not context.target
+	then
+		return nil
+	end
+	local state = context.controller.special
+	if state.stage == "ember_activate" then
+		local activate = ControlAlly.SpecialAI.ready(context, "ember_spirit_activate_fire_remnant", true)
+		if activate then
+			return {
+				ability = activate,
+				id = "ember_spirit_activate_fire_remnant",
+				policy = "point",
+				position = ControlAlly.Targeting.predictPosition(context.target, activate, {}),
+				score = 176,
+				urgent = true,
+				source = "ability",
+				committedMotion = true,
+				specialStage = "ember_activate",
+				allowRapid = true,
+			}
+		end
+		if context.now - state.startedAt > 1.0 then
+			state.stage = nil
+		end
+		return nil
+	end
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local targetPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+	local attackRange = ControlAlly.Utils.call(NPC.GetAttackRange, context.unit) or 150
+	if ControlAlly.Utils.distance2D(origin, targetPosition) <= attackRange + 225 then
+		return nil
+	end
+	local remnant = ControlAlly.SpecialAI.ready(context, "ember_spirit_fire_remnant", false)
+	if not remnant then
+		return nil
+	end
+	local range = ControlAlly.AbilityAI.castRange(context.unit, remnant, {})
+	local predicted = ControlAlly.Targeting.predictPosition(context.target, remnant, {})
+	if ControlAlly.Utils.distance2D(origin, predicted) > range then
+		predicted = ControlAlly.Utils.positionToward(origin, predicted, range)
+	end
+	return {
+		ability = remnant,
+		id = "ember_spirit_fire_remnant",
+		policy = "point",
+		position = predicted,
+		reservationTarget = context.target,
+		score = 92,
+		source = "ability",
+		specialStage = "ember_place",
+	}
+end
+
+function ControlAlly.SpecialAI.hoodwinkAction(context)
+	if
+		(context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_hoodwink"
+		or not context.target
+	then
+		return nil
+	end
+	local ability = ControlAlly.SpecialAI.ready(context, "hoodwink_bushwhack", false)
+	if not ability or (not Trees or not Trees.InRadius) then
+		return nil
+	end
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local predicted = ControlAlly.Targeting.predictPosition(context.target, ability, {})
+	if not origin or not predicted then
+		return nil
+	end
+	local radius = ControlAlly.Utils.specialValueExact(ability, "trap_radius", 0) or 0
+	if radius <= 0 then
+		return nil
+	end
+	local castRange = ControlAlly.AbilityAI.castRange(context.unit, ability, {})
+	local bestPosition
+	local bestDistance = math.huge
+	local function considerTree(tree)
+		if Tree.IsActive and ControlAlly.Utils.call(Tree.IsActive, tree) == false then
+			return
+		end
+		local treePosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, tree)
+		local treeDistance = ControlAlly.Utils.distance2D(predicted, treePosition)
+		if treeDistance > radius * 1.90 then
+			return
+		end
+		local position = predicted
+		if treeDistance > radius * 0.90 then
+			position = ControlAlly.Utils.positionToward(predicted, treePosition, treeDistance * 0.50)
+		end
+		if
+			ControlAlly.Utils.distance2D(origin, position) <= castRange + ControlAlly.Constants.CAST_RANGE_BUFFER
+			and treeDistance < bestDistance
+		then
+			bestPosition = position
+			bestDistance = treeDistance
+		end
+	end
+	for _, tree in ipairs(ControlAlly.Utils.call(Trees.InRadius, predicted, radius * 1.90, true) or {}) do
+		considerTree(tree)
+	end
+	if TempTrees and TempTrees.InRadius then
+		for _, tree in ipairs(ControlAlly.Utils.call(TempTrees.InRadius, predicted, radius * 1.90) or {}) do
+			considerTree(tree)
+		end
+	end
+	if not bestPosition then
+		return nil
+	end
+	return {
+		ability = ability,
+		id = "hoodwink_bushwhack",
+		policy = "point",
+		position = bestPosition,
+		reservationTarget = context.target,
+		score = 104,
+		source = "ability",
+	}
+end
+
+function ControlAlly.SpecialAI.monkeyAction(context)
+	if
+		(context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_monkey_king"
+		or not context.target
+	then
+		return nil
+	end
+	local state = context.controller.special
+	if state.stage == "monkey_spring" then
+		local spring = ControlAlly.SpecialAI.ready(context, "monkey_king_primal_spring", true)
+		if spring then
+			local position = ControlAlly.Targeting.predictPosition(context.target, spring, {})
+			local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+			local range = ControlAlly.AbilityAI.castRange(context.unit, spring, {})
+			if ControlAlly.Utils.distance2D(origin, position) <= range + ControlAlly.Constants.CAST_RANGE_BUFFER then
+				return {
+					ability = spring,
+					id = "monkey_king_primal_spring",
+					policy = "point",
+					position = position,
+					score = 184,
+					urgent = true,
+					source = "ability",
+					specialStage = "monkey_spring",
+					allowRapid = true,
+				}
+			end
+		end
+		if context.now - state.startedAt > 1.0 then
+			state.stage = nil
+		end
+		return nil
+	end
+	local treeDance = ControlAlly.SpecialAI.ready(context, "monkey_king_tree_dance", false)
+	if not treeDance or not Trees or not Trees.InRadius then
+		return nil
+	end
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local targetPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+	local attackRange = ControlAlly.Utils.call(NPC.GetAttackRange, context.unit) or 150
+	if ControlAlly.Utils.distance2D(origin, targetPosition) <= attackRange + 250 then
+		return nil
+	end
+	local range = ControlAlly.AbilityAI.castRange(context.unit, treeDance, {})
+	local bestTree
+	local bestDistance = math.huge
+	for _, tree in ipairs(ControlAlly.Utils.call(Trees.InRadius, origin, range, true) or {}) do
+		if not Tree.IsActive or ControlAlly.Utils.call(Tree.IsActive, tree) ~= false then
+			local position = ControlAlly.Utils.call(Entity.GetAbsOrigin, tree)
+			local distance = ControlAlly.Utils.distance2D(position, targetPosition)
+			if distance < bestDistance then
+				bestTree = tree
+				bestDistance = distance
+			end
+		end
+	end
+	if not bestTree then
+		return nil
+	end
+	return {
+		ability = treeDance,
+		id = "monkey_king_tree_dance",
+		policy = "tree",
+		target = bestTree,
+		reservationTarget = context.target,
+		score = 96,
+		source = "ability",
+		specialStage = "monkey_tree",
+	}
+end
+
+function ControlAlly.SpecialAI.marciAction(context)
+	if
+		(context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_marci" or not context.target
+	then
+		return nil
+	end
+	local ability = ControlAlly.SpecialAI.ready(context, "marci_companion_run", false)
+	if not ability then
+		return nil
+	end
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local targetPosition = ControlAlly.Targeting.predictPosition(context.target, ability, {})
+	local range = ControlAlly.AbilityAI.castRange(context.unit, ability, {})
+	local bestAlly
+	local bestDistance = math.huge
+	for _, ally in ipairs(ControlAlly.Runtime.allies) do
+		if ally ~= context.unit then
+			local position = ControlAlly.Utils.call(Entity.GetAbsOrigin, ally)
+			local fromCaster = ControlAlly.Utils.distance2D(origin, position)
+			local toTarget = ControlAlly.Utils.distance2D(position, targetPosition)
+			if fromCaster <= range + ControlAlly.Constants.CAST_RANGE_BUFFER and toTarget < bestDistance then
+				bestAlly = ally
+				bestDistance = toTarget
+			end
+		end
+	end
+	if not bestAlly then
+		return nil
+	end
+	return {
+		ability = ability,
+		id = "marci_companion_run",
+		policy = "vectorTarget",
+		target = bestAlly,
+		position = ControlAlly.Utils.call(Entity.GetAbsOrigin, bestAlly),
+		vectorEnd = targetPosition,
+		reservationTarget = context.target,
+		score = 94,
+		source = "ability",
+		committedMotion = true,
+		rule = {
+			projectileSpeedSpecial = "move_speed",
+			motionExtraDurationSpecial = "max_lob_travel_time",
+		},
+		specialStage = "marci_rebound",
+	}
+end
+
+function ControlAlly.SpecialAI.dawnbreakerAction(context)
+	if
+		(context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_dawnbreaker"
+		or not context.target
+	then
+		return nil
+	end
+	local converge = ControlAlly.SpecialAI.ready(context, "dawnbreaker_converge", true)
+	if not converge then
+		return nil
+	end
+	local distance = ControlAlly.Utils.distance2D(
+		ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit),
+		ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+	)
+	local attackRange = ControlAlly.Utils.call(NPC.GetAttackRange, context.unit) or 150
+	if distance <= attackRange + 180 then
+		return nil
+	end
+	return {
+		ability = converge,
+		id = "dawnbreaker_converge",
+		policy = "noTarget",
+		score = 134,
+		urgent = true,
+		source = "ability",
+		committedMotion = true,
+		allowRapid = true,
+		specialStage = "dawn_converge",
+	}
+end
+
+function ControlAlly.SpecialAI.ancientApparitionAction(context)
+	if (context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_ancient_apparition" then
+		return nil
+	end
+	local state = context.controller.special
+	local release =
+		ControlAlly.AbilityAI.findAbility(context.controller, "ancient_apparition_ice_blast_release", context.now)
+	if
+		not ControlAlly.Menu.isAbilityEnabled("ancient_apparition_ice_blast")
+		or not ControlAlly.AbilityAI.isReady(
+			context.controller,
+			release,
+			"ancient_apparition_ice_blast_release",
+			true,
+			false,
+			true,
+			true
+		)
+	then
+		release = nil
+	end
+	if release and (state.stage ~= "aa_release" or context.now >= state.startedAt) then
+		return {
+			ability = release,
+			id = "ancient_apparition_ice_blast_release",
+			policy = "noTarget",
+			score = 220,
+			urgent = true,
+			source = "ability",
+			allowRapid = true,
+			specialStage = "aa_release",
+			dedupeKey = "aa_ice_blast_release",
+		}
+	end
+	if state.stage == "aa_release" and not release and context.now > state.startedAt + 1.5 then
+		state.stage = nil
+		state.target = nil
+	end
+	if state.stage == "aa_release" or not context.target then
+		return nil
+	end
+	local launch = ControlAlly.SpecialAI.ready(context, "ancient_apparition_ice_blast", false)
+	if not launch then
+		return nil
+	end
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local position = ControlAlly.Targeting.predictPosition(context.target, launch, {
+		projectileSpeedSpecial = "speed",
+	})
+	local speed = ControlAlly.Utils.specialValueExact(launch, "speed", 0) or 0
+	local travelTime = speed > 0 and ControlAlly.Utils.distance2D(origin, position) / speed or 0
+	return {
+		ability = launch,
+		id = "ancient_apparition_ice_blast",
+		policy = "point",
+		position = position,
+		reservationTarget = context.target,
+		score = 126,
+		source = "ability",
+		specialStage = "aa_launch",
+		specialTravelTime = travelTime,
+	}
+end
+
+function ControlAlly.SpecialAI.shadowFiendAction(context)
+	if
+		(context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_nevermore"
+		or not context.target
+	then
+		return nil
+	end
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local targetPosition = ControlAlly.Targeting.predictPosition(context.target, nil, {})
+	local distance = ControlAlly.Utils.distance2D(origin, targetPosition)
+	local best
+	local bestError = math.huge
+	for _, id in ipairs({ "nevermore_shadowraze1", "nevermore_shadowraze2", "nevermore_shadowraze3" }) do
+		local ability = ControlAlly.SpecialAI.ready(context, id, false)
+		if ability then
+			local razeRange = ControlAlly.Utils.specialValueExact(ability, "shadowraze_range", 0) or 0
+			local radius = ControlAlly.Utils.specialValueExact(ability, "shadowraze_radius", 0) or 0
+			local errorDistance = math.abs(distance - razeRange)
+			if razeRange > 0 and radius > 0 and errorDistance <= radius and errorDistance < bestError then
+				best = ability
+				bestError = errorDistance
+			end
+		end
+	end
+	if not best then
+		return nil
+	end
+	local faceTime = ControlAlly.Utils.call(NPC.GetTimeToFacePosition, context.unit, targetPosition) or 0
+	if faceTime > 0.055 then
+		ControlAlly.Orders.face(context.controller, ControlAlly.Utils.normalized2D(origin, targetPosition), context.now)
+		return nil
+	end
+	local id = ControlAlly.Utils.abilityName(best)
+	return {
+		ability = best,
+		id = id,
+		policy = "noTarget",
+		score = 102 - bestError * 0.01,
+		source = "ability",
+		dedupeKey = id .. ":" .. tostring(ControlAlly.Utils.entityIndex(context.target) or -1),
+	}
+end
+
+function ControlAlly.SpecialAI.dazzleAction(context)
+	if
+		(context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_dazzle"
+		or ControlAlly.Utils.isNothlProjection(context.controller.unit)
+	then
+		return nil
+	end
+	local projection = XHelpers
+		and XHelpers.XNPC
+		and XHelpers.XNPC.GetNothlProjection
+		and ControlAlly.Utils.call(XHelpers.XNPC.GetNothlProjection, XHelpers.XNPC, context.controller.unit)
+	if ControlAlly.Utils.isValidControllerUnit(projection, true) then
+		local start = ControlAlly.AbilityAI.findAbility(context.controller, "dazzle_nothl_projection", context.now)
+		local minimumDuration = ControlAlly.Utils.specialValueExact(start, "min_duration", 0) or 0
+		local maximumDuration = ControlAlly.Utils.specialValueExact(start, "max_duration", 0) or 0
+		local leashStart = ControlAlly.Utils.specialValueExact(start, "leash_start", 0) or 0
+		local elapsed = context.now - (context.controller.special.startedAt or context.now)
+		local ownerPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+		local projectionPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, projection)
+		local shouldEnd = ControlAlly.Utils.healthPct(projection) <= 24
+			or (elapsed >= minimumDuration and not ControlAlly.Targeting.isValidEnemy(context.target))
+			or (maximumDuration > 0 and elapsed + 0.20 >= maximumDuration)
+			or (leashStart > 0 and ControlAlly.Utils.distance2D(ownerPosition, projectionPosition) >= leashStart * 0.90)
+		if not shouldEnd then
+			return nil
+		end
+		local finish = ControlAlly.AbilityAI.findAbility(context.controller, "dazzle_nothl_projection_end", context.now)
+		if
+			not ControlAlly.Menu.isAbilityEnabled("dazzle_nothl_projection")
+			or not ControlAlly.AbilityAI.isReady(
+				context.controller,
+				finish,
+				"dazzle_nothl_projection_end",
+				true,
+				false,
+				true,
+				true
+			)
+		then
+			return nil
+		end
+		return {
+			ability = finish,
+			id = "dazzle_nothl_projection_end",
+			policy = "noTarget",
+			score = 198,
+			urgent = true,
+			source = "ability",
+			allowRapid = true,
+			specialStage = "dazzle_projection_end",
+		}
+	end
+	if context.controller.special.stage == "dazzle_active" then
+		context.controller.special.stage = nil
+	end
+	if not context.target then
+		return nil
+	end
+	local ability = ControlAlly.SpecialAI.ready(context, "dazzle_nothl_projection", false)
+	if not ability then
+		return nil
+	end
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local position = ControlAlly.Targeting.predictPosition(context.target, ability, {})
+	local range = ControlAlly.AbilityAI.castRange(context.unit, ability, {})
+	if ControlAlly.Utils.distance2D(origin, position) > range then
+		position = ControlAlly.Utils.positionToward(origin, position, range)
+	end
+	return {
+		ability = ability,
+		id = "dazzle_nothl_projection",
+		policy = "point",
+		position = position,
+		reservationTarget = context.target,
+		score = 112,
+		source = "ability",
+		specialStage = "dazzle_projection",
+	}
+end
+
+function ControlAlly.SpecialAI.morphlingAction(context)
+	if (context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_morphling" then
+		return nil
+	end
+	local state = context.controller.special
+	if state.stage == "morph_copied" then
+		local returnAbility =
+			ControlAlly.AbilityAI.findAbility(context.controller, "morphling_morph_replicate", context.now)
+		if
+			context.now - state.startedAt > 1.0
+			and (not returnAbility or ControlAlly.Utils.call(Ability.IsActivated, returnAbility) == false)
+		then
+			state.stage = nil
+			ControlAlly.SpecialAI.invalidateCatalog(context.controller)
+		elseif
+			ControlAlly.Utils.healthPct(context.unit) > 30 and ControlAlly.Targeting.isValidEnemy(context.target)
+		then
+			return nil
+		end
+	end
+	if state.stage == "morph_copied" then
+		local finish = ControlAlly.SpecialAI.ready(context, "morphling_morph_replicate", true, true, true)
+		if finish then
+			return {
+				ability = finish,
+				id = "morphling_morph_replicate",
+				policy = "noTarget",
+				score = 190,
+				urgent = true,
+				source = "ability",
+				allowRapid = true,
+				specialStage = "morph_return",
+			}
+		end
+		return nil
+	end
+	if not context.target then
+		return nil
+	end
+	local replicate = ControlAlly.SpecialAI.ready(context, "morphling_replicate", false)
+	if not replicate then
+		return nil
+	end
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local targetPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+	local range = ControlAlly.AbilityAI.castRange(context.unit, replicate, {})
+	if ControlAlly.Utils.distance2D(origin, targetPosition) > range + ControlAlly.Constants.CAST_RANGE_BUFFER then
+		return nil
+	end
+	return {
+		ability = replicate,
+		id = "morphling_replicate",
+		policy = "enemy",
+		target = context.target,
+		reservationTarget = context.target,
+		score = 114,
+		source = "ability",
+		specialStage = "morph_replicate",
+	}
+end
+
+function ControlAlly.SpecialAI.earthSpiritAction(context)
+	if (context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_earth_spirit" then
+		return nil
+	end
+	local state = context.controller.special
+	local target = ControlAlly.Targeting.isValidEnemy(context.target) and context.target or state.target
+	if not ControlAlly.Targeting.isValidEnemy(target) then
+		state.stage = nil
+		state.followup = nil
+		return nil
+	end
+	if state.stage == "earth_followup" and state.followup then
+		local ability = ControlAlly.SpecialAI.ready(context, state.followup, false)
+		if not ability then
+			if context.now - state.startedAt > 0.75 then
+				state.stage = nil
+				state.followup = nil
+			end
+			return nil
+		end
+		local rule = ControlAlly.Profiles.Heroes.npc_dota_hero_earth_spirit.abilities[state.followup]
+		return {
+			ability = ability,
+			id = state.followup,
+			policy = "point",
+			position = ControlAlly.Targeting.predictPosition(target, ability, rule),
+			reservationTarget = target,
+			score = 178,
+			urgent = true,
+			source = "ability",
+			rule = {
+				committedMotion = state.followup == "earth_spirit_rolling_boulder",
+				projectileSpeedSpecial = "speed",
+			},
+			specialStage = "earth_followup",
+			allowRapid = true,
+		}
+	end
+	local stone = ControlAlly.SpecialAI.ready(context, "earth_spirit_stone_caller", false)
+	if not stone then
+		return nil
+	end
+	local followup
+	for _, id in ipairs({
+		"earth_spirit_rolling_boulder",
+		"earth_spirit_boulder_smash",
+		"earth_spirit_geomagnetic_grip",
+	}) do
+		if ControlAlly.SpecialAI.ready(context, id, false) then
+			followup = id
+			break
+		end
+	end
+	if not followup then
+		return nil
+	end
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local predicted = ControlAlly.Targeting.predictPosition(target, stone, {})
+	local range = ControlAlly.AbilityAI.castRange(context.unit, stone, {})
+	local distance = ControlAlly.Utils.distance2D(origin, predicted)
+	local position = predicted
+	if followup == "earth_spirit_rolling_boulder" then
+		position = ControlAlly.Utils.positionToward(origin, predicted, math.min(range, distance * 0.45))
+	elseif followup == "earth_spirit_boulder_smash" then
+		local smash = ControlAlly.AbilityAI.findAbility(context.controller, "earth_spirit_boulder_smash", context.now)
+		local searchRadius = ControlAlly.Utils.specialValueExact(smash, "rock_search_aoe", range * 0.15) or range * 0.15
+		position = ControlAlly.Utils.positionToward(origin, predicted, math.min(searchRadius * 0.85, distance))
+	elseif distance > range then
+		position = ControlAlly.Utils.positionToward(origin, predicted, range)
+	end
+	return {
+		ability = stone,
+		id = "earth_spirit_stone_caller",
+		policy = "point",
+		position = position,
+		reservationTarget = target,
+		score = 116,
+		urgent = true,
+		source = "ability",
+		specialStage = "earth_stone",
+		earthFollowup = followup,
+	}
+end
+
+function ControlAlly.SpecialAI.pangolierAction(context)
+	if
+		(context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_pangolier"
+		or not context.target
+		or context.controller.special.stage == "pango_rolling"
+	then
+		return nil
+	end
+	local ability = ControlAlly.SpecialAI.ready(context, "pangolier_gyroshell", false)
+	if not ability then
+		return nil
+	end
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local targetPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+	local faceTime = ControlAlly.Utils.call(NPC.GetTimeToFacePosition, context.unit, targetPosition) or 0
+	if faceTime > 0.055 then
+		ControlAlly.Orders.face(context.controller, ControlAlly.Utils.normalized2D(origin, targetPosition), context.now)
+		return nil
+	end
+	return {
+		ability = ability,
+		id = "pangolier_gyroshell",
+		policy = "noTarget",
+		reservationTarget = context.target,
+		score = 116,
+		urgent = true,
+		source = "ability",
+		specialStage = "pango_roll_start",
+	}
+end
+
+function ControlAlly.SpecialAI.oracleAction(context)
+	if (context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_oracle" then
+		return nil
+	end
+	local state = context.controller.special
+	if state.stage == "oracle_flames" and ControlAlly.Utils.isValidHero(state.target, true) then
+		local flames = ControlAlly.SpecialAI.ready(context, "oracle_purifying_flames", false)
+		if flames then
+			return {
+				ability = flames,
+				id = "oracle_purifying_flames",
+				policy = "ally",
+				target = state.target,
+				reservationTarget = state.target,
+				score = 188,
+				urgent = true,
+				source = "ability",
+				specialStage = "oracle_flames",
+				allowRapid = true,
+			}
+		end
+		if context.now - state.startedAt > 0.75 then
+			state.stage = nil
+			state.target = nil
+		end
+		return nil
+	end
+	local edict = ControlAlly.SpecialAI.ready(context, "oracle_fates_edict", false)
+	local flames = ControlAlly.SpecialAI.ready(context, "oracle_purifying_flames", false)
+	local probe = edict or flames
+	if probe then
+		local ally = ControlAlly.AbilityAI.bestAllyTarget(context, probe, {
+			allyMode = "heal",
+			allyHealthPct = 70,
+			allyModifiers = { "modifier_oracle_fates_edict" },
+		})
+		if ally then
+			if ControlAlly.Utils.hasAnyModifier(ally, { "modifier_oracle_false_promise" }) and flames then
+				return {
+					ability = flames,
+					id = "oracle_purifying_flames",
+					policy = "ally",
+					target = ally,
+					reservationTarget = ally,
+					score = 176,
+					urgent = true,
+					source = "ability",
+					specialStage = "oracle_flames",
+				}
+			end
+			if edict and flames then
+				return {
+					ability = edict,
+					id = "oracle_fates_edict",
+					policy = "ally",
+					target = ally,
+					reservationTarget = ally,
+					score = 142,
+					urgent = true,
+					source = "ability",
+					specialStage = "oracle_edict",
+				}
+			end
+		end
+	end
+	if context.target then
+		local fortune = ControlAlly.SpecialAI.ready(context, "oracle_fortunes_end", false)
+		if fortune then
+			local distance = ControlAlly.Utils.distance2D(
+				ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit),
+				ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+			)
+			if
+				distance <= ControlAlly.AbilityAI.castRange(context.unit, fortune, {})
+				and ControlAlly.Utils.call(NPC.IsLinkensProtected, context.target) ~= true
+				and ControlAlly.AbilityAI.unitTargetIsSafe(context.target, false)
+			then
+				return {
+					ability = fortune,
+					id = "oracle_fortunes_end",
+					policy = "enemy",
+					target = context.target,
+					reservationTarget = context.target,
+					score = 88,
+					source = "ability",
+				}
+			end
+		end
+	end
+	return nil
+end
+
+function ControlAlly.SpecialAI.pugnaAction(context)
+	if
+		(context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_pugna"
+		or not context.target
+		or ControlAlly.Utils.isMagicImmune(context.target)
+	then
+		return nil
+	end
+	local state = context.controller.special
+	local target = ControlAlly.Targeting.isValidEnemy(state.target) and state.target or context.target
+	if
+		ControlAlly.Utils.call(NPC.IsLinkensProtected, target) == true
+		or not ControlAlly.AbilityAI.unitTargetIsSafe(target, false)
+	then
+		state.stage = nil
+		state.target = nil
+		return nil
+	end
+	local function inRange(ability)
+		return ability
+			and ControlAlly.Utils.distance2D(
+					ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit),
+					ControlAlly.Utils.call(Entity.GetAbsOrigin, target)
+				)
+				<= ControlAlly.AbilityAI.castRange(context.unit, ability, {}) + ControlAlly.Constants.CAST_RANGE_BUFFER
+	end
+	local drain = ControlAlly.SpecialAI.ready(context, "pugna_life_drain", false)
+	if state.stage == "pugna_drain" then
+		if inRange(drain) then
+			return {
+				ability = drain,
+				id = "pugna_life_drain",
+				policy = "enemy",
+				target = target,
+				reservationTarget = target,
+				score = 184,
+				urgent = true,
+				source = "ability",
+				specialStage = "pugna_drain",
+				allowRapid = true,
+			}
+		end
+		state.stage = nil
+	end
+	local decrepify = ControlAlly.SpecialAI.ready(context, "pugna_decrepify", false)
+	if
+		inRange(decrepify)
+		and drain
+		and not ControlAlly.Utils.hasAnyModifier(target, { "modifier_pugna_decrepify" })
+	then
+		return {
+			ability = decrepify,
+			id = "pugna_decrepify",
+			policy = "enemy",
+			target = target,
+			reservationTarget = target,
+			score = 126,
+			source = "ability",
+			specialStage = "pugna_decrepify",
+		}
+	end
+	if inRange(drain) then
+		return {
+			ability = drain,
+			id = "pugna_life_drain",
+			policy = "enemy",
+			target = target,
+			reservationTarget = target,
+			score = 112,
+			source = "ability",
+			specialStage = "pugna_drain",
+		}
+	end
+	return nil
+end
+
+function ControlAlly.SpecialAI.winterWyvernAction(context)
+	if
+		(context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_winter_wyvern"
+		or not context.target
+	then
+		return nil
+	end
+	local ability = ControlAlly.SpecialAI.ready(context, "winter_wyvern_splinter_blast", false)
+	if not ability then
+		return nil
+	end
+	local targetPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local splitRadius = ControlAlly.Utils.specialValueExact(ability, "split_radius", 0) or 0
+	local range = ControlAlly.AbilityAI.castRange(context.unit, ability, {})
+	local team = ControlAlly.Utils.call(Entity.GetTeamNum, context.unit)
+	local carriers = team
+			and ControlAlly.Utils.call(
+				NPCs.InRadius,
+				targetPosition,
+				splitRadius,
+				team,
+				Enum.TeamType.TEAM_ENEMY,
+				false,
+				true
+			)
+		or {}
+	local best
+	local bestDistance = math.huge
+	for _, carrier in ipairs(carriers) do
+		local position = ControlAlly.Utils.call(Entity.GetAbsOrigin, carrier)
+		local distance = ControlAlly.Utils.distance2D(origin, position)
+		if
+			carrier ~= context.target
+			and distance <= range + ControlAlly.Constants.CAST_RANGE_BUFFER
+			and ControlAlly.Utils.call(NPC.IsLinkensProtected, carrier) ~= true
+			and ControlAlly.AbilityAI.unitTargetIsSafe(carrier, false)
+			and distance < bestDistance
+		then
+			best = carrier
+			bestDistance = distance
+		end
+	end
+	if not best then
+		return nil
+	end
+	return {
+		ability = ability,
+		id = "winter_wyvern_splinter_blast",
+		policy = "enemy",
+		target = best,
+		reservationTarget = context.target,
+		score = 92,
+		source = "ability",
+	}
+end
+
+function ControlAlly.SpecialAI.controlActiveMotion(context)
+	if (context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_pangolier" then
+		return false
+	end
+	local state = context.controller.special
+	local rolling = ControlAlly.Utils.hasAnyModifier(context.unit, {
+		"modifier_pangolier_gyroshell",
+		"modifier_pangolier_gyroshell_ricochet",
+	})
+	if state.stage ~= "pango_rolling" and not rolling then
+		return false
+	end
+	if not rolling and context.now - state.startedAt > 0.35 then
+		state.stage = nil
+		state.target = nil
+		return false
+	end
+	local target = ControlAlly.Targeting.isValidEnemy(context.target) and context.target or state.target
+	if ControlAlly.Targeting.isValidEnemy(target) then
+		local position = ControlAlly.Targeting.predictPosition(target, nil, {})
+		ControlAlly.Orders.move(context.controller, position, context.now)
+	end
+	return true
+end
+
+function ControlAlly.SpecialAI.smartUltimateAction(context)
+	local profileName = context.controller.profileName or context.controller.heroName
+	local target = context.target
+	local function inRange(ability, unitTarget)
+		return ability
+			and unitTarget
+			and ControlAlly.Utils.distance2D(
+					ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit),
+					ControlAlly.Utils.call(Entity.GetAbsOrigin, unitTarget)
+				)
+				<= ControlAlly.AbilityAI.castRange(context.unit, ability, {}) + ControlAlly.Constants.CAST_RANGE_BUFFER
+	end
+	local function directTargetIsSafe(unitTarget, allowMagicImmune)
+		return unitTarget
+			and (allowMagicImmune or not ControlAlly.Utils.isMagicImmune(unitTarget))
+			and ControlAlly.Utils.call(NPC.IsLinkensProtected, unitTarget) ~= true
+			and ControlAlly.AbilityAI.unitTargetIsSafe(unitTarget, false)
+	end
+	if profileName == "npc_dota_hero_axe" and target then
+		local ability = ControlAlly.SpecialAI.ready(context, "axe_culling_blade", false)
+		local damage = ability and ControlAlly.Utils.specialValueExact(ability, "damage", 0) or 0
+		if
+			inRange(ability, target)
+			and directTargetIsSafe(target, true)
+			and damage > 0
+			and (ControlAlly.Utils.call(Entity.GetHealth, target) or math.huge) <= damage
+		then
+			return {
+				ability = ability,
+				id = "axe_culling_blade",
+				policy = "enemy",
+				target = target,
+				reservationTarget = target,
+				score = 190,
+				urgent = true,
+				source = "ability",
+			}
+		end
+	elseif profileName == "npc_dota_hero_necrolyte" and target then
+		local ability = ControlAlly.SpecialAI.ready(context, "necrolyte_reapers_scythe", false)
+		if ability then
+			local health = ControlAlly.Utils.call(Entity.GetHealth, target) or math.huge
+			local maxHealth = ControlAlly.Utils.call(Entity.GetMaxHealth, target) or health
+			local damagePerHealth = ControlAlly.Utils.specialValueExact(ability, "damage_per_health", 0) or 0
+			local magicMultiplier = ControlAlly.Utils.call(NPC.GetMagicalArmorDamageMultiplier, target) or 1
+			local projectedDamage = math.max(0, maxHealth - health) * damagePerHealth * magicMultiplier
+			if inRange(ability, target) and directTargetIsSafe(target, false) and projectedDamage >= health then
+				return {
+					ability = ability,
+					id = "necrolyte_reapers_scythe",
+					policy = "enemy",
+					target = target,
+					reservationTarget = target,
+					score = 184,
+					urgent = true,
+					source = "ability",
+				}
+			end
+		end
+	elseif profileName == "npc_dota_hero_zuus" then
+		local ability = ControlAlly.SpecialAI.ready(context, "zuus_thundergods_wrath", false)
+		if ability then
+			local damage = ControlAlly.Utils.specialValueExact(ability, "damage", 0) or 0
+			local lethal = 0
+			local pressured = 0
+			for _, enemy in ipairs(ControlAlly.Runtime.enemies) do
+				local health = ControlAlly.Utils.call(Entity.GetHealth, enemy) or math.huge
+				local magicMultiplier = ControlAlly.Utils.call(NPC.GetMagicalArmorDamageMultiplier, enemy) or 1
+				if not ControlAlly.Utils.isMagicImmune(enemy) and damage > 0 and health <= damage * magicMultiplier then
+					lethal = lethal + 1
+				end
+				if not ControlAlly.Utils.isMagicImmune(enemy) and ControlAlly.Utils.healthPct(enemy) <= 55 then
+					pressured = pressured + 1
+				end
+			end
+			if lethal > 0 or pressured >= 2 then
+				return {
+					ability = ability,
+					id = "zuus_thundergods_wrath",
+					policy = "noTarget",
+					score = 170 + lethal * 12,
+					urgent = lethal > 0,
+					source = "ability",
+				}
+			end
+		end
+	elseif profileName == "npc_dota_hero_earthshaker" and target then
+		local totem = ControlAlly.SpecialAI.ready(context, "earthshaker_enchant_totem", false)
+		if
+			totem
+			and ControlAlly.Utils.call(NPC.HasScepter, context.unit) == true
+			and not ControlAlly.Utils.hasAnyModifier(context.unit, { "modifier_earthshaker_enchant_totem" })
+		then
+			local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+			local targetPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, target)
+			local leapRange = ControlAlly.Utils.specialValueExact(totem, "distance_scepter", 950) or 950
+			if origin and targetPosition then
+				local leapDistance = ControlAlly.Utils.distance2D(origin, targetPosition)
+				if leapDistance > 175 and leapDistance <= leapRange + 50 then
+					return {
+						ability = totem,
+						id = "earthshaker_enchant_totem",
+						policy = "point",
+						position = ControlAlly.Utils.positionToward(
+							origin,
+							targetPosition,
+							math.max(0, leapDistance - 100)
+						),
+						score = 130,
+						urgent = leapDistance > 350,
+						source = "ability",
+					}
+				end
+			end
+		end
+		local ability = ControlAlly.SpecialAI.ready(context, "earthshaker_echo_slam", false)
+		if ability then
+			local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+			local radius = ControlAlly.Utils.specialValueExact(ability, "echo_slam_echo_search_range", 0) or 0
+			local team = ControlAlly.Utils.call(Entity.GetTeamNum, context.unit)
+			local units = team
+					and ControlAlly.Utils.call(
+						NPCs.InRadius,
+						origin,
+						radius,
+						team,
+						Enum.TeamType.TEAM_ENEMY,
+						false,
+						true
+					)
+				or {}
+			local heroes = 0
+			local total = 0
+			for _, unit in ipairs(units) do
+				if
+					ControlAlly.Utils.call(Entity.IsAlive, unit) == true
+					and not ControlAlly.Utils.isMagicImmune(unit)
+				then
+					total = total + 1
+					heroes = heroes + (ControlAlly.Utils.call(NPC.IsHero, unit) == true and 1 or 0)
+				end
+			end
+			if heroes >= 1 or total >= 3 then
+				return {
+					ability = ability,
+					id = "earthshaker_echo_slam",
+					policy = "noTarget",
+					score = 178 + math.min(total, 8) * 4,
+					urgent = true,
+					source = "ability",
+				}
+			end
+		end
+	elseif profileName == "npc_dota_hero_lich" and target then
+		local ability = ControlAlly.SpecialAI.ready(context, "lich_chain_frost", false)
+		if ability then
+			local jumpRange = ControlAlly.Utils.specialValueExact(ability, "jump_range", 0) or 0
+			if
+				inRange(ability, target)
+				and directTargetIsSafe(target, false)
+				and ControlAlly.Targeting.clusterCount(target, jumpRange) >= 2
+			then
+				return {
+					ability = ability,
+					id = "lich_chain_frost",
+					policy = "enemy",
+					target = target,
+					reservationTarget = target,
+					score = 174,
+					urgent = true,
+					source = "ability",
+				}
+			end
+		end
+	elseif profileName == "npc_dota_hero_winter_wyvern" and target then
+		local ability = ControlAlly.SpecialAI.ready(context, "winter_wyvern_winters_curse", false)
+		if ability then
+			local radius = ControlAlly.Utils.specialValueExact(ability, "radius", 0) or 0
+			if
+				inRange(ability, target)
+				and directTargetIsSafe(target, true)
+				and ControlAlly.Targeting.clusterCount(target, radius) >= 2
+			then
+				return {
+					ability = ability,
+					id = "winter_wyvern_winters_curse",
+					policy = "enemy",
+					target = target,
+					reservationTarget = target,
+					score = 180,
+					urgent = true,
+					source = "ability",
+				}
+			end
+		end
+	elseif profileName == "npc_dota_hero_shadow_shaman" and target then
+		local ability = ControlAlly.SpecialAI.ready(context, "shadow_shaman_mass_serpent_ward", false)
+		if ability then
+			local radius = ControlAlly.Utils.specialValueExact(ability, "spawn_radius", 0) or 0
+			if
+				inRange(ability, target)
+				and (
+					ControlAlly.Targeting.clusterCount(
+							target,
+							math.max(radius * 3, ControlAlly.Constants.DEFAULT_POINT_RADIUS)
+						)
+						>= 2
+					or ControlAlly.Utils.healthPct(target) <= 42
+				)
+			then
+				return {
+					ability = ability,
+					id = "shadow_shaman_mass_serpent_ward",
+					policy = "point",
+					position = ControlAlly.Targeting.predictPosition(target, ability, {}),
+					reservationTarget = target,
+					score = 172,
+					urgent = true,
+					source = "ability",
+				}
+			end
+		end
+	end
+	return nil
+end
+
+function ControlAlly.SpecialAI.stormBallAction(context, currentAction)
+	if
+		currentAction
+		or not ControlAlly.UI.UseAbilities
+		or ControlAlly.UI.UseAbilities:Get() ~= true
+		or (context.controller.profileName or context.controller.heroName) ~= "npc_dota_hero_storm_spirit"
+		or not context.target
+		or context.now - context.controller.special.lastBallAt < 1.0
+	then
+		return nil
+	end
+	local ability = ControlAlly.SpecialAI.ready(context, "storm_spirit_ball_lightning", false)
+	if not ability then
+		return nil
+	end
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local targetPosition = ControlAlly.Targeting.predictPosition(context.target, ability, {})
+	if not origin or not targetPosition then
+		return nil
+	end
+	local attackRange = ControlAlly.Utils.call(NPC.GetAttackRange, context.unit) or 150
+	local distance = ControlAlly.Utils.distance2D(origin, targetPosition)
+	local engagementRadius = attackRange + 260
+	if distance <= engagementRadius then
+		return nil
+	end
+	local maximumMana = ControlAlly.Utils.call(NPC.GetMaxMana, context.unit) or 0
+	local currentMana = ControlAlly.Utils.call(NPC.GetMana, context.unit) or 0
+	local initialBase = ControlAlly.Utils.specialValueExact(ability, "ball_lightning_initial_mana_base", 0) or 0
+	local initialPercent = ControlAlly.Utils.specialValueExact(ability, "ball_lightning_initial_mana_percentage", 0)
+		or 0
+	local travelBase = ControlAlly.Utils.specialValueExact(ability, "ball_lightning_travel_cost_base", 0) or 0
+	local travelPercent = ControlAlly.Utils.specialValueExact(ability, "ball_lightning_travel_cost_percent", 0) or 0
+	local reserveMana = 0
+	for _, id in ipairs({ "storm_spirit_static_remnant", "storm_spirit_electric_vortex" }) do
+		local followup = ControlAlly.AbilityAI.findAbility(context.controller, id, context.now)
+		if followup and (ControlAlly.Utils.call(Ability.GetLevel, followup) or 0) > 0 then
+			reserveMana = reserveMana + (ControlAlly.Utils.call(Ability.GetManaCost, followup) or 0)
+			if id == "storm_spirit_electric_vortex" then
+				engagementRadius =
+					math.max(engagementRadius, ControlAlly.AbilityAI.castRange(context.unit, followup, {}))
+			end
+		end
+	end
+	local initialCost = initialBase + maximumMana * initialPercent * 0.01
+	local travelCostPerHundred = travelBase + maximumMana * travelPercent * 0.01
+	if travelCostPerHundred <= 0 then
+		return nil
+	end
+	local affordableTravelMana = currentMana - initialCost - reserveMana
+	local affordableDistance = math.max(0, math.floor(affordableTravelMana / travelCostPerHundred) * 100)
+	if affordableDistance <= 0 or distance - affordableDistance > engagementRadius then
+		return nil
+	end
+	local landingPosition = targetPosition
+	if distance > affordableDistance then
+		landingPosition = ControlAlly.Utils.positionToward(origin, targetPosition, affordableDistance)
+	end
+	return {
+		ability = ability,
+		id = "storm_spirit_ball_lightning",
+		policy = "point",
+		position = landingPosition,
+		score = 30,
+		source = "ability",
+		committedMotion = true,
+		rule = { projectileSpeedSpecial = "ball_lightning_move_speed" },
+		specialStage = "storm_ball",
+	}
+end
+
+function ControlAlly.SpecialAI.bestAction(context)
+	if not ControlAlly.UI.UseAbilities or ControlAlly.UI.UseAbilities:Get() ~= true then
+		return nil
+	end
+	local best
+	local function consider(action)
+		if action and (not best or action.score > best.score) then
+			best = action
+		end
+	end
+	consider(ControlAlly.TechiesAI.mineAction(context))
+	consider(ControlAlly.SpecialAI.loneDruidAction(context))
+	consider(ControlAlly.SpecialAI.spectreAction(context))
+	consider(ControlAlly.SpecialAI.emberAction(context))
+	consider(ControlAlly.SpecialAI.hoodwinkAction(context))
+	consider(ControlAlly.SpecialAI.monkeyAction(context))
+	consider(ControlAlly.SpecialAI.marciAction(context))
+	consider(ControlAlly.SpecialAI.dawnbreakerAction(context))
+	consider(ControlAlly.SpecialAI.ancientApparitionAction(context))
+	consider(ControlAlly.SpecialAI.shadowFiendAction(context))
+	consider(ControlAlly.SpecialAI.dazzleAction(context))
+	consider(ControlAlly.SpecialAI.morphlingAction(context))
+	consider(ControlAlly.SpecialAI.earthSpiritAction(context))
+	consider(ControlAlly.SpecialAI.pangolierAction(context))
+	consider(ControlAlly.SpecialAI.oracleAction(context))
+	consider(ControlAlly.SpecialAI.pugnaAction(context))
+	consider(ControlAlly.SpecialAI.winterWyvernAction(context))
+	consider(ControlAlly.SpecialAI.smartUltimateAction(context))
+	consider(ControlAlly.KezAI.switchAction(context))
+	return best
+end
+
+function ControlAlly.SpecialAI.onCastResult(controller, pending, success, now)
+	local stage = pending.specialStage
+	local profileName = controller.profileName or controller.heroName
+	if profileName == "npc_dota_hero_kez" and success and pending.source == "ability" then
+		if stage == "kez_switch" then
+			controller.kez.lastSwitchAt = now
+			controller.kez.castsAfterSwitch = 0
+			ControlAlly.SpecialAI.invalidateCatalog(controller)
+		elseif pending.id ~= "kez_switch_weapons" then
+			controller.kez.formCasts[pending.id] = now
+			controller.kez.castsAfterSwitch = controller.kez.castsAfterSwitch + 1
+		end
+	end
+	if not stage then
+		return
+	end
+	if not success then
+		if stage ~= "storm_ball" then
+			controller.special.stage = nil
+		end
+		return
+	end
+	if stage == "spectre_open" then
+		controller.special.stage = "spectre_reality"
+		controller.special.target = pending.castTarget
+		controller.special.startedAt = now
+		ControlAlly.SpecialAI.invalidateCatalog(controller)
+	elseif stage == "spectre_reality" or stage == "ember_activate" or stage == "monkey_spring" then
+		controller.special.stage = nil
+		controller.special.target = nil
+		ControlAlly.SpecialAI.invalidateCatalog(controller)
+	elseif stage == "ember_place" then
+		controller.special.stage = "ember_activate"
+		controller.special.target = pending.castTarget
+		controller.special.startedAt = now
+		ControlAlly.SpecialAI.invalidateCatalog(controller)
+	elseif stage == "monkey_tree" then
+		controller.special.stage = "monkey_spring"
+		controller.special.target = pending.castTarget
+		controller.special.startedAt = now
+		ControlAlly.SpecialAI.invalidateCatalog(controller)
+	elseif stage == "lone_summon" or stage == "dawn_converge" then
+		ControlAlly.SpecialAI.invalidateCatalog(controller)
+	elseif stage == "storm_ball" then
+		controller.special.lastBallAt = now
+	elseif stage == "aa_launch" then
+		controller.special.stage = "aa_release"
+		controller.special.target = pending.castTarget
+		controller.special.startedAt = now + (pending.specialTravelTime or 0)
+		ControlAlly.SpecialAI.invalidateCatalog(controller)
+	elseif stage == "aa_release" then
+		controller.special.stage = nil
+		ControlAlly.SpecialAI.invalidateCatalog(controller)
+	elseif stage == "dazzle_projection" then
+		controller.special.stage = "dazzle_active"
+		controller.special.startedAt = now
+		ControlAlly.SpecialAI.invalidateCatalog(controller)
+	elseif stage == "dazzle_projection_end" then
+		controller.special.stage = nil
+		controller.special.target = nil
+		ControlAlly.SpecialAI.invalidateCatalog(controller)
+	elseif stage == "morph_replicate" then
+		controller.special.stage = "morph_copied"
+		controller.special.startedAt = now
+		ControlAlly.SpecialAI.invalidateCatalog(controller)
+	elseif stage == "morph_return" then
+		controller.special.stage = nil
+		ControlAlly.SpecialAI.invalidateCatalog(controller)
+	elseif stage == "earth_stone" then
+		controller.special.stage = "earth_followup"
+		controller.special.followup = pending.earthFollowup
+		controller.special.target = pending.castTarget
+		controller.special.startedAt = now
+	elseif stage == "earth_followup" then
+		controller.special.stage = nil
+		controller.special.followup = nil
+		controller.special.target = nil
+	elseif stage == "pango_roll_start" then
+		controller.special.stage = "pango_rolling"
+		controller.special.target = pending.castTarget
+		controller.special.startedAt = now
+	elseif stage == "oracle_edict" then
+		controller.special.stage = "oracle_flames"
+		controller.special.target = pending.castTarget
+		controller.special.startedAt = now
+	elseif stage == "oracle_flames" then
+		controller.special.stage = nil
+		controller.special.target = nil
+	elseif stage == "pugna_decrepify" then
+		controller.special.stage = "pugna_drain"
+		controller.special.target = pending.castTarget
+		controller.special.startedAt = now
+	elseif stage == "pugna_drain" then
+		controller.special.stage = nil
+		controller.special.target = nil
+	end
+end
+
+function ControlAlly.SpecialAI.finishManagedActions(now)
+	for _, controller in pairs(ControlAlly.Runtime.controllerStates) do
+		if
+			(controller.profileName or controller.heroName) == "npc_dota_hero_ancient_apparition"
+			and controller.special.stage == "aa_release"
+			and ControlAlly.Utils.isValidControllerUnit(controller.unit, true)
+		then
+			ControlAlly.Combat.confirmPendingCast(controller, now)
+			if
+				not controller.pendingCast
+				and now >= (controller.busyUntil or -math.huge)
+				and ControlAlly.Utils.protectedActivity(controller.unit, controller.activeAbility) == nil
+			then
+				local action = ControlAlly.SpecialAI.ancientApparitionAction({
+					controller = controller,
+					unit = controller.unit,
+					target = controller.special.target,
+					now = now,
+				})
+				if action and action.id == "ancient_apparition_ice_blast_release" then
+					return ControlAlly.Orders.cast(controller, action, now)
+				end
+			end
+		end
+	end
+	return false
+end
+
+function ControlAlly.SpecialAI.handleLockedChannel(controller, now)
+	local pending = controller.pendingCast
+	if not pending or not pending.wasChanneling or pending.releaseIssued then
+		return false
+	end
+	local releaseByStage = {
+		hood_sharpshooter = "hoodwink_sharpshooter_release",
+		ringmaster_tame = "ringmaster_tame_the_beasts_crack",
+	}
+	local releaseId = releaseByStage[pending.specialStage]
+	if not releaseId then
+		return false
+	end
+	local duration = pending.channelTime or 0
+	if duration <= 0 then
+		duration = ControlAlly.Utils.specialValue(
+			pending.ability,
+			{ "max_charge_time", "AbilityChannelTime", "channel_time" },
+			0
+		)
+	end
+	if duration <= 0 or now - (pending.channelStartedAt or pending.issuedAt) + 0.06 < duration then
+		return false
+	end
+	local release = ControlAlly.AbilityAI.findAbility(controller, releaseId, now)
+	if not ControlAlly.AbilityAI.isReady(controller, release, releaseId, true, false, true, true) then
+		return false
+	end
+	if
+		ControlAlly.Orders.issue(
+			controller,
+			Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_NO_TARGET,
+			nil,
+			nil,
+			release,
+			"release_" .. releaseId,
+			true,
+			0.03
+		)
+	then
+		pending.releaseIssued = true
+		pending.allowEarlyEnd = true
+		return true
+	end
+	return false
+end
+
+function ControlAlly.InvokerAI.orbsAreLearned(controller, rule, now)
+	local checked = {}
+	for _, orbId in ipairs(rule.orbs or {}) do
+		if not checked[orbId] then
+			checked[orbId] = true
+			local orb = ControlAlly.AbilityAI.findAbility(controller, orbId, now)
+			if not orb or (ControlAlly.Utils.call(Ability.GetLevel, orb) or 0) <= 0 then
+				return false
+			end
+		end
+	end
+	return true
+end
+
+function ControlAlly.InvokerAI.invokedAbility(controller, spellId, now)
+	for _, entry in ipairs(ControlAlly.AbilityAI.catalog(controller, now).abilities) do
+		if entry.id == spellId and ControlAlly.Utils.call(Ability.IsHidden, entry.ability) ~= true then
+			return entry.ability
+		end
+	end
+	return nil
+end
+
+function ControlAlly.InvokerAI.hiddenSpellIsReady(controller, ability, rule)
+	if not ability or ControlAlly.Utils.cooldownRemaining(ability) > 0.03 then
+		return false
+	end
+	if Ability.IsInIndefinateCooldown and ControlAlly.Utils.call(Ability.IsInIndefinateCooldown, ability) == true then
+		return false
+	end
+	local mana = ControlAlly.Utils.call(NPC.GetMana, controller.unit) or 0
+	local cost = ControlAlly.Utils.call(Ability.GetManaCost, ability) or 0
+	return mana >= cost and ControlAlly.InvokerAI.orbsAreLearned(controller, rule, ControlAlly.Utils.gameTime())
+end
+
+function ControlAlly.InvokerAI.spellScore(context, ability, spellId, rule, invoked)
+	local usable = rule.policy == "iceWall" and ControlAlly.AbilityAI.rulePasses(context, ability, rule)
+		or ControlAlly.AbilityAI.wouldBeUsableIfReady(context, ability, rule)
+	if
+		not ControlAlly.Menu.isAbilityEnabled(spellId)
+		or not ControlAlly.InvokerAI.hiddenSpellIsReady(context.controller, ability, rule)
+		or not usable
+	then
+		return nil
+	end
+	if rule.policy ~= "self" and rule.policy ~= "noTarget" and not context.target then
+		return nil
+	end
+	if
+		context.target
+		and ControlAlly.Utils.isMagicImmune(context.target)
+		and not rule.allowMagicImmune
+		and (rule.policy == "enemy" or rule.policy == "point")
+	then
+		return nil
+	end
+	if
+		rule.policy == "enemy"
+		and context.target
+		and not ControlAlly.AbilityAI.unitTargetIsSafe(context.target, false)
+	then
+		return nil
+	end
+	if
+		rule.policy == "enemy"
+		and context.target
+		and ControlAlly.Utils.call(NPC.IsLinkensProtected, context.target) == true
+	then
+		return nil
+	end
+	if context.target and rule.targetModifiers then
+		local targetIndex = ControlAlly.Utils.entityIndex(context.target)
+		local key = targetIndex and (tostring(targetIndex) .. ":" .. spellId)
+		if key and (ControlAlly.Runtime.effectReservations[key] or -math.huge) > context.now then
+			return nil
+		end
+	end
+	if rule.disable and context.target then
+		local targetIndex = ControlAlly.Utils.entityIndex(context.target)
+		if
+			ControlAlly.Targeting.hardDisableRemaining(context.target) > 0.32
+			or (targetIndex and (ControlAlly.Runtime.disableReservations[targetIndex] or -math.huge) > context.now)
+		then
+			return nil
+		end
+	end
+
+	local score = rule.priority or 60
+	if invoked then
+		score = score + 14
+	end
+	if context.target then
+		local healthPct = ControlAlly.Utils.healthPct(context.target)
+		if rule.preferLowHealth then
+			score = score + (100 - healthPct) * 0.40
+		end
+		if rule.preferDisabledTarget and ControlAlly.Targeting.hardDisableRemaining(context.target) > 0.15 then
+			score = score + 28
+		end
+		if spellId == "invoker_sun_strike" then
+			local damage = ControlAlly.Utils.call(Ability.GetDamage, ability) or 0
+			if damage <= 0 then
+				damage = ControlAlly.Utils.specialValue(ability, { "damage" }, 0)
+			end
+			if damage >= (ControlAlly.Utils.call(Entity.GetHealth, context.target) or math.huge) then
+				score = score + 75
+			end
+		end
+	end
+	return score
+end
+
+function ControlAlly.InvokerAI.prepareSpecificSpell(context, spellId, rule)
+	local controller = context.controller
+	local state = controller.invoker
+	if ControlAlly.InvokerAI.invokedAbility(controller, spellId, context.now) then
+		return nil, "ready"
+	end
+	local invoke = ControlAlly.AbilityAI.findAbility(controller, "invoker_invoke", context.now)
+	if not ControlAlly.AbilityAI.isReady(controller, invoke, "invoker_invoke", false, false) then
+		return nil, "waiting"
+	end
+	local spell = ControlAlly.AbilityAI.findAbility(controller, spellId, context.now)
+	local mana = ControlAlly.Utils.call(NPC.GetMana, controller.unit) or 0
+	local requiredMana = (ControlAlly.Utils.call(Ability.GetManaCost, invoke) or 0)
+		+ (ControlAlly.Utils.call(Ability.GetManaCost, spell) or 0)
+	if mana < requiredMana then
+		return nil, "waiting"
+	end
+	if state.spellId ~= spellId then
+		state.spellId = spellId
+		state.orbIndex = 1
+		state.nextStepAt = context.now
+	end
+	if context.now < state.nextStepAt or context.now < state.waitUntil then
+		return nil, "preparing"
+	end
+	local orbs = rule.orbs or {}
+	local actualCounts, actualTotal = ControlAlly.InvokerAI.orbCounts(controller)
+	local desiredCounts = ControlAlly.InvokerAI.desiredOrbCounts(rule)
+	local countTracking = actualTotal > 0
+	if countTracking and ControlAlly.InvokerAI.orbsMatch(actualCounts, desiredCounts) then
+		state.orbIndex = #orbs + 1
+	end
+	if state.orbIndex <= #orbs then
+		local orbId
+		if countTracking then
+			for _, candidateId in ipairs({ "invoker_quas", "invoker_wex", "invoker_exort" }) do
+				if actualCounts[candidateId] < desiredCounts[candidateId] then
+					orbId = candidateId
+					break
+				end
+			end
+		end
+		orbId = orbId or orbs[state.orbIndex]
+		local orb = ControlAlly.AbilityAI.findAbility(controller, orbId, context.now)
+		if not ControlAlly.AbilityAI.isReady(controller, orb, orbId, false, false) then
+			return nil, "waiting"
+		end
+		return ControlAlly.InvokerAI.internalAction(
+			orb,
+			orbId,
+			"orb",
+			string.format("invoke:%s:orb:%s:%d", spellId, orbId, state.orbIndex),
+			{
+				spellId = spellId,
+				countTracking = countTracking,
+				orbSignatureBefore = ControlAlly.InvokerAI.orbSignature(controller),
+			}
+		),
+			"preparing"
+	end
+	return ControlAlly.InvokerAI.internalAction(
+		invoke,
+		"invoker_invoke",
+		"invoke",
+		"invoke:" .. spellId,
+		{ spellId = spellId }
+	),
+		"preparing"
+end
+
+function ControlAlly.InvokerAI.comboImpactDelay(context, ability, rule)
+	local castPoint = ControlAlly.Utils.call(Ability.GetCastPoint, ability, true)
+		or ControlAlly.Utils.call(Ability.GetCastPoint, ability)
+		or 0
+	local delay = ControlAlly.Utils.ruleValue(ability, rule, "lead", "delaySpecial", 0) or 0
+	local targetPosition = context.target and ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+	local faceTime = targetPosition and ControlAlly.Utils.call(NPC.GetTimeToFacePosition, context.unit, targetPosition)
+		or 0
+	faceTime = type(faceTime) == "number" and math.max(0, faceTime) or 0
+	local speed = ControlAlly.Utils.ruleValue(ability, rule, "projectileSpeed", "projectileSpeedSpecial", 0) or 0
+	if delay <= 0 and speed > 0 and context.target then
+		local distance = ControlAlly.Utils.distance2D(
+			ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit),
+			ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+		)
+		if distance < math.huge then
+			delay = distance / speed
+		end
+	end
+	return faceTime + castPoint + math.max(0, delay)
+end
+
+function ControlAlly.InvokerAI.selectComboSpell(context, combo)
+	local candidates = {
+		{ id = "invoker_sun_strike", score = 96 },
+		{ id = "invoker_chaos_meteor", score = 106 },
+		{ id = "invoker_emp", score = 88 },
+		{ id = "invoker_deafening_blast", score = 92 },
+	}
+	local best
+	for _, candidate in ipairs(candidates) do
+		local rule = ControlAlly.Profiles.InvokerSpells[candidate.id]
+		local ability = ControlAlly.AbilityAI.findAbility(context.controller, candidate.id, context.now)
+		if
+			rule
+			and ControlAlly.Menu.isAbilityEnabled(candidate.id)
+			and ControlAlly.InvokerAI.hiddenSpellIsReady(context.controller, ability, rule)
+			and ControlAlly.AbilityAI.wouldBeUsableIfReady(context, ability, rule)
+			and (not rule.targetManaMinPct or ControlAlly.Utils.manaPct(context.target) >= rule.targetManaMinPct)
+		then
+			local impactDelay = ControlAlly.InvokerAI.comboImpactDelay(context, ability, rule)
+			local issueAt = combo.landingAt - impactDelay + ControlAlly.Constants.INVOKER_COMBO_CAST_TOLERANCE
+			local score = candidate.score
+			if candidate.id == "invoker_sun_strike" then
+				score = score + (100 - ControlAlly.Utils.healthPct(context.target)) * 0.35
+				local damage = ControlAlly.Utils.specialValue(ability, { "damage" }, 0)
+				if damage >= (ControlAlly.Utils.call(Entity.GetHealth, context.target) or math.huge) then
+					score = score + 80
+				end
+			elseif candidate.id == "invoker_chaos_meteor" then
+				local radius = ControlAlly.AbilityAI.radius(ability, rule)
+				local targetPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.target)
+				for _, enemy in ipairs(ControlAlly.Runtime.enemies) do
+					if
+						enemy ~= context.target
+						and ControlAlly.Utils.distance2D(
+								targetPosition,
+								ControlAlly.Utils.call(Entity.GetAbsOrigin, enemy)
+							)
+							<= radius
+					then
+						score = score + 18
+					end
+				end
+			elseif candidate.id == "invoker_emp" then
+				score = score + ControlAlly.Utils.manaPct(context.target) * 0.35
+			end
+			local invoked = ControlAlly.InvokerAI.invokedAbility(context.controller, candidate.id, context.now) ~= nil
+			local invoke = ControlAlly.AbilityAI.findAbility(context.controller, "invoker_invoke", context.now)
+			local requiredMana = (ControlAlly.Utils.call(Ability.GetManaCost, ability) or 0)
+				+ (invoked and 0 or (ControlAlly.Utils.call(Ability.GetManaCost, invoke) or 0))
+			local preparationTime = ControlAlly.Constants.INVOKER_POST_INVOKE_WAIT
+				+ #(rule.orbs or {}) * ControlAlly.Constants.INVOKER_ORB_GAP
+				+ ControlAlly.Constants.ORDER_GAP
+			if
+				context.now <= issueAt + ControlAlly.Constants.INVOKER_COMBO_LATE_TOLERANCE
+				and (ControlAlly.Utils.call(NPC.GetMana, context.unit) or 0) >= requiredMana
+				and (invoked or issueAt - context.now >= preparationTime)
+				and (not best or score > best.score)
+			then
+				best = {
+					id = candidate.id,
+					ability = ability,
+					rule = rule,
+					issueAt = issueAt,
+					score = score,
+				}
+			end
+		end
+	end
+	return best
+end
+
+function ControlAlly.InvokerAI.comboAction(context)
+	local combo = context.controller.invoker.combo
+	if not combo then
+		return nil, nil
+	end
+	if
+		combo.target ~= context.target
+		or not ControlAlly.Targeting.isValidEnemy(combo.target)
+		or ControlAlly.Utils.isMagicImmune(combo.target)
+	then
+		context.controller.invoker.combo = nil
+		return nil, nil
+	end
+	local exactRemaining = ControlAlly.Utils.modifierRemaining(combo.target, "modifier_invoker_tornado", context.now)
+	if exactRemaining > 0 then
+		combo.landingAt = context.now + exactRemaining
+		combo.sawLift = true
+	elseif
+		not combo.sawLift
+		and context.now > (combo.expectedImpactAt or math.huge) + ControlAlly.Constants.INVOKER_TORNADO_HIT_GRACE
+	then
+		context.controller.invoker.combo = nil
+		return nil, nil
+	elseif combo.sawLift and context.now > combo.landingAt + ControlAlly.Constants.INVOKER_COMBO_FINISH_GRACE then
+		context.controller.invoker.combo = nil
+		return nil, nil
+	end
+	if not combo.followup then
+		combo.followup = ControlAlly.InvokerAI.selectComboSpell(context, combo)
+		if not combo.followup then
+			context.controller.invoker.combo = nil
+			return nil, nil
+		end
+	end
+	local followup = combo.followup
+	followup.issueAt = combo.landingAt
+		- ControlAlly.InvokerAI.comboImpactDelay(context, followup.ability, followup.rule)
+		+ ControlAlly.Constants.INVOKER_COMBO_CAST_TOLERANCE
+	local invoked = ControlAlly.InvokerAI.invokedAbility(context.controller, followup.id, context.now)
+	if not invoked then
+		local prepareAction = ControlAlly.InvokerAI.prepareSpecificSpell(context, followup.id, followup.rule)
+		return prepareAction, "combo_wait"
+	end
+	if context.now + ControlAlly.Constants.INVOKER_COMBO_CAST_TOLERANCE < followup.issueAt then
+		return nil, "combo_wait"
+	end
+	if context.now > followup.issueAt + ControlAlly.Constants.INVOKER_COMBO_LATE_TOLERANCE then
+		context.controller.invoker.combo = nil
+		return nil, nil
+	end
+	local timedRule = ControlAlly.Utils.copyTable(followup.rule)
+	timedRule.allowDisabledTarget = true
+	timedRule.preferDisabledTarget = false
+	local action = ControlAlly.AbilityAI.buildAction(context, invoked, followup.id, timedRule, "ability")
+	if action then
+		action.score = 420
+		action.urgent = true
+		action.invokerComboSpell = followup.id
+	end
+	return action, action and "combo_cast" or "combo_wait"
+end
+
+function ControlAlly.InvokerAI.iceWallAction(context, ability, rule)
+	if
+		not context.target
+		or not ControlAlly.AbilityAI.isReady(context.controller, ability, "invoker_ice_wall", false, false)
+	then
+		return nil, nil
+	end
+	local origin = ControlAlly.Utils.call(Entity.GetAbsOrigin, context.unit)
+	local targetPosition = ControlAlly.Targeting.predictPosition(context.target, ability, rule)
+	if not origin or not targetPosition then
+		return nil, nil
+	end
+	local wallDistance = ControlAlly.Utils.specialValueExact(ability, "wall_place_distance", 0) or 0
+	local wallLength = ControlAlly.Utils.specialValueExact(ability, "wall_total_length", 0) or 0
+	local wallWidth = ControlAlly.Utils.specialValueExact(ability, "wall_width", 0) or 0
+	if wallDistance <= 0 or wallLength <= 0 then
+		return nil, nil
+	end
+	local distance = ControlAlly.Utils.distance2D(origin, targetPosition)
+	local behavior = ControlAlly.Utils.call(Ability.GetBehavior, ability) or 0
+	local vectorRange = ControlAlly.Utils.specialValueExact(ability, "vector_cast_range", 0) or 0
+	if
+		vectorRange > 0
+		and ControlAlly.Utils.hasFlag(behavior, Enum.AbilityBehavior.DOTA_ABILITY_BEHAVIOR_VECTOR_TARGETING)
+	then
+		if distance > vectorRange then
+			local stand = ControlAlly.Utils.positionToward(targetPosition, origin, vectorRange * 0.85)
+			if stand then
+				local iceWall = context.controller.invoker
+				iceWall.iceWallStand = iceWall.iceWallStand or { startedAt = context.now }
+				if context.now - iceWall.iceWallStand.startedAt > ControlAlly.Constants.ICE_WALL_POSITION_TIMEOUT then
+					iceWall.iceWallStand = nil
+					return nil, nil
+				end
+				ControlAlly.Orders.move(context.controller, stand, context.now)
+				return nil, "positioning"
+			end
+		end
+		context.controller.invoker.iceWallStand = nil
+		local towardTarget = ControlAlly.Utils.normalized2D(origin, targetPosition)
+		if not towardTarget then
+			return nil, nil
+		end
+		local perpendicular = Vector(-towardTarget.y, towardTarget.x, 0)
+		local vectorLength = math.min(wallLength, vectorRange)
+		local centeredStart = Vector(
+			targetPosition.x - perpendicular.x * vectorLength * 0.5,
+			targetPosition.y - perpendicular.y * vectorLength * 0.5,
+			targetPosition.z or 0
+		)
+		local startPosition = ControlAlly.Utils.distance2D(origin, centeredStart) <= vectorRange and centeredStart
+			or targetPosition
+		return {
+			ability = ability,
+			id = "invoker_ice_wall",
+			policy = "vector",
+			position = startPosition,
+			vectorEnd = Vector(
+				startPosition.x + perpendicular.x * vectorLength,
+				startPosition.y + perpendicular.y * vectorLength,
+				targetPosition.z or 0
+			),
+			score = 112,
+			urgent = true,
+			source = "ability",
+			rule = rule,
+		},
+			nil
+	end
+	local halfLength = wallLength * 0.5
+	local hull = ControlAlly.Utils.call(NPC.GetHullRadius, context.target) or 0
+	local alongTolerance = wallWidth * 0.5 + hull
+	local minimumReach = math.max(0, wallDistance - alongTolerance)
+	local maximumReach = math.sqrt(
+		(wallDistance + alongTolerance) * (wallDistance + alongTolerance) + (halfLength + hull) * (halfLength + hull)
+	)
+	if distance < minimumReach or distance > maximumReach then
+		local stand = ControlAlly.Utils.positionToward(targetPosition, origin, wallDistance)
+		if
+			stand
+			and ControlAlly.Utils.distance2D(origin, stand) > ControlAlly.Constants.ICE_WALL_POSITION_TOLERANCE
+		then
+			local iceWall = context.controller.invoker
+			iceWall.iceWallStand = iceWall.iceWallStand or { startedAt = context.now }
+			if context.now - iceWall.iceWallStand.startedAt > ControlAlly.Constants.ICE_WALL_POSITION_TIMEOUT then
+				iceWall.iceWallStand = nil
+				return nil, nil
+			end
+			ControlAlly.Orders.move(context.controller, stand, context.now)
+			return nil, "positioning"
+		end
+	end
+	local direction = ControlAlly.Utils.normalized2D(origin, targetPosition)
+	if not direction then
+		return nil, nil
+	end
+	local minimumAlongForCross = math.sqrt(math.max(0, distance * distance - (halfLength + hull) * (halfLength + hull)))
+	local desiredAlong = ControlAlly.Utils.clamp(
+		math.max(wallDistance - alongTolerance, minimumAlongForCross),
+		wallDistance - alongTolerance,
+		math.min(distance, wallDistance + alongTolerance)
+	)
+	local angle = math.acos(ControlAlly.Utils.clamp(desiredAlong / math.max(distance, 0.001), -1, 1))
+	local left = ControlAlly.Utils.rotate2D(direction, angle)
+	local right = ControlAlly.Utils.rotate2D(direction, -angle)
+	local leftPoint = Vector(origin.x + left.x * 100, origin.y + left.y * 100, origin.z or 0)
+	local rightPoint = Vector(origin.x + right.x * 100, origin.y + right.y * 100, origin.z or 0)
+	local leftTime = ControlAlly.Utils.call(NPC.GetTimeToFacePosition, context.unit, leftPoint) or math.huge
+	local rightTime = ControlAlly.Utils.call(NPC.GetTimeToFacePosition, context.unit, rightPoint) or math.huge
+	local desiredForward = leftTime <= rightTime and left or right
+	local rotation = ControlAlly.Utils.call(Entity.GetRotation, context.unit)
+	local forward = rotation and ControlAlly.Utils.call(rotation.GetForward, rotation)
+	local offsetX = targetPosition.x - origin.x
+	local offsetY = targetPosition.y - origin.y
+	local aligned = false
+	if forward then
+		local along = offsetX * forward.x + offsetY * forward.y
+		local across = math.abs(offsetX * -forward.y + offsetY * forward.x)
+		aligned = math.abs(along - wallDistance) <= wallWidth * 0.5 + hull and across <= halfLength + hull
+	end
+	if not aligned then
+		local iceWall = context.controller.invoker
+		iceWall.iceWallStand = iceWall.iceWallStand or { startedAt = context.now }
+		if context.now - iceWall.iceWallStand.startedAt > ControlAlly.Constants.ICE_WALL_POSITION_TIMEOUT then
+			iceWall.iceWallStand = nil
+			return nil, nil
+		end
+		ControlAlly.Orders.face(context.controller, desiredForward, context.now)
+		return nil, "positioning"
+	end
+	context.controller.invoker.iceWallStand = nil
+	return {
+		ability = ability,
+		id = "invoker_ice_wall",
+		policy = "noTarget",
+		score = 112,
+		urgent = true,
+		source = "ability",
+		rule = rule,
+	},
+		nil
+end
+
+function ControlAlly.InvokerAI.chooseSpell(context)
+	local bestDesired
+	local bestDesiredScore = -math.huge
+	local bestInvokedAction
+	for spellId, rule in pairs(ControlAlly.Profiles.InvokerSpells) do
+		local ability = ControlAlly.AbilityAI.findAbility(context.controller, spellId, context.now)
+		local invokedAbility = ControlAlly.InvokerAI.invokedAbility(context.controller, spellId, context.now)
+		local score = ControlAlly.InvokerAI.spellScore(context, ability, spellId, rule, invokedAbility ~= nil)
+		if score and score > bestDesiredScore then
+			bestDesired = {
+				id = spellId,
+				ability = ability,
+				rule = rule,
+				score = score,
+				invoked = invokedAbility ~= nil,
+			}
+			bestDesiredScore = score
+		end
+		if invokedAbility then
+			local action
+			if spellId ~= "invoker_ice_wall" then
+				action = ControlAlly.AbilityAI.buildAction(context, invokedAbility, spellId, rule, "ability")
+			end
+			if action and spellId == "invoker_tornado" then
+				action.invokerComboSetup = true
+			end
+			if action and (not bestInvokedAction or action.score > bestInvokedAction.score) then
+				bestInvokedAction = action
+			end
+		end
+	end
+	if bestDesired and bestDesired.id == "invoker_ice_wall" and bestDesired.invoked then
+		local iceAction, iceStatus = ControlAlly.InvokerAI.iceWallAction(context, bestDesired.ability, bestDesired.rule)
+		if iceStatus then
+			return bestDesired, nil, iceStatus
+		end
+		return bestDesired, iceAction or bestInvokedAction, nil
+	end
+	return bestDesired, bestInvokedAction
+end
+
+function ControlAlly.InvokerAI.orbCounts(controller)
+	local counts = {
+		invoker_quas = 0,
+		invoker_wex = 0,
+		invoker_exort = 0,
+	}
+	local modifierToOrb = {
+		modifier_invoker_quas_instance = "invoker_quas",
+		modifier_invoker_wex_instance = "invoker_wex",
+		modifier_invoker_exort_instance = "invoker_exort",
+	}
+	for _, modifier in ipairs(ControlAlly.Utils.call(NPC.GetModifiers, controller.unit) or {}) do
+		local orbId = modifierToOrb[ControlAlly.Utils.call(Modifier.GetName, modifier)]
+		if orbId then
+			local stacks = ControlAlly.Utils.call(Modifier.GetStackCount, modifier) or 0
+			counts[orbId] = math.max(counts[orbId] + 1, stacks)
+		end
+	end
+	return counts, counts.invoker_quas + counts.invoker_wex + counts.invoker_exort
+end
+
+function ControlAlly.InvokerAI.orbSignature(controller)
+	local counts = ControlAlly.InvokerAI.orbCounts(controller)
+	return string.format("%d:%d:%d", counts.invoker_quas, counts.invoker_wex, counts.invoker_exort)
+end
+
+function ControlAlly.InvokerAI.desiredOrbCounts(rule)
+	local counts = {
+		invoker_quas = 0,
+		invoker_wex = 0,
+		invoker_exort = 0,
+	}
+	for _, orbId in ipairs(rule.orbs or {}) do
+		counts[orbId] = (counts[orbId] or 0) + 1
+	end
+	return counts
+end
+
+function ControlAlly.InvokerAI.orbsMatch(actual, desired)
+	return actual.invoker_quas == desired.invoker_quas
+		and actual.invoker_wex == desired.invoker_wex
+		and actual.invoker_exort == desired.invoker_exort
+end
+
+function ControlAlly.InvokerAI.internalAction(ability, id, stage, dedupeKey, metadata)
+	metadata = metadata or {}
+	return {
+		ability = ability,
+		id = id,
+		policy = "noTarget",
+		score = 500,
+		urgent = true,
+		internal = true,
+		allowRapid = true,
+		executeFast = true,
+		orderGap = ControlAlly.Constants.INVOKER_INTERNAL_ORDER_GAP,
+		invokerStage = stage,
+		invokerSpellId = metadata.spellId,
+		invokerCountTracking = metadata.countTracking == true,
+		orbSignatureBefore = metadata.orbSignatureBefore,
+		dedupeKey = dedupeKey,
+	}
+end
+
+function ControlAlly.InvokerAI.nextAction(context)
+	local controller = context.controller
+	local state = controller.invoker
+	local comboAction, comboStatus = ControlAlly.InvokerAI.comboAction(context)
+	if comboAction or comboStatus then
+		return comboAction, comboStatus
+	end
+	if context.now < state.waitUntil then
+		return nil, "preparing"
+	end
+
+	local desired, invokedAction, specialStatus = ControlAlly.InvokerAI.chooseSpell(context)
+	if specialStatus then
+		return invokedAction, specialStatus
+	end
+	if not desired then
+		state.spellId = nil
+		state.orbIndex = 1
+		return invokedAction, nil
+	end
+	if desired.invoked then
+		state.spellId = nil
+		state.orbIndex = 1
+		return invokedAction, nil
+	end
+	if invokedAction and invokedAction.score + 18 >= desired.score then
+		return invokedAction, nil
+	end
+
+	local invoke = ControlAlly.AbilityAI.findAbility(controller, "invoker_invoke", context.now)
+	if not ControlAlly.AbilityAI.isReady(controller, invoke, "invoker_invoke", false, false) then
+		return invokedAction, nil
+	end
+	local mana = ControlAlly.Utils.call(NPC.GetMana, controller.unit) or 0
+	local requiredMana = (ControlAlly.Utils.call(Ability.GetManaCost, invoke) or 0)
+		+ (ControlAlly.Utils.call(Ability.GetManaCost, desired.ability) or 0)
+	if mana < requiredMana then
+		return invokedAction, nil
+	end
+
+	if state.spellId ~= desired.id then
+		state.spellId = desired.id
+		state.orbIndex = 1
+		state.nextStepAt = context.now
+	end
+	if context.now < state.nextStepAt then
+		return nil, "preparing"
+	end
+
+	local orbs = desired.rule.orbs or {}
+	local actualCounts, actualTotal = ControlAlly.InvokerAI.orbCounts(controller)
+	local desiredCounts = ControlAlly.InvokerAI.desiredOrbCounts(desired.rule)
+	local countTracking = actualTotal > 0
+	if countTracking and ControlAlly.InvokerAI.orbsMatch(actualCounts, desiredCounts) then
+		state.orbIndex = #orbs + 1
+	end
+	if state.orbIndex <= #orbs then
+		local orbId
+		if countTracking then
+			for _, candidateId in ipairs({ "invoker_quas", "invoker_wex", "invoker_exort" }) do
+				if actualCounts[candidateId] < desiredCounts[candidateId] then
+					orbId = candidateId
+					break
+				end
+			end
+		end
+		orbId = orbId or orbs[state.orbIndex]
+		local orb = ControlAlly.AbilityAI.findAbility(controller, orbId, context.now)
+		if ControlAlly.AbilityAI.isReady(controller, orb, orbId, false, false) then
+			return ControlAlly.InvokerAI.internalAction(
+				orb,
+				orbId,
+				"orb",
+				string.format("invoke:%s:orb:%s:%d", desired.id, orbId, state.orbIndex),
+				{
+					spellId = desired.id,
+					countTracking = countTracking,
+					orbSignatureBefore = ControlAlly.InvokerAI.orbSignature(controller),
+				}
+			),
+				"preparing"
+		end
+		return invokedAction, nil
+	end
+	return ControlAlly.InvokerAI.internalAction(
+		invoke,
+		"invoker_invoke",
+		"invoke",
+		"invoke:" .. desired.id,
+		{ spellId = desired.id }
+	),
+		"preparing"
+end
+
+function ControlAlly.InvokerAI.onActionConfirmed(controller, pending, now)
+	if not pending or not pending.internal then
+		return
+	end
+	local state = controller.invoker
+	if pending.invokerStage == "orb" then
+		if not pending.invokerCountTracking then
+			state.orbIndex = state.orbIndex + 1
+		end
+		state.nextStepAt = now + ControlAlly.Constants.INVOKER_ORB_GAP
+	elseif pending.invokerStage == "invoke" then
+		state.waitUntil = now + ControlAlly.Constants.INVOKER_POST_INVOKE_WAIT
+		state.nextStepAt = state.waitUntil
+		state.orbIndex = 1
+	end
+end
+
+function ControlAlly.InvokerAI.onSpellCastResult(controller, pending, success, now)
+	if pending.invokerComboSpell then
+		if success then
+			controller.invoker.combo = nil
+		else
+			controller.invoker.combo = nil
+		end
+		return
+	end
+	if not pending.invokerComboSetup then
+		return
+	end
+	if not success or not ControlAlly.Targeting.isValidEnemy(pending.castTarget) then
+		controller.invoker.combo = nil
+		return
+	end
+	local target = pending.castTarget
+	local rule = ControlAlly.Profiles.InvokerSpells.invoker_tornado
+	local speed = ControlAlly.Utils.ruleValue(pending.ability, rule, "projectileSpeed", "projectileSpeedSpecial", 0)
+		or 0
+	local duration = ControlAlly.Utils.ruleValue(pending.ability, rule, "duration", "durationSpecial", 0) or 0
+	local distance = ControlAlly.Utils.distance2D(
+		ControlAlly.Utils.call(Entity.GetAbsOrigin, controller.unit),
+		pending.impactPosition or ControlAlly.Utils.call(Entity.GetAbsOrigin, target)
+	)
+	local travel = speed > 0 and distance < math.huge and distance / speed or 0
+	controller.invoker.combo = {
+		target = target,
+		landingAt = now + travel + duration,
+		expectedImpactAt = now + travel,
+		sawLift = false,
+		followup = nil,
+	}
+end
+
+function ControlAlly.TinkerAI.rearmChannelTime(rearm)
+	return ControlAlly.Utils.specialValueExact(rearm, "AbilityChannelTime", 0) or 0
+end
+
+function ControlAlly.TinkerAI.rearmAction(context, currentAction)
+	local controller = context.controller
+	if
+		not ControlAlly.UI.UseAbilities
+		or ControlAlly.UI.UseAbilities:Get() ~= true
+		or controller.heroName ~= "npc_dota_hero_tinker"
+		or currentAction
+		or not context.target
+		or not ControlAlly.Menu.isAbilityEnabled("tinker_rearm")
+		or context.now - controller.lastRearmAt < ControlAlly.Constants.TINKER_REARM_GAP
+		or controller.lastRefreshableCastAt <= controller.lastRearmAt
+	then
+		return nil
+	end
+	local rearm = ControlAlly.AbilityAI.findAbility(controller, "tinker_rearm", context.now)
+	if not ControlAlly.AbilityAI.isReady(controller, rearm, "tinker_rearm", false, false) then
+		return nil
+	end
+	local usefulCooldowns = 0
+	local cheapestFollowup = math.huge
+	local rearmDelay = ControlAlly.TinkerAI.rearmChannelTime(rearm)
+		+ (ControlAlly.Utils.call(Ability.GetCastPoint, rearm) or 0)
+		+ 0.12
+	local catalog = ControlAlly.AbilityAI.catalog(controller, context.now)
+	for _, entry in ipairs(catalog.abilities) do
+		if ControlAlly.Profiles.RefreshableTinkerActions[entry.id] and ControlAlly.Menu.isAbilityEnabled(entry.id) then
+			local rule = ControlAlly.Profiles.getAbilityRule(controller.profileName or controller.heroName, entry.id)
+			if rule and ControlAlly.AbilityAI.wouldBeUsableIfReady(context, entry.ability, rule) then
+				if ControlAlly.AbilityAI.isReady(controller, entry.ability, entry.id, false, false) then
+					return nil
+				end
+				if ControlAlly.Utils.cooldownRemaining(entry.ability) > rearmDelay then
+					usefulCooldowns = usefulCooldowns + 1
+					cheapestFollowup =
+						math.min(cheapestFollowup, ControlAlly.Utils.call(Ability.GetManaCost, entry.ability) or 0)
+				end
+			end
+		end
+	end
+	if usefulCooldowns <= 0 then
+		return nil
+	end
+	local mana = ControlAlly.Utils.call(NPC.GetMana, controller.unit) or 0
+	local rearmCost = ControlAlly.Utils.call(Ability.GetManaCost, rearm) or 0
+	if mana < rearmCost + (cheapestFollowup < math.huge and cheapestFollowup or 0) then
+		return nil
+	end
+	return {
+		ability = rearm,
+		id = "tinker_rearm",
+		policy = "noTarget",
+		score = 45,
+		isRearm = true,
+		source = "ability",
+	}
+end
+
+function ControlAlly.Combat.confirmPendingCast(controller, now)
+	local pending = controller.pendingCast
+	if not pending then
+		return true
+	end
+	local ability = pending.ability
+	local cooldown = ControlAlly.Utils.cooldownRemaining(ability)
+	local charges = ControlAlly.Utils.call(Ability.GetCurrentCharges, ability)
+	local seconds = ControlAlly.Utils.call(Ability.SecondsSinceLastUse, ability)
+	local castStart = ControlAlly.Utils.call(Ability.GetCastStartTime, ability)
+	local inPhase = ControlAlly.Utils.call(Ability.IsInAbilityPhase, ability) == true
+	local channel = ControlAlly.Utils.protectedActivity(controller.unit, controller.activeAbility)
+	local castStartChanged = type(castStart) == "number"
+		and type(pending.castStartBefore) == "number"
+		and castStart > pending.castStartBefore + 0.001
+
+	local function finish(success)
+		if not success then
+			if pending.committedMotion then
+				ControlAlly.Utils.clearMotionLock(controller)
+			end
+			controller.lastIssued[pending.dedupeKey or pending.id] = nil
+			if pending.supportFamily then
+				ControlAlly.Runtime.supportReservations[pending.supportFamily] = nil
+			end
+			if pending.positionReservationFamily and pending.castPosition then
+				local kept = {}
+				for _, reservation in
+					ipairs(ControlAlly.Runtime.positionReservations[pending.positionReservationFamily] or {})
+				do
+					if ControlAlly.Utils.distance2D(reservation.position, pending.castPosition) > 1 then
+						kept[#kept + 1] = reservation
+					end
+				end
+				ControlAlly.Runtime.positionReservations[pending.positionReservationFamily] = kept
+			end
+			if pending.disable and pending.castTarget then
+				local targetIndex = ControlAlly.Utils.entityIndex(pending.castTarget)
+				if targetIndex then
+					ControlAlly.Runtime.disableReservations[targetIndex] = nil
+				end
+			end
+			if pending.breaksLinkens and pending.castTarget then
+				local targetIndex = ControlAlly.Utils.entityIndex(pending.castTarget)
+				if targetIndex then
+					ControlAlly.Runtime.linkensReservations[targetIndex] = nil
+				end
+			end
+		else
+			if pending.desiredToggle ~= nil then
+				controller.ownedToggles[pending.id] = pending.desiredToggle and true or nil
+				local record, index = ControlAlly.Roster.toggleRegistryRecord(
+					controller.unit,
+					controller.playerId,
+					pending.desiredToggle == true
+				)
+				if record then
+					record.abilities[pending.id] = pending.desiredToggle and true or nil
+					if index and next(record.abilities) == nil then
+						ControlAlly.Runtime.toggleOwnershipRegistry[index] = nil
+					end
+				end
+			end
+			if pending.internal then
+				ControlAlly.InvokerAI.onActionConfirmed(controller, pending, now)
+			else
+				if pending.attackModifier then
+					controller.castsSinceAttack = 0
+					controller.lastAttackTarget = ControlAlly.Utils.entityIndex(pending.castTarget)
+				else
+					controller.castsSinceAttack = controller.castsSinceAttack + 1
+				end
+				if pending.source == "ability" and not pending.isRearm then
+					controller.usedAbilitiesSinceRefresh[pending.id] = now
+				end
+				if pending.refreshable then
+					controller.lastRefreshableCastAt = now
+				end
+				if pending.isRearm then
+					controller.lastRearmAt = now
+					controller.usedAbilitiesSinceRefresh = {}
+				end
+				if pending.isRefresher then
+					controller.lastRefresherAt = now
+					controller.usedAbilitiesSinceRefresh = {}
+				end
+			end
+		end
+		ControlAlly.InvokerAI.onSpellCastResult(controller, pending, success, now)
+		ControlAlly.MeepoAI.onCastResult(controller, pending, success, now)
+		ControlAlly.AlchemistAI.onCastResult(controller, pending, success, now)
+		ControlAlly.TechiesAI.onCastResult(controller, pending, success)
+		ControlAlly.SpecialAI.onCastResult(controller, pending, success, now)
+		controller.pendingCast = nil
+		controller.activeAbility = nil
+		return true
+	end
+
+	if pending.sessionGeneration ~= ControlAlly.Runtime.sessionGeneration then
+		return finish(false)
+	end
+
+	if inPhase or channel == ability then
+		pending.started = true
+		pending.channelEndedAt = nil
+		if channel == ability then
+			pending.wasChanneling = true
+			if not pending.channelStartedAt then
+				local reportedStart = ControlAlly.Utils.call(Ability.GetChannelStartTime, ability)
+				pending.channelStartedAt = type(reportedStart) == "number" and reportedStart > 0 and reportedStart
+					or now
+			end
+		end
+		local hardTimeout = math.max(
+			(pending.channelTime or 0) + 1.40,
+			pending.internal and 0.70 or ControlAlly.Constants.PENDING_PHASE_HARD_TIMEOUT
+		)
+		if now - pending.issuedAt > hardTimeout then
+			return finish(pending.allowEarlyEnd == true)
+		end
+		return false
+	end
+	if castStartChanged then
+		pending.started = true
+	end
+	local orbChanged = pending.internal
+		and pending.invokerStage == "orb"
+		and pending.orbSignatureBefore ~= nil
+		and ControlAlly.InvokerAI.orbSignature(controller) ~= pending.orbSignatureBefore
+	local invokedAppeared = pending.internal
+		and pending.invokerStage == "invoke"
+		and pending.invokerSpellId
+		and ControlAlly.InvokerAI.invokedAbility(controller, pending.invokerSpellId, now) ~= nil
+	local refreshObserved = false
+	if pending.isRefresher then
+		local elapsed = math.max(0, now - pending.issuedAt)
+		for id, before in pairs(pending.refreshCooldownsBefore or {}) do
+			local refreshed = ControlAlly.AbilityAI.findAbility(controller, id, now)
+			local naturalRemaining = math.max(0, (before or 0) - elapsed)
+			if naturalRemaining > 0.10 and ControlAlly.Utils.cooldownRemaining(refreshed) + 0.10 < naturalRemaining then
+				refreshObserved = true
+				break
+			end
+		end
+	end
+	local successEvidence = cooldown > (pending.cooldownBefore or 0) + 0.02
+		or (type(charges) == "number" and type(pending.chargesBefore) == "number" and charges < pending.chargesBefore)
+		or (type(seconds) == "number" and seconds >= 0 and (type(pending.secondsBefore) ~= "number" or pending.secondsBefore < 0 or seconds + 0.05 < pending.secondsBefore))
+		or orbChanged
+		or invokedAppeared
+		or (pending.alchemistStage == "throw" and pending.hiddenBefore == false and ControlAlly.Utils.call(
+			Ability.IsHidden,
+			ability
+		) == true)
+		or refreshObserved
+		or (pending.toggleBefore ~= nil and ControlAlly.Utils.call(Ability.GetToggleState, ability) ~= pending.toggleBefore)
+		or (pending.altBefore ~= nil and Ability.GetAltCastState and ControlAlly.Utils.call(
+			Ability.GetAltCastState,
+			ability
+		) ~= pending.altBefore)
+		or (pending.treadsBefore ~= nil and PowerTreads and PowerTreads.GetStats and ControlAlly.Utils.call(
+			PowerTreads.GetStats,
+			ability
+		) ~= pending.treadsBefore)
+		or (
+			pending.attackModifier
+			and now - pending.issuedAt > 0.08
+			and ControlAlly.Utils.call(NPC.IsAttacking, controller.unit) == true
+		)
+
+	if pending.isRearm then
+		if pending.wasChanneling then
+			local elapsed = math.max(0, now - pending.issuedAt)
+			local resetObserved = false
+			for id, before in pairs(pending.refreshCooldownsBefore or {}) do
+				local refreshed = ControlAlly.AbilityAI.findAbility(controller, id, now)
+				local current = ControlAlly.Utils.cooldownRemaining(refreshed)
+				local naturalRemaining = math.max(0, (before or 0) - elapsed)
+				if naturalRemaining > 0.10 and current + 0.10 < naturalRemaining then
+					resetObserved = true
+					break
+				end
+			end
+			if resetObserved then
+				return finish(true)
+			end
+			pending.channelEndedAt = pending.channelEndedAt or now
+			if now - pending.channelEndedAt < ControlAlly.Constants.PENDING_CHANNEL_END_DEBOUNCE then
+				return false
+			end
+			local channelElapsed = pending.channelEndedAt - (pending.channelStartedAt or pending.issuedAt)
+			if pending.started and channelElapsed + 0.15 >= (pending.channelTime or 0) then
+				return finish(true)
+			end
+			if now - pending.channelEndedAt > 0.18 then
+				return finish(false)
+			end
+			return false
+		end
+		local timeout = math.max(1.40, (pending.channelTime or 0) + 0.80)
+		if now - pending.issuedAt > timeout then
+			return finish(false)
+		end
+		return false
+	end
+
+	if pending.channelled and pending.wasChanneling then
+		if pending.allowEarlyEnd then
+			return finish(true)
+		end
+		pending.channelEndedAt = pending.channelEndedAt or now
+		if now - pending.channelEndedAt < ControlAlly.Constants.PENDING_CHANNEL_END_DEBOUNCE then
+			return false
+		end
+		local channelElapsed = pending.channelEndedAt - (pending.channelStartedAt or pending.issuedAt)
+		local expected = pending.channelTime or 0
+		local durationCompleted = expected > 0 and channelElapsed + 0.15 >= expected
+		if (successEvidence and expected <= 0) or (durationCompleted and (successEvidence or pending.started)) then
+			return finish(true)
+		end
+		if now - pending.channelEndedAt > 0.18 then
+			return finish(false)
+		end
+		return false
+	end
+
+	if successEvidence then
+		return finish(true)
+	end
+	local timeout = pending.internal and 0.70 or 1.40
+	if now - pending.issuedAt <= timeout then
+		return false
+	end
+	return finish(false)
+end
+
+function ControlAlly.Combat.chooseAction(first, second)
+	if not first then
+		return second
+	end
+	if not second then
+		return first
+	end
+	return first.score >= second.score and first or second
+end
+
+function ControlAlly.Combat.rollbackPendingReservations(controller)
+	local pending = controller and controller.pendingCast
+	if not pending or (not pending.supportFamily and not pending.positionReservationFamily) then
+		return
+	end
+	local cooldown = ControlAlly.Utils.cooldownRemaining(pending.ability)
+	local charges = ControlAlly.Utils.call(Ability.GetCurrentCharges, pending.ability)
+	local likelyCast = pending.started
+		or cooldown > (pending.cooldownBefore or 0) + 0.02
+		or (type(charges) == "number" and type(pending.chargesBefore) == "number" and charges < pending.chargesBefore)
+	if likelyCast then
+		return
+	end
+	if pending.supportFamily then
+		ControlAlly.Runtime.supportReservations[pending.supportFamily] = nil
+	end
+	if pending.positionReservationFamily and pending.castPosition then
+		local kept = {}
+		for _, reservation in ipairs(ControlAlly.Runtime.positionReservations[pending.positionReservationFamily] or {}) do
+			if ControlAlly.Utils.distance2D(reservation.position, pending.castPosition) > 1 then
+				kept[#kept + 1] = reservation
+			end
+		end
+		ControlAlly.Runtime.positionReservations[pending.positionReservationFamily] = kept
+	end
+end
+
+function ControlAlly.Combat.maintainInactiveControllers(now, detachedOnly)
+	for _, controller in pairs(ControlAlly.Runtime.controllerStates) do
+		if
+			(not detachedOnly or controller.detached == true)
+			and ControlAlly.Utils.isValidControllerUnit(controller.unit, true)
+		then
+			ControlAlly.Combat.confirmPendingCast(controller, now)
+			if
+				not controller.pendingCast
+				and now >= (controller.busyUntil or -math.huge)
+				and ControlAlly.Utils.protectedActivity(controller.unit, controller.activeAbility) == nil
+			then
+				for id in pairs(controller.ownedToggles or {}) do
+					local ability = ControlAlly.AbilityAI.findAbility(controller, id, now)
+					if not ability or ControlAlly.Utils.call(Ability.GetToggleState, ability) ~= true then
+						controller.ownedToggles[id] = nil
+						local record, index =
+							ControlAlly.Roster.toggleRegistryRecord(controller.unit, controller.playerId, false)
+						if record then
+							record.abilities[id] = nil
+							if index and next(record.abilities) == nil then
+								ControlAlly.Runtime.toggleOwnershipRegistry[index] = nil
+							end
+						end
+					elseif
+						ControlAlly.Orders.cast(controller, {
+							ability = ability,
+							id = id,
+							policy = "toggle",
+							score = 1000,
+							urgent = true,
+							source = "ability",
+							desiredToggle = false,
+							allowRapid = true,
+							dedupeKey = "cleanup_toggle:" .. id,
+						}, now)
+					then
+						return true
+					end
+				end
+			end
+		end
+	end
+	return false
+end
+
+function ControlAlly.Combat.finishStopRequests()
+	for _, controller in pairs(ControlAlly.Runtime.controllerStates) do
+		if controller.stopRequested then
+			if not ControlAlly.Utils.isValidControllerUnit(controller.unit, true) then
+				controller.stopRequested = false
+			elseif ControlAlly.Runtime.orderBudget <= 0 then
+				return
+			else
+				local now = ControlAlly.Utils.gameTime()
+				if
+					not ControlAlly.Runtime.inSession
+					and ControlAlly.Utils.isMotionLocked(controller, now)
+					and ControlAlly.Utils.protectedActivity(controller.unit, controller.activeAbility) == nil
+				then
+					ControlAlly.Utils.clearMotionLock(controller)
+				end
+				ControlAlly.Orders.stop(controller)
+			end
+		end
+	end
+end
+
+function ControlAlly.Combat.updateController(controller, target, now)
+	if now < controller.nextThinkAt then
+		return
+	end
+	local thinkInterval = ControlAlly.Constants.CONTROLLER_THINK_INTERVAL
+	if
+		controller.heroName == "npc_dota_hero_invoker"
+		and now < (ControlAlly.Runtime.invokerFastUntil or -math.huge)
+	then
+		thinkInterval = ControlAlly.Constants.INVOKER_INTERNAL_ORDER_GAP
+	end
+	controller.nextThinkAt = now + thinkInterval
+	if
+		not ControlAlly.Utils.isValidControllerUnit(controller.unit, true)
+		or ControlAlly.Utils.call(Entity.IsDormant, controller.unit) == true
+		or ControlAlly.Utils.isCommandRestricted(controller.unit)
+	then
+		return
+	end
+	if not ControlAlly.Combat.confirmPendingCast(controller, now) then
+		ControlAlly.SpecialAI.handleLockedChannel(controller, now)
+		return
+	end
+	if
+		now < controller.busyUntil
+		or ControlAlly.Utils.isMotionLocked(controller, now)
+		or ControlAlly.Utils.protectedActivity(controller.unit, controller.activeAbility) ~= nil
+	then
+		return
+	end
+	if controller.interleaveTarget then
+		if
+			now >= controller.interleaveDeadline
+			or not ControlAlly.Targeting.isValidEnemy(controller.interleaveTarget)
+		then
+			controller.interleaveTarget = nil
+			controller.interleaveDeadline = -math.huge
+			controller.castsSinceAttack = 0
+		else
+			if not ControlAlly.Orders.attack(controller, controller.interleaveTarget, now, true) then
+				if now + 0.05 >= controller.interleaveDeadline then
+					controller.interleaveTarget = nil
+					controller.interleaveDeadline = -math.huge
+					controller.castsSinceAttack = 0
+				else
+					return
+				end
+			else
+				return
+			end
+		end
+	end
+	if
+		controller.heroName == "npc_dota_hero_invoker"
+		and ControlAlly.Utils.hasAnyModifier(controller.unit, { "modifier_invoker_ghost_walk_self" })
+		and ControlAlly.Utils.healthPct(controller.unit) < ControlAlly.Constants.GHOST_WALK_EXIT_HEALTH
+	then
+		local unitPosition = ControlAlly.Utils.call(Entity.GetAbsOrigin, controller.unit)
+		local enemyPosition = target and ControlAlly.Utils.call(Entity.GetAbsOrigin, target)
+		if unitPosition and enemyPosition then
+			local dx = unitPosition.x - enemyPosition.x
+			local dy = unitPosition.y - enemyPosition.y
+			local length = math.sqrt(dx * dx + dy * dy)
+			if length > 0.001 then
+				ControlAlly.Orders.move(
+					controller,
+					Vector(unitPosition.x + dx / length * 550, unitPosition.y + dy / length * 550, unitPosition.z or 0),
+					now
+				)
+			end
+		end
+		return
+	end
+
+	local context = {
+		controller = controller,
+		unit = controller.unit,
+		target = ControlAlly.Targeting.isValidEnemy(target) and target or nil,
+		now = now,
+	}
+	if ControlAlly.SpecialAI.controlActiveMotion(context) then
+		return
+	end
+	local action
+	local invokerStatus
+	if
+		controller.heroName == "npc_dota_hero_invoker"
+		and ControlAlly.UI.UseAbilities
+		and ControlAlly.UI.UseAbilities:Get() == true
+	then
+		action, invokerStatus = ControlAlly.InvokerAI.nextAction(context)
+		if action and not action.internal then
+			action.fastCombo = true
+			action.executeFast = true
+			action.orderGap = ControlAlly.Constants.INVOKER_INTERNAL_ORDER_GAP
+		end
+	end
+	local meepoAction = ControlAlly.MeepoAI.netAction(context)
+	action = ControlAlly.Combat.chooseAction(action, meepoAction)
+	action = ControlAlly.Combat.chooseAction(action, ControlAlly.MeepoAI.poofAction(context))
+	action = ControlAlly.Combat.chooseAction(action, ControlAlly.AlchemistAI.nextAction(context, false))
+	action = ControlAlly.Combat.chooseAction(action, ControlAlly.SpecialAI.bestAction(context))
+	if not invokerStatus then
+		action = ControlAlly.Combat.chooseAction(action, ControlAlly.AbilityAI.bestAbilityAction(context))
+		action = ControlAlly.Combat.chooseAction(action, ControlAlly.ItemAI.bestAction(context))
+	end
+	local supportAction = ControlAlly.SupportAI.bestAction(context)
+	if not invokerStatus or (supportAction and supportAction.urgent) then
+		action = ControlAlly.Combat.chooseAction(action, supportAction)
+	end
+	if not action then
+		action = ControlAlly.SpecialAI.stormBallAction(context, nil)
+	end
+	action = action or ControlAlly.TinkerAI.rearmAction(context, action)
+	action = action or ControlAlly.ItemAI.refresherAction(context, action)
+
+	if (invokerStatus == "preparing" or invokerStatus == "positioning") and not action then
+		if invokerStatus == "positioning" then
+			return
+		end
+		local waitUntil = controller.invoker and controller.invoker.waitUntil or -math.huge
+		local nextStepAt = controller.invoker and controller.invoker.nextStepAt or -math.huge
+		if now < waitUntil or now < nextStepAt then
+			return
+		end
+	end
+	if
+		context.target
+		and ControlAlly.UI.AttackBetweenCasts
+		and ControlAlly.UI.AttackBetweenCasts:Get() == true
+		and controller.castsSinceAttack >= ControlAlly.Constants.MAX_CASTS_BEFORE_ATTACK
+		and (not action or not action.urgent)
+	then
+		if ControlAlly.Orders.attack(controller, context.target, now, true) then
+			return
+		end
+	end
+	if action and ControlAlly.Orders.cast(controller, action, now) then
+		return
+	end
+	if context.target then
+		ControlAlly.Orders.attack(controller, context.target, now, false)
+	elseif ControlAlly.UI.FollowCursor and ControlAlly.UI.FollowCursor:Get() == true then
+		local cursor = ControlAlly.Utils.call(Input.GetWorldCursorPos)
+		if cursor then
+			ControlAlly.Orders.move(controller, cursor, now)
+		end
+	end
+end
+
+function ControlAlly:resetControllerSessionState(controller, now)
+	self.Combat.rollbackPendingReservations(controller)
+	local activeAbility = controller.activeAbility
+	local activity = self.Utils.protectedActivity(controller.unit, activeAbility)
+	local pending = controller.pendingCast
+	local keepPending = pending and activity == pending.ability
+	if keepPending then
+		pending.sessionGeneration = self.Runtime.sessionGeneration
+	end
+	controller.pendingCast = keepPending and pending or nil
+	controller.activeAbility = keepPending and pending.ability or (activity == activeAbility and activeAbility or nil)
+	controller.busyUntil = keepPending and math.max(controller.busyUntil or now, now) or now
+	controller.nextThinkAt = now
+	controller.lastIssued = {}
+	controller.castsSinceAttack = 0
+	controller.lastAttackTarget = nil
+	controller.lastAttackAt = -math.huge
+	controller.interleaveTarget = nil
+	controller.interleaveDeadline = -math.huge
+	controller.lastMovePosition = nil
+	controller.lastFaceAt = -math.huge
+	controller.usedAbilitiesSinceRefresh = {}
+	controller.invoker.spellId = nil
+	controller.invoker.orbIndex = 1
+	controller.invoker.nextStepAt = now
+	controller.invoker.waitUntil = -math.huge
+	controller.invoker.combo = nil
+	controller.invoker.iceWallStand = nil
+	controller.techies.minePlan = nil
+	if not (keepPending and pending and pending.committedMotion) then
+		self.Utils.clearMotionLock(controller)
+	end
+	if
+		not keepPending
+		and controller.special.stage ~= "aa_release"
+		and controller.special.stage ~= "morph_copied"
+		and controller.special.stage ~= "dazzle_active"
+	then
+		controller.special.stage = nil
+		controller.special.target = nil
+		controller.special.followup = nil
+		controller.special.startedAt = -math.huge
+	end
+end
+
+function ControlAlly:startSession(now)
+	self.Runtime.inSession = true
+	self.Runtime.sessionGeneration = (self.Runtime.sessionGeneration or 0) + 1
+	self.Runtime.lockedTarget = nil
+	self.Runtime.lastTargetSwitchAt = -math.huge
+	self.Runtime.disableReservations = {}
+	self.Runtime.linkensReservations = {}
+	self.Runtime.effectReservations = {}
+	self.Runtime.supportReservations = {}
+	self.Runtime.positionReservations = {}
+	self.Runtime.meepoNetChains = {}
+	self.Runtime.meepoPlans = {}
+	for _, controller in ipairs(self.Runtime.controllers) do
+		controller.stopRequested = false
+		self:resetControllerSessionState(controller, now)
+	end
+	self.Utils.debug("session %d started", self.Runtime.sessionGeneration)
+end
+
+function ControlAlly:stopSession(reason)
+	if not self.Runtime.inSession then
+		return
+	end
+	self.Runtime.inSession = false
+	self.Runtime.lockedTarget = nil
+	self.Runtime.disableReservations = {}
+	self.Runtime.linkensReservations = {}
+	self.Runtime.effectReservations = {}
+	self.Runtime.supportReservations = {}
+	self.Runtime.positionReservations = {}
+	self.Runtime.meepoNetChains = {}
+	self.Runtime.meepoPlans = {}
+	local now = self.Utils.gameTime()
+	for _, controller in ipairs(self.Runtime.controllers) do
+		self.Combat.confirmPendingCast(controller, now)
+		local preserveBrew = controller.alchemist and controller.alchemist.brewing
+		if not preserveBrew then
+			controller.stopRequested = true
+			self.Orders.stop(controller)
+		end
+		self:resetControllerSessionState(controller, now)
+		if preserveBrew then
+			controller.nextOrderAt = now
+		end
+	end
+	self.Utils.debug("session stopped: %s", reason or "inactive")
+end
+
+function ControlAlly:resetGameState()
+	self:stopSession("game reset")
+	local runtime = self.Runtime
+	for index in pairs(runtime.toggleOwnershipRegistry) do
+		runtime.toggleOwnershipRegistry[index] = nil
+	end
+	runtime.wasInGame = false
+	runtime.lastUpdateAt = -math.huge
+	runtime.lastRosterScanAt = -math.huge
+	runtime.lastControllerScanAt = -math.huge
+	runtime.lastEnemyScanAt = -math.huge
+	runtime.lastAllyScanAt = -math.huge
+	runtime.lastMenuSyncAt = -math.huge
+	runtime.lastBuiltinBindScanAt = -math.huge
+	runtime.invokerFastUntil = -math.huge
+	runtime.rosterInitialized = false
+	runtime.rosterSignature = ""
+	runtime.controllerSignature = ""
+	runtime.actionMenuSignature = ""
+	runtime.itemMenuSignature = ""
+	runtime.roster = {}
+	runtime.rosterById = {}
+	runtime.playerLabelToId = {}
+	runtime.controllers = {}
+	runtime.allies = {}
+	runtime.controllerStates = {}
+	runtime.selectedPlayerIds = {}
+	runtime.enemies = {}
+	runtime.lockedTarget = nil
+	runtime.disableReservations = {}
+	runtime.linkensReservations = {}
+	runtime.effectReservations = {}
+	runtime.supportReservations = {}
+	runtime.positionReservations = {}
+	runtime.meepoNetChains = {}
+	runtime.meepoPlans = {}
+	runtime.activityCache = {}
+	runtime.cloneCountByPlayer = {}
+	runtime.orderBudget = 0
+	runtime.roundRobinIndex = 1
+	runtime.localPlayer = nil
+	runtime.localPlayerId = nil
+	runtime.localHero = nil
+	runtime.builtinComboBind = nil
+	runtime.builtinComboHeroName = nil
+end
+
+function ControlAlly:Init()
+	if self.Utils.call(Engine.IsInGame) ~= true then
+		for index in pairs(self.Runtime.toggleOwnershipRegistry) do
+			self.Runtime.toggleOwnershipRegistry[index] = nil
+		end
+	end
+	self.Menu.initialize()
+end
+
+function ControlAlly:OnUpdate()
+	if not self.Runtime.initialized then
+		self:Init()
+	end
+	if self.Utils.call(Engine.IsInGame) ~= true then
+		if self.Runtime.wasInGame then
+			self:resetGameState()
+		end
+		return
+	end
+	self.Runtime.wasInGame = true
+	if self.Utils.call(GameRules.IsPaused) == true then
+		return
+	end
+
+	local now = self.Utils.gameTime()
+	local updateInterval = self.Constants.UPDATE_INTERVAL
+	if now < (self.Runtime.invokerFastUntil or -math.huge) then
+		updateInterval = math.min(updateInterval, self.Constants.INVOKER_INTERNAL_ORDER_GAP * 0.5)
+	end
+	if now - self.Runtime.lastUpdateAt < updateInterval then
+		return
+	end
+	self.Runtime.lastUpdateAt = now
+	self.Runtime.orderBudget = self.Constants.MAX_ORDERS_PER_UPDATE
+	self.Roster.scanPlayers(now, false)
+	self.Roster.refreshControllers(now, false)
+	self.Menu.syncActionOptions(now, false)
+	self.Targeting.refreshBuiltinComboBind(now, false)
+	self.Targeting.refreshEnemies(now, false)
+	self.AlchemistAI.finishBrews(now)
+	self.SpecialAI.finishManagedActions(now)
+	self.Combat.finishStopRequests()
+	if self.Runtime.inSession then
+		self.Combat.maintainInactiveControllers(now, true)
+	end
+
+	if not self.UI.Enabled or self.UI.Enabled:Get() ~= true then
+		self:stopSession("disabled")
+		self.Combat.maintainInactiveControllers(now)
+		return
+	end
+	if not self.Targeting.isActivationHeld(now) then
+		self:stopSession("key released")
+		self.Combat.maintainInactiveControllers(now)
+		return
+	end
+
+	local justStarted = not self.Runtime.inSession
+	if justStarted then
+		self:startSession(now)
+	end
+	self.SupportAI.refreshAllies(now, false)
+	local target = self.Targeting.resolve(now, justStarted)
+
+	local count = #self.Runtime.controllers
+	if count <= 0 then
+		return
+	end
+	local startIndex = self.Utils.clamp(self.Runtime.roundRobinIndex, 1, count)
+	for offset = 0, count - 1 do
+		local index = ((startIndex + offset - 1) % count) + 1
+		self.Combat.updateController(self.Runtime.controllers[index], target, now)
+	end
+	self.Runtime.roundRobinIndex = (startIndex % count) + 1
+end
+
+function ControlAlly:OnGameEnd()
+	self:resetGameState()
+end
+
+function ControlAlly:OnEntityDestroy(entity)
+	if not entity then
+		return
+	end
+	if entity == self.Runtime.lockedTarget then
+		self.Runtime.lockedTarget = nil
+	end
+	local index = self.Utils.entityIndex(entity)
+	if index then
+		self.Runtime.activityCache[index] = nil
+		self.Runtime.toggleOwnershipRegistry[index] = nil
+		self.Runtime.disableReservations[index] = nil
+		self.Runtime.linkensReservations[index] = nil
+		self.Runtime.meepoNetChains[index] = nil
+		local prefix = tostring(index) .. ":"
+		for key in pairs(self.Runtime.effectReservations) do
+			if key:sub(1, #prefix) == prefix then
+				self.Runtime.effectReservations[key] = nil
+			end
+		end
+		local suffix = ":" .. tostring(index)
+		for key in pairs(self.Runtime.supportReservations) do
+			if key:sub(-#suffix) == suffix then
+				self.Runtime.supportReservations[key] = nil
+			end
+		end
+		for key, plan in pairs(self.Runtime.meepoPlans) do
+			if
+				plan.target == entity
+				or (plan.controller and plan.controller.unit == entity)
+				or plan.targetIndex == index
+				or plan.casterIndex == index
+			then
+				self.Runtime.meepoPlans[key] = nil
+			end
+		end
+	end
+	if index and self.Runtime.controllerStates[index] then
+		self.Runtime.controllerStates[index] = nil
+		self.Runtime.lastControllerScanAt = -math.huge
+		self.Runtime.controllerSignature = ""
+	end
+end
+
+function ControlAlly:OnUnitInventoryUpdated(unit)
+	for _, controller in ipairs(self.Runtime.controllers) do
+		if controller.unit == unit then
+			controller.catalog = nil
+			controller.catalogRefreshAt = -math.huge
+		end
+	end
+	self.Runtime.lastMenuSyncAt = -math.huge
+	self.Runtime.itemMenuSignature = ""
+end
+
+function ControlAlly:OnSetDormant(unit, dormancyType)
+	if dormancyType == Enum.DormancyType.ENTITY_NOT_DORMANT then
+		return
+	end
+	if unit == self.Runtime.lockedTarget then
+		self.Runtime.lockedTarget = nil
+	end
+	local index = self.Utils.entityIndex(unit)
+	if index and self.Runtime.controllerStates[index] then
+		local controller = self.Runtime.controllerStates[index]
+		local retainForSafety = (controller.alchemist and controller.alchemist.brewing)
+			or next(controller.ownedToggles or {}) ~= nil
+			or controller.pendingCast ~= nil
+			or controller.stopRequested == true
+			or self.Utils.protectedActivity(controller.unit, controller.activeAbility) ~= nil
+			or self.SpecialAI.requiresRetention(controller)
+		if retainForSafety then
+			controller.detached = true
+		else
+			self.Runtime.controllerStates[index] = nil
+		end
+		self.Runtime.lastControllerScanAt = -math.huge
+	end
+end
+
+local callbackWrapper = XHelpers and (XHelpers.WrapCallbacks or XHelpers.BaseScript)
+if callbackWrapper then
+	return callbackWrapper(ControlAlly)
+end
+return ControlAlly

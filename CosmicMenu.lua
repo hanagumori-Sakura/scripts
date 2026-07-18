@@ -58,6 +58,8 @@ local CONSTANTS = {
     AMBIENT_NEBULA_RATIO = 0.42,
     LINK_PULSE_QUALITY_THRESHOLD = 0.92,
     GLOW_QUALITY_THRESHOLD = 0.82,
+    FLYING_ROCKET_MAX = 32,
+    FLYING_ROCKET_SEGMENTS = 8,
     STANDARD_SNAP_WIDTH_TOLERANCE = 0.06,
 }
 
@@ -175,7 +177,15 @@ local PRESET_WIDGET_KEYS = {
     "ambientStreaks", "ambientStreakCount", "particleGlow", "vignette", "hudEdges",
     "parallax", "starRays", "colorWash", "openRipple", "horizonGrid", "multiLayerStars",
     "cursorStardust", "particleSoftCore", "particleCursorInteraction",
-    "accretionRing", "gravityFilaments",
+    "accretionRing", "gravityFilaments", "flyingRockets", "flyingRocketCount",
+}
+
+-- Switches muted while Flying Rockets solo mode is active (blur is kept as-is).
+local ROCKET_SOLO_SWITCH_KEYS = {
+    "colorWash", "vignette", "hudEdges", "ambientStreaks", "parallax",
+    "openRipple", "horizonGrid", "accretionRing", "gravityFilaments",
+    "particleSoftCore", "particleGlow", "stars", "shootingStars", "starRays",
+    "multiLayerStars", "particleConnections", "particleCursorInteraction", "cursorStardust",
 }
 
 local CONFIG_BOOL_KEYS = {
@@ -194,6 +204,9 @@ local State = {
     shootingStarsWasEnabled = nil,
     starsWasEnabled = nil,
     multiLayerWasEnabled = nil,
+    flyingRocketsWasEnabled = nil,
+    rocketSoloActive = false,
+    rocketSoloSnapshot = nil,
     lastQualityPreset = nil,
     lastNamedPreset = 3,
     applyingPreset = false,
@@ -238,6 +251,7 @@ local qualitySpikeHold = 0
 local lastBgTargetCount = 0
 local lastStarTargetCount = 0
 local lastStreakTargetCount = 0
+local lastRocketTargetCount = 0
 local baseScreenMinDim = nil
 local baseScreenArea = nil
 
@@ -250,6 +264,8 @@ local starActive = {}
 local shootingStarPool = {}
 local ambientStreakPool = {}
 local ambientStreakActive = {}
+local flyingRocketPool = {}
+local flyingRocketActive = {}
 local linkSpatialGrid = {}
 
 local LoggerInstance = Logger and Logger("CosmicMenu") or nil
@@ -398,6 +414,12 @@ local function remapPoolPositionsForScreenChange(oldSize, newSize)
         streak.x = remapCoord(streak.x, oldW, newW)
         streak.y = remapCoord(streak.y, oldH, newH)
         streak.length = remapCoord(streak.length, math.min(oldW, oldH), math.min(newW, newH))
+    end
+
+    for _, rocket in ipairs(flyingRocketPool) do
+        rocket.x = remapCoord(rocket.x, oldW, newW)
+        rocket.y = remapCoord(rocket.y, oldH, newH)
+        rocket.length = remapCoord(rocket.length, math.min(oldW, oldH), math.min(newW, newH))
     end
 
     for _, shot in ipairs(shootingStarPool) do
@@ -1147,6 +1169,37 @@ local function resetShootingStar(star)
     clearList(star.tail)
 end
 
+local function configureFlyingRocket(rocket, w, h)
+    local fromLeft = math.random() < 0.5
+    rocket.length = math.random(42, 68)
+    rocket.width = math.random(10, 16)
+    rocket.speed = math.random(48, 105)
+    rocket.wobble = (math.random() * 2 - 1) * 0.7
+    rocket.wobblePhase = math.random() * math.pi * 2
+    rocket.spin = (math.random() * 2 - 1) * 0.22
+    rocket.angle = fromLeft and (math.rad(-16) + (math.random() * 2 - 1) * 0.28)
+        or (math.rad(196) + (math.random() * 2 - 1) * 0.28)
+    rocket.alpha = math.random(150, 220)
+    rocket.tint = math.random() * 0.45 + 0.15
+    rocket.x = fromLeft and randomRangeSafe(-100, -28) or randomRangeSafe(w + 28, w + 100)
+    rocket.y = randomRangeSafe(math.floor(h * 0.1), math.floor(h * 0.9))
+    rocket.progress = 0
+    rocket.active = true
+end
+
+local function createFlyingRocket()
+    local w, h = GetSafeScreenDimensions()
+    local rocket = {}
+    configureFlyingRocket(rocket, w, h)
+    rocket.active = false
+    return rocket
+end
+
+local function resetFlyingRocket(rocket)
+    local w, h = GetSafeScreenDimensions()
+    configureFlyingRocket(rocket, w, h)
+end
+
 local function initPool(pool, factory, initialSize)
     for i = 1, initialSize do
         pool[i] = factory()
@@ -1210,7 +1263,14 @@ local function rebalancePool(pool, targetCount, factory, onActivate)
 end
 
 local function rebalancePoolIfChanged(pool, targetCount, lastTargetCount, factory, onActivate)
-    if lastTargetCount > 0 and math.abs(targetCount - lastTargetCount) < CONSTANTS.POOL_REBALANCE_HYSTERESIS then
+    -- Always rebalance when enabling from empty or fully disabling.
+    -- Hysteresis only skips tiny count tweaks while the pool stays populated.
+    if targetCount == 0 or lastTargetCount == 0 then
+        rebalancePool(pool, targetCount, factory, onActivate)
+        return targetCount
+    end
+
+    if math.abs(targetCount - lastTargetCount) < CONSTANTS.POOL_REBALANCE_HYSTERESIS then
         return lastTargetCount
     end
 
@@ -1261,6 +1321,7 @@ local function resetRuntimeState()
     lastBgTargetCount = 0
     lastStarTargetCount = 0
     lastStreakTargetCount = 0
+    lastRocketTargetCount = 0
     resetParticleImpulses()
     openRippleTime = 0
     clearList(stardustTrail)
@@ -2056,6 +2117,86 @@ local function DrawAmbientStreak(streak, toRenderX, toRenderY, fadeInAlpha, prim
     end
 end
 
+local function DrawFlyingRocket(rocket, toRenderX, toRenderY, fadeInAlpha, primaryColor, secondaryColor)
+    local angle = rocket.angle + math.sin(time * 2.2 + (rocket.wobblePhase or 0)) * (rocket.wobble or 0) * 0.14
+    local cosA = math.cos(angle)
+    local sinA = math.sin(angle)
+    local nx = -sinA
+    local ny = cosA
+    local len = rocket.length
+    local halfW = rocket.width * 0.5
+    local x = toRenderX(rocket.x)
+    local y = toRenderY(rocket.y)
+    local alpha = math.floor((rocket.alpha or 180) * fadeInAlpha * (0.8 + qualityScale * 0.2))
+    if alpha <= 2 then
+        return
+    end
+
+    -- Fully theme-synced palette (primary shaft, secondary base, light tip).
+    local tint = rocket.tint or 0.3
+    local bodyTint = mixColors(primaryColor, secondaryColor, tint * 0.55)
+    local tipTint = mixColors(primaryColor, makeColor(255, 255, 255, 255), 0.35)
+    local twinTint = mixColors(secondaryColor, primaryColor, 0.35)
+    local bodyColor = colorWithAlpha(bodyTint, alpha)
+    local tipFill = colorWithAlpha(tipTint, math.min(255, alpha + 25))
+    local twinFill = colorWithAlpha(twinTint, math.floor(alpha * 0.95))
+    local highlight = colorWithAlpha(
+        mixColors(primaryColor, makeColor(255, 255, 255, 255), 0.65),
+        math.floor(alpha * 0.5)
+    )
+    local trailColor = mixColors(secondaryColor, primaryColor, 0.4)
+
+    -- Tip (glans) toward flight direction, balls at the rear.
+    local tipX = x + cosA * len * 0.52
+    local tipY = y + sinA * len * 0.52
+    local shaftEndX = x + cosA * len * 0.28
+    local shaftEndY = y + sinA * len * 0.28
+    local baseX = x - cosA * len * 0.42
+    local baseY = y - sinA * len * 0.42
+
+    -- Twin spheres at the base (slightly behind and apart).
+    local twinDist = halfW * 1.55
+    local twinR = halfW * 1.15
+    local twinPush = halfW * 0.35
+    local twinCX = baseX - cosA * twinPush
+    local twinCY = baseY - sinA * twinPush
+    Render.FilledCircle(Vec2(twinCX + nx * twinDist, twinCY + ny * twinDist), twinR, twinFill, 14)
+    Render.FilledCircle(Vec2(twinCX - nx * twinDist, twinCY - ny * twinDist), twinR, twinFill, 14)
+    Render.FilledCircle(Vec2(twinCX + nx * twinDist * 0.55, twinCY + ny * twinDist * 0.55), twinR * 0.35, highlight, 10)
+    Render.FilledCircle(Vec2(twinCX - nx * twinDist * 0.55, twinCY - ny * twinDist * 0.55), twinR * 0.35, highlight, 10)
+
+    -- Shaft: thicker near base, slightly tapered toward tip.
+    local segments = CONSTANTS.FLYING_ROCKET_SEGMENTS
+    for step = 0, segments - 1 do
+        local t = step / math.max(segments - 1, 1)
+        local px = lerp(baseX, shaftEndX, t)
+        local py = lerp(baseY, shaftEndY, t)
+        local radius = halfW * (1.15 - t * 0.22)
+        Render.FilledCircle(Vec2(px, py), radius, bodyColor, 12)
+    end
+    Render.FilledCircle(Vec2(lerp(baseX, shaftEndX, 0.35), lerp(baseY, shaftEndY, 0.35)), halfW * 0.35, highlight, 8)
+
+    -- Rounded mushroom tip.
+    local tipR = halfW * 1.35
+    Render.FilledCircle(Vec2(tipX, tipY), tipR, tipFill, 14)
+    Render.FilledCircle(Vec2(tipX - cosA * tipR * 0.15, tipY - sinA * tipR * 0.15), tipR * 0.72, bodyColor, 12)
+    Render.FilledCircle(Vec2(tipX + nx * tipR * 0.25, tipY + ny * tipR * 0.25), tipR * 0.28, highlight, 8)
+
+    -- Tiny motion puff behind the balls.
+    local trailAlpha = math.floor(alpha * 0.22)
+    if trailAlpha > 1 then
+        local trailX = twinCX - cosA * halfW * 2.4
+        local trailY = twinCY - sinA * halfW * 2.4
+        Render.FilledCircle(Vec2(trailX, trailY), halfW * 0.55, colorWithAlpha(trailColor, trailAlpha), 8)
+        Render.FilledCircle(
+            Vec2(trailX - cosA * halfW * 1.5, trailY - sinA * halfW * 1.5),
+            halfW * 0.32,
+            colorWithAlpha(trailColor, math.floor(trailAlpha * 0.55)),
+            8
+        )
+    end
+end
+
 --#endregion
 
 --#region Pools
@@ -2090,6 +2231,14 @@ local function SyncEffectTogglePools(settings)
         ClearShootingStarPool()
     end
     State.shootingStarsWasEnabled = shootingEnabled
+
+    local rocketsEnabled = settings.flyingRockets
+    if State.flyingRocketsWasEnabled == true and not rocketsEnabled then
+        deactivatePoolObjects(flyingRocketPool)
+        clearList(flyingRocketActive)
+        lastRocketTargetCount = 0
+    end
+    State.flyingRocketsWasEnabled = rocketsEnabled
 end
 
 IsCustomPresetMarkBlocked = function()
@@ -2113,16 +2262,98 @@ local function TickCustomPresetMarkBlock()
     State.blockCustomPresetMarks = State.blockCustomPresetMarks - 1
 end
 
+local function CaptureRocketSoloSnapshot()
+    local snapshot = {
+        switches = {},
+        bgParticleCount = WidgetGet(Script.bgParticleCount, 100),
+    }
+    for i = 1, #ROCKET_SOLO_SWITCH_KEYS do
+        local key = ROCKET_SOLO_SWITCH_KEYS[i]
+        snapshot.switches[key] = WidgetGet(Script[key], false)
+    end
+    return snapshot
+end
+
+local function ApplyRocketSoloMute()
+    State.applyingPreset = true
+    for i = 1, #ROCKET_SOLO_SWITCH_KEYS do
+        WidgetSet(Script[ROCKET_SOLO_SWITCH_KEYS[i]], false)
+    end
+    -- Particle field has no master off-switch; mute by zeroing count while solo.
+    WidgetSet(Script.bgParticleCount, 20)
+    State.applyingPreset = false
+    ArmCustomPresetMarkBlock()
+end
+
+local function RestoreRocketSoloSnapshot(snapshot)
+    if not snapshot then
+        return
+    end
+
+    State.applyingPreset = true
+    if snapshot.switches then
+        for key, value in pairs(snapshot.switches) do
+            WidgetSet(Script[key], value)
+        end
+    end
+    if snapshot.bgParticleCount ~= nil then
+        WidgetSet(Script.bgParticleCount, snapshot.bgParticleCount)
+    end
+    State.applyingPreset = false
+    ArmCustomPresetMarkBlock()
+end
+
+local function EnterFlyingRocketSoloMode()
+    if State.rocketSoloActive then
+        return
+    end
+
+    State.rocketSoloSnapshot = CaptureRocketSoloSnapshot()
+    ApplyRocketSoloMute()
+    State.rocketSoloActive = true
+end
+
+local function ExitFlyingRocketSoloMode(restore)
+    if not State.rocketSoloActive then
+        State.rocketSoloSnapshot = nil
+        return
+    end
+
+    local snapshot = State.rocketSoloSnapshot
+    State.rocketSoloActive = false
+    State.rocketSoloSnapshot = nil
+
+    if restore then
+        RestoreRocketSoloSnapshot(snapshot)
+    end
+end
+
+local function OnFlyingRocketsToggled()
+    local enabled = WidgetGet(Script.flyingRockets, false)
+    if enabled then
+        EnterFlyingRocketSoloMode()
+    else
+        ExitFlyingRocketSoloMode(true)
+    end
+
+    if UpdateMenuControls then
+        UpdateMenuControls()
+    end
+end
+
 local function ApplyQualityPreset(presetIndex)
     local preset = QUALITY_PRESETS[presetIndex]
     if not preset or State.applyingPreset then
         return
     end
 
+    ExitFlyingRocketSoloMode(false)
+
     State.applyingPreset = true
     for key, value in pairs(preset) do
         WidgetSet(Script[key], value)
     end
+    WidgetSet(Script.flyingRockets, false)
     State.applyingPreset = false
     State.lastQualityPreset = presetIndex
     State.lastNamedPreset = presetIndex
@@ -2240,6 +2471,9 @@ local function LoadConfigProfile()
     end
 
     State.applyingPreset = false
+    if WidgetGet(Script.flyingRockets, false) then
+        EnterFlyingRocketSoloMode()
+    end
     Log("info", "Config profile loaded")
 end
 
@@ -2476,6 +2710,7 @@ local Icons = {
     idle = "\u{f254}",              -- hourglass-half
     accretionRing = "\u{f1db}",     -- circle-notch (orbit)
     gravityFilaments = "\u{f0c1}",  -- link (filament)
+    flyingRockets = "\u{f135}",     -- rocket (joke parade)
 }
 
 local function WithTooltip(widget, en, ru)
@@ -2492,6 +2727,7 @@ function Script.OnScriptsLoaded()
     initPool(starPool, createStar, 200)
     initPool(shootingStarPool, createShootingStar, 10)
     initPool(ambientStreakPool, createAmbientStreak, 16)
+    initPool(flyingRocketPool, createFlyingRocket, 14)
 
     local changerSection = Menu.Find("Changer", "Main")
     local tab
@@ -2578,6 +2814,13 @@ function Script.OnScriptsLoaded()
         "Curved filaments bending toward the center, like warped spacetime",
         "Изогнутые нити, стягивающиеся к центру — как искривлённое пространство"
     )
+    Script.flyingRockets = WithTooltip(
+        g_backdrop:Switch(L("Flying Rockets", "Летающие писюны"), false, Icons.flyingRockets),
+        "Solo mode: turns off other FX except blur. Disabling restores your previous settings.",
+        "Соло-режим: выключает остальные эффекты, кроме блюра. Выключение вернёт прежние настройки."
+    )
+    Script.flyingRocketCount = g_backdrop:Slider(L("Rocket Count", "Кол-во ракет"), 1, CONSTANTS.FLYING_ROCKET_MAX, 14, "%d")
+    applyIcon(Script.flyingRocketCount, Icons.streakCount)
 
     local g_particles = main:Create(L("Particles", "Частицы"))
 
@@ -2749,7 +2992,7 @@ function Script.OnScriptsLoaded()
         Script.fadeInEffect, Script.backgroundBlur, Script.blurIntensity, Script.colorWash,
         Script.vignette, Script.hudEdges, Script.ambientStreaks, Script.ambientStreakCount,
         Script.parallax, Script.parallaxStrength, Script.openRipple, Script.horizonGrid,
-        Script.accretionRing, Script.gravityFilaments,
+        Script.accretionRing, Script.gravityFilaments, Script.flyingRocketCount,
         Script.bgParticleCount, Script.shieldRadius, Script.particleBaseAlpha, Script.particleSoftCore,
         Script.particleGlow, Script.particleGlowScale, Script.particleGlowAlpha,
         Script.particleSpeedScale, Script.particleDrift, Script.particleTwinkleSpeedScale,
@@ -2765,6 +3008,24 @@ function Script.OnScriptsLoaded()
 
     for i = 1, #presetTrackedWidgets do
         attachCustomCallback(presetTrackedWidgets[i])
+    end
+
+    if Script.flyingRockets and Script.flyingRockets.SetCallback then
+        Script.flyingRockets:SetCallback(function()
+            if State.applyingPreset then
+                return
+            end
+
+            local enabled = WidgetGet(Script.flyingRockets, false)
+            SaveWidgetConfigValue("flyingRockets")
+            OnFlyingRocketsToggled()
+
+            if not enabled then
+                State.blockCustomPresetMarks = 0
+                MarkCustomPreset()
+                SaveCustomPresetValues()
+            end
+        end, false)
     end
 
     if Script.qualityPreset and Script.qualityPreset.SetCallback then
@@ -2816,6 +3077,7 @@ function Script.OnScriptsLoaded()
         local masterEnabled = WidgetGet(Script.enabled, true)
         local blurEnabled = WidgetGet(Script.backgroundBlur, false)
         local streaksEnabled = WidgetGet(Script.ambientStreaks, true)
+        local rocketsEnabled = WidgetGet(Script.flyingRockets, false)
         local parallaxEnabled = WidgetGet(Script.parallax, true)
         local glowEnabled = WidgetGet(Script.particleGlow, true)
         local starsEnabled = WidgetGet(Script.stars, true)
@@ -2837,51 +3099,53 @@ function Script.OnScriptsLoaded()
         setDisabled(Script.resetPresetButton, not masterEnabled)
         setDisabled(Script.backgroundBlur, not masterEnabled)
         setDisabled(Script.blurIntensity, not masterEnabled or not blurEnabled)
-        setDisabled(Script.colorWash, not masterEnabled)
-        setDisabled(Script.vignette, not masterEnabled)
-        setDisabled(Script.hudEdges, not masterEnabled)
-        setDisabled(Script.ambientStreaks, not masterEnabled)
-        setDisabled(Script.ambientStreakCount, not masterEnabled or not streaksEnabled)
-        setDisabled(Script.parallax, not masterEnabled)
-        setDisabled(Script.parallaxStrength, not masterEnabled or not parallaxEnabled)
-        setDisabled(Script.openRipple, not masterEnabled)
-        setDisabled(Script.horizonGrid, not masterEnabled)
-        setDisabled(Script.accretionRing, not masterEnabled)
-        setDisabled(Script.gravityFilaments, not masterEnabled)
-        setDisabled(Script.bgParticleCount, not masterEnabled or backgroundOnly)
-        setDisabled(Script.shieldRadius, not masterEnabled or backgroundOnly)
-        setDisabled(Script.particleBaseAlpha, not masterEnabled or backgroundOnly)
-        setDisabled(Script.particleSoftCore, not masterEnabled or backgroundOnly)
-        setDisabled(Script.particleGlow, not masterEnabled or backgroundOnly)
-        setDisabled(Script.particleGlowScale, not masterEnabled or backgroundOnly or not glowEnabled)
-        setDisabled(Script.particleGlowAlpha, not masterEnabled or backgroundOnly or not glowEnabled)
-        setDisabled(Script.particleSpeedScale, not masterEnabled or backgroundOnly)
-        setDisabled(Script.particleDrift, not masterEnabled or backgroundOnly)
-        setDisabled(Script.particleTwinkleSpeedScale, not masterEnabled or backgroundOnly)
-        setDisabled(Script.particleTwinkleAmount, not masterEnabled or backgroundOnly)
-        setDisabled(Script.stars, not masterEnabled)
-        setDisabled(Script.starCount, not masterEnabled or not starsEnabled)
-        setDisabled(Script.shootingStars, not masterEnabled or backgroundOnly)
-        setDisabled(Script.shootingStarFreq, not masterEnabled or backgroundOnly or not shootingEnabled)
-        setDisabled(Script.starRays, not masterEnabled or not starsEnabled)
-        setDisabled(Script.multiLayerStars, not masterEnabled or not starsEnabled)
-        setDisabled(Script.particleConnections, not masterEnabled or backgroundOnly)
-        setDisabled(Script.particleConnectionDist, not masterEnabled or backgroundOnly or not linksEnabled)
-        setDisabled(Script.particleConnectionAlpha, not masterEnabled or backgroundOnly or not linksEnabled)
-        setDisabled(Script.particleConnectionWidth, not masterEnabled or backgroundOnly or not linksEnabled)
-        setDisabled(Script.particleMaxConnections, not masterEnabled or backgroundOnly or not linksEnabled)
-        setDisabled(Script.particleColoredLinks, not masterEnabled or backgroundOnly or not linksEnabled)
-        setDisabled(Script.particleCursorInteraction, not masterEnabled or backgroundOnly)
-        setDisabled(Script.particleCursorMode, not masterEnabled or backgroundOnly or not cursorEnabled)
-        setDisabled(Script.particleCursorRadius, not masterEnabled or backgroundOnly or not cursorEnabled)
-        setDisabled(Script.particleCursorForce, not masterEnabled or backgroundOnly or not cursorEnabled)
-        setDisabled(Script.particleCursorFalloff, not masterEnabled or backgroundOnly or not cursorEnabled)
-        setDisabled(Script.particleCursorMotionBoost, not masterEnabled or backgroundOnly or not cursorEnabled)
-        setDisabled(Script.particleCursorMoveThreshold, not masterEnabled or backgroundOnly or not cursorEnabled)
-        setDisabled(Script.particleCursorOnlyMoving, not masterEnabled or backgroundOnly or not cursorEnabled)
-        setDisabled(Script.particleCursorImpulseDamping, not masterEnabled or backgroundOnly or not cursorEnabled)
-        setDisabled(Script.particleCursorSwirl, not masterEnabled or backgroundOnly or not cursorEnabled)
-        setDisabled(Script.cursorStardust, not masterEnabled or backgroundOnly)
+        setDisabled(Script.colorWash, not masterEnabled or rocketsEnabled)
+        setDisabled(Script.vignette, not masterEnabled or rocketsEnabled)
+        setDisabled(Script.hudEdges, not masterEnabled or rocketsEnabled)
+        setDisabled(Script.ambientStreaks, not masterEnabled or rocketsEnabled)
+        setDisabled(Script.ambientStreakCount, not masterEnabled or not streaksEnabled or rocketsEnabled)
+        setDisabled(Script.parallax, not masterEnabled or rocketsEnabled)
+        setDisabled(Script.parallaxStrength, not masterEnabled or not parallaxEnabled or rocketsEnabled)
+        setDisabled(Script.openRipple, not masterEnabled or rocketsEnabled)
+        setDisabled(Script.horizonGrid, not masterEnabled or rocketsEnabled)
+        setDisabled(Script.accretionRing, not masterEnabled or rocketsEnabled)
+        setDisabled(Script.gravityFilaments, not masterEnabled or rocketsEnabled)
+        setDisabled(Script.flyingRockets, not masterEnabled or backgroundOnly)
+        setDisabled(Script.flyingRocketCount, not masterEnabled or backgroundOnly or not rocketsEnabled)
+        setDisabled(Script.bgParticleCount, not masterEnabled or backgroundOnly or rocketsEnabled)
+        setDisabled(Script.shieldRadius, not masterEnabled or backgroundOnly or rocketsEnabled)
+        setDisabled(Script.particleBaseAlpha, not masterEnabled or backgroundOnly or rocketsEnabled)
+        setDisabled(Script.particleSoftCore, not masterEnabled or backgroundOnly or rocketsEnabled)
+        setDisabled(Script.particleGlow, not masterEnabled or backgroundOnly or rocketsEnabled)
+        setDisabled(Script.particleGlowScale, not masterEnabled or backgroundOnly or not glowEnabled or rocketsEnabled)
+        setDisabled(Script.particleGlowAlpha, not masterEnabled or backgroundOnly or not glowEnabled or rocketsEnabled)
+        setDisabled(Script.particleSpeedScale, not masterEnabled or backgroundOnly or rocketsEnabled)
+        setDisabled(Script.particleDrift, not masterEnabled or backgroundOnly or rocketsEnabled)
+        setDisabled(Script.particleTwinkleSpeedScale, not masterEnabled or backgroundOnly or rocketsEnabled)
+        setDisabled(Script.particleTwinkleAmount, not masterEnabled or backgroundOnly or rocketsEnabled)
+        setDisabled(Script.stars, not masterEnabled or rocketsEnabled)
+        setDisabled(Script.starCount, not masterEnabled or not starsEnabled or rocketsEnabled)
+        setDisabled(Script.shootingStars, not masterEnabled or backgroundOnly or rocketsEnabled)
+        setDisabled(Script.shootingStarFreq, not masterEnabled or backgroundOnly or not shootingEnabled or rocketsEnabled)
+        setDisabled(Script.starRays, not masterEnabled or not starsEnabled or rocketsEnabled)
+        setDisabled(Script.multiLayerStars, not masterEnabled or not starsEnabled or rocketsEnabled)
+        setDisabled(Script.particleConnections, not masterEnabled or backgroundOnly or rocketsEnabled)
+        setDisabled(Script.particleConnectionDist, not masterEnabled or backgroundOnly or not linksEnabled or rocketsEnabled)
+        setDisabled(Script.particleConnectionAlpha, not masterEnabled or backgroundOnly or not linksEnabled or rocketsEnabled)
+        setDisabled(Script.particleConnectionWidth, not masterEnabled or backgroundOnly or not linksEnabled or rocketsEnabled)
+        setDisabled(Script.particleMaxConnections, not masterEnabled or backgroundOnly or not linksEnabled or rocketsEnabled)
+        setDisabled(Script.particleColoredLinks, not masterEnabled or backgroundOnly or not linksEnabled or rocketsEnabled)
+        setDisabled(Script.particleCursorInteraction, not masterEnabled or backgroundOnly or rocketsEnabled)
+        setDisabled(Script.particleCursorMode, not masterEnabled or backgroundOnly or not cursorEnabled or rocketsEnabled)
+        setDisabled(Script.particleCursorRadius, not masterEnabled or backgroundOnly or not cursorEnabled or rocketsEnabled)
+        setDisabled(Script.particleCursorForce, not masterEnabled or backgroundOnly or not cursorEnabled or rocketsEnabled)
+        setDisabled(Script.particleCursorFalloff, not masterEnabled or backgroundOnly or not cursorEnabled or rocketsEnabled)
+        setDisabled(Script.particleCursorMotionBoost, not masterEnabled or backgroundOnly or not cursorEnabled or rocketsEnabled)
+        setDisabled(Script.particleCursorMoveThreshold, not masterEnabled or backgroundOnly or not cursorEnabled or rocketsEnabled)
+        setDisabled(Script.particleCursorOnlyMoving, not masterEnabled or backgroundOnly or not cursorEnabled or rocketsEnabled)
+        setDisabled(Script.particleCursorImpulseDamping, not masterEnabled or backgroundOnly or not cursorEnabled or rocketsEnabled)
+        setDisabled(Script.particleCursorSwirl, not masterEnabled or backgroundOnly or not cursorEnabled or rocketsEnabled)
+        setDisabled(Script.cursorStardust, not masterEnabled or backgroundOnly or rocketsEnabled)
         setDisabled(Script.themeUseAccentOnly, not masterEnabled)
         setDisabled(Script.themeMonochrome, not masterEnabled or accentOnly)
         setDisabled(Script.backgroundOnly, not masterEnabled)
@@ -2927,6 +3191,8 @@ GatherFrameSettings = function()
         horizonGrid = WidgetGet(Script.horizonGrid, false),
         accretionRing = WidgetGet(Script.accretionRing, false),
         gravityFilaments = WidgetGet(Script.gravityFilaments, false),
+        flyingRockets = WidgetGet(Script.flyingRockets, false),
+        flyingRocketCount = WidgetGet(Script.flyingRocketCount, 14),
         bgParticleCount = WidgetGet(Script.bgParticleCount, 100),
         particleSize = WidgetGet(Script.shieldRadius, 2),
         particleBaseAlpha = WidgetGet(Script.particleBaseAlpha, 150),
@@ -2975,6 +3241,29 @@ GatherFrameSettings = function()
         settings.cursorStardust = false
         settings.particleGlow = false
         settings.particleSoftCore = false
+        settings.flyingRockets = false
+    end
+
+    if State.rocketSoloActive and settings.flyingRockets then
+        settings.bgParticleCount = 0
+        settings.colorWash = false
+        settings.vignette = false
+        settings.hudEdges = false
+        settings.ambientStreaks = false
+        settings.parallax = false
+        settings.openRipple = false
+        settings.horizonGrid = false
+        settings.accretionRing = false
+        settings.gravityFilaments = false
+        settings.stars = false
+        settings.shootingStars = false
+        settings.starRays = false
+        settings.multiLayerStars = false
+        settings.particleSoftCore = false
+        settings.particleGlow = false
+        settings.particleConnections = false
+        settings.particleCursorInteraction = false
+        settings.cursorStardust = false
     end
 
     return settings
@@ -3050,7 +3339,7 @@ local function DrawDebugOverlay(settings, fadeInAlpha, renderW, renderH)
     local rawText = raw and string.format("%dx%d", raw.x, raw.y) or "n/a"
     local lines = {
         string.format("dt: %.3f  quality: %.2f", State.lastDt or 0, qualityScale),
-        string.format("particles: %d  stars: %d  streaks: %d", #bgParticleActive, #starActive, #ambientStreakActive),
+        string.format("particles: %d  stars: %d  streaks: %d  rockets: %d", #bgParticleActive, #starActive, #ambientStreakActive, #flyingRocketActive),
         string.format("sim: %s  idle: %.1fs", State.simulationPaused and "paused" or "active", State.menuIdleTime or 0),
         string.format("screen: %dx%d  raw: %s", screenSize.x, screenSize.y, rawText),
         string.format("render: %dx%d  cached: %s", renderW, renderH, State.cachedFullScreenSize and "yes" or "no"),
@@ -3189,6 +3478,7 @@ local function UpdateCosmicSimulation(dt)
     local starsEnabled = settings.stars
     local starTargetCount = starsEnabled and clamp(roundToInt(settings.starCount * areaScale * (0.88 + countQuality * 0.12)), 60, 700) or 0
     local streakTargetCount = settings.ambientStreaks and clamp(roundToInt(settings.ambientStreakCount * areaScale * countQuality), 0, 28) or 0
+    local rocketTargetCount = settings.flyingRockets and clamp(roundToInt(settings.flyingRocketCount * areaScale * countQuality), 0, CONSTANTS.FLYING_ROCKET_MAX) or 0
 
     lastBgTargetCount = rebalancePoolIfChanged(bgParticlePool, bgTargetCount, lastBgTargetCount, createBgParticle, function(particle)
         particle.impulseX = 0
@@ -3196,10 +3486,12 @@ local function UpdateCosmicSimulation(dt)
     end)
     lastStarTargetCount = rebalancePoolIfChanged(starPool, starTargetCount, lastStarTargetCount, createStar, assignStarLayer)
     lastStreakTargetCount = rebalancePoolIfChanged(ambientStreakPool, streakTargetCount, lastStreakTargetCount, createAmbientStreak, resetAmbientStreak)
+    lastRocketTargetCount = rebalancePoolIfChanged(flyingRocketPool, rocketTargetCount, lastRocketTargetCount, createFlyingRocket, resetFlyingRocket)
 
     collectActive(bgParticlePool, bgParticleActive)
     collectActive(starPool, starActive)
     collectActive(ambientStreakPool, ambientStreakActive)
+    collectActive(flyingRocketPool, flyingRocketActive)
 
     local w, h = screenSize.x, screenSize.y
     local particleSpeedScale = settings.particleSpeedScale * 0.01
@@ -3455,6 +3747,21 @@ local function UpdateCosmicSimulation(dt)
                 resetAmbientStreak(streak)
             end
         end
+
+        for i, rocket in ipairs(flyingRocketActive) do
+            local wobble = math.sin(time * 2.4 + (rocket.wobblePhase or i)) * (rocket.wobble or 0)
+            local moveAngle = rocket.angle + wobble * 0.18
+            local speed = rocket.speed * (0.85 + qualityScale * 0.25)
+            rocket.x = rocket.x + math.cos(moveAngle) * speed * simDt
+            rocket.y = rocket.y + math.sin(moveAngle) * speed * simDt
+            rocket.angle = rocket.angle + (rocket.spin or 0) * simDt
+            rocket.progress = (rocket.progress or 0) + simDt
+
+            local margin = rocket.length + 40
+            if rocket.x < -margin or rocket.x > w + margin or rocket.y < -margin or rocket.y > h + margin or rocket.progress > 14 then
+                resetFlyingRocket(rocket)
+            end
+        end
     end
 end
 
@@ -3553,6 +3860,12 @@ local function DrawBackgroundEffects(fadeInAlpha)
         for i, streak in ipairs(ambientStreakActive) do
             local sway = math.sin(time * 0.8 + i * 0.67)
             DrawAmbientStreak(streak, toRenderX, toRenderY, fadeInAlpha, primaryColor, secondaryColor, streakVisibility, sway)
+        end
+    end
+
+    if settings.flyingRockets then
+        for _, rocket in ipairs(flyingRocketActive) do
+            DrawFlyingRocket(rocket, toRenderX, toRenderY, fadeInAlpha, primaryColor, secondaryColor)
         end
     end
 
@@ -3828,6 +4141,7 @@ function Script.OnGameEnd()
     deactivatePoolObjects(starPool)
     deactivatePoolObjects(shootingStarPool)
     deactivatePoolObjects(ambientStreakPool)
+    deactivatePoolObjects(flyingRocketPool)
 
     for i, star in ipairs(shootingStarPool) do
         if star.tail then
@@ -3838,6 +4152,7 @@ function Script.OnGameEnd()
     clearList(bgParticleActive)
     clearList(starActive)
     clearList(ambientStreakActive)
+    clearList(flyingRocketActive)
     clearList(stardustTrail)
 
     time = 0
@@ -3849,6 +4164,9 @@ function Script.OnGameEnd()
     State.shootingStarsWasEnabled = nil
     State.starsWasEnabled = nil
     State.multiLayerWasEnabled = nil
+    State.flyingRocketsWasEnabled = nil
+    State.rocketSoloActive = false
+    State.rocketSoloSnapshot = nil
     State.fadeInAlpha = 1
     State.frameSettings = nil
     State.menuIdleTime = 0
