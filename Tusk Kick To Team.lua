@@ -92,6 +92,7 @@ local PANEL_CHIP_MIN_BORDER_LUMA = 90
 local PANEL_MIN_WIDTH = 110
 local PANEL_TITLE_SAMPLE = "Kick To Team"
 local PANEL_BLUR_BASE_STRENGTH = 2.5
+local PANEL_SHADOW_THICKNESS = 14
 
 local Icons = {
     panel = "\u{f108}",
@@ -153,6 +154,8 @@ local Colors = {
     BorderEnabled = Color(191, 140, 255, 255),
     CellBg = Color(12, 12, 16, 255),
     Quiet = Color(90, 90, 100, 180),
+    Shadow = Color(0, 0, 0, 0),
+    TextShadow = Color(0, 0, 0, 140),
 }
 
 local LangState = {
@@ -606,6 +609,33 @@ local function DrawPanelBlur(layout, scale)
         Enum.DrawFlags.None)
 end
 
+local function DrawPanelHeaderShadow(layout, scale)
+    local shadow = Colors.Shadow
+    if not shadow or not Render or not Render.Shadow then
+        return
+    end
+
+    local alpha = shadow.a
+    if alpha == nil then
+        alpha = 0
+    end
+    if alpha <= 0 then
+        return
+    end
+
+    local thickness = math.max(6, PANEL_SHADOW_THICKNESS * scale * (0.55 + alpha / 255))
+    local radius = PANEL_HEADER_RADIUS * scale
+    local flags = Enum and Enum.DrawFlags and Enum.DrawFlags.ShadowCutOutShapeBackground or nil
+    SafeCall(
+        Render.Shadow,
+        Vec2(layout.x, layout.y),
+        Vec2(layout.x + layout.width, layout.y + layout.titleH),
+        shadow,
+        thickness,
+        radius,
+        flags)
+end
+
 local function ReadThemeMember(value, key)
     local ok, result = pcall(function()
         return value[key]
@@ -797,6 +827,23 @@ local function SyncColors()
     })
     if quiet then
         Colors.Quiet = quiet
+    end
+
+    local panelShadow = TryGetThemeColor("shadow")
+    if panelShadow and (panelShadow.a or 0) > 0 then
+        Colors.Shadow = panelShadow
+    else
+        Colors.Shadow = Color(0, 0, 0, 0)
+    end
+
+    local textShadow = TryGetThemeColor("text_shadow")
+    if textShadow and (textShadow.a or 0) > 0 then
+        Colors.TextShadow = textShadow
+    elseif panelShadow and (panelShadow.a or 0) > 0 then
+        local a = math.min(180, math.max(80, math.floor((panelShadow.a or 140) * 0.55 + 0.5)))
+        Colors.TextShadow = Color(panelShadow.r, panelShadow.g, panelShadow.b, a)
+    else
+        Colors.TextShadow = Color(0, 0, 0, 140)
     end
 end
 
@@ -1077,8 +1124,10 @@ local function DrawPanelText(size, text, pos, color)
         return false
     end
 
-    local shadow = Color(0, 0, 0, 140)
-    pcall(Render.Text, font, size, text, Vec2(pos.x + 1, pos.y + 1), shadow)
+    local shadow = Colors.TextShadow or Color(0, 0, 0, 140)
+    if (shadow.a or 0) > 0 then
+        pcall(Render.Text, font, size, text, Vec2(pos.x + 1, pos.y + 1), shadow)
+    end
     if pcall(Render.Text, font, size, text, pos, color) then
         return true
     end
@@ -3405,6 +3454,7 @@ function Script.OnDraw()
     local textY = titleContentY + math.floor((titleContentH - titleSizeY) * 0.5 + 0.5)
     local cellRadius = PANEL_CELL_RADIUS * scale
 
+    DrawPanelHeaderShadow(layout, scale)
     DrawPanelBlur(layout, scale)
 
     Render.FilledRect(

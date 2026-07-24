@@ -57,6 +57,7 @@ local PANEL_CHIP_DISABLED_ALPHA = 105
 local PANEL_CHIP_MIN_BORDER_LUMA = 90
 local PANEL_MIN_WIDTH = 110
 local PANEL_BLUR_BASE_STRENGTH = 2.5
+local PANEL_SHADOW_THICKNESS = 14
 local PANEL_TITLE_TEXT = "Auto Save"
 
 -- Ally debuffs that mark a circular no-blink zone (stay outside while saving).
@@ -321,6 +322,8 @@ local Colors = {
     BorderEnabled = Color(180, 180, 190, 255),
     CellBg = Color(12, 12, 16, 255),
     Quiet = Color(40, 40, 50, 200),
+    Shadow = Color(0, 0, 0, 160),
+    TextShadow = Color(0, 0, 0, 140),
 }
 
 local LangState = {
@@ -2025,6 +2028,24 @@ local function SyncColors()
     if quiet then
         Colors.Quiet = quiet
     end
+
+    -- Soft header glow from theme. Alpha 0 = no glow.
+    local panelShadow = TryGetThemeColor("shadow")
+    if panelShadow and (panelShadow.a or 0) > 0 then
+        Colors.Shadow = panelShadow
+    else
+        Colors.Shadow = Color(0, 0, 0, 0)
+    end
+
+    local textShadow = TryGetThemeColor("text_shadow")
+    if textShadow and (textShadow.a or 0) > 0 then
+        Colors.TextShadow = textShadow
+    elseif panelShadow and (panelShadow.a or 0) > 0 then
+        local a = math.min(180, math.max(80, math.floor((panelShadow.a or 140) * 0.55 + 0.5)))
+        Colors.TextShadow = Color(panelShadow.r, panelShadow.g, panelShadow.b, a)
+    else
+        Colors.TextShadow = Color(0, 0, 0, 140)
+    end
 end
 
 local function ColorLuminance(color)
@@ -2311,8 +2332,10 @@ local function DrawPanelText(size, text, pos, color)
         return false
     end
 
-    local shadow = Color(0, 0, 0, 140)
-    pcall(Render.Text, font, size, text, Vec2(pos.x + 1, pos.y + 1), shadow)
+    local shadow = Colors.TextShadow or Color(0, 0, 0, 140)
+    if (shadow.a or 0) > 0 then
+        pcall(Render.Text, font, size, text, Vec2(pos.x + 1, pos.y + 1), shadow)
+    end
     if pcall(Render.Text, font, size, text, pos, color) then
         return true
     end
@@ -2323,6 +2346,33 @@ local function DrawPanelText(size, text, pos, color)
         return true
     end
     return false
+end
+
+local function DrawPanelShadow(x, y, width, height, scale)
+    local shadow = Colors.Shadow
+    if not shadow or not Render or not Render.Shadow then
+        return
+    end
+
+    local alpha = shadow.a
+    if alpha == nil then
+        alpha = 0
+    end
+    if alpha <= 0 then
+        return
+    end
+
+    local thickness = math.max(6, PANEL_SHADOW_THICKNESS * scale * (0.55 + alpha / 255))
+    local radius = PANEL_HEADER_RADIUS * scale
+    local flags = Enum and Enum.DrawFlags and Enum.DrawFlags.ShadowCutOutShapeBackground or nil
+    SafeCall(
+        Render.Shadow,
+        Vec2(x, y),
+        Vec2(x + width, y + height),
+        shadow,
+        thickness,
+        radius,
+        flags)
 end
 
 local function GetPanelLayout(scale, numAllies, screenSize)
@@ -2472,6 +2522,7 @@ function Script.OnDraw()
     local cellRadius = PANEL_CELL_RADIUS * scale
 
     DrawPanelBlur(layout, scale)
+    DrawPanelShadow(layout.x, layout.y, layout.width, layout.titleH, scale)
 
     Render.FilledRect(
         Vec2(layout.x, layout.y),

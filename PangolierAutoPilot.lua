@@ -459,21 +459,42 @@ local function ResetRuntime()
     Runtime.draw.rolling = false
 end
 
+-- Some Umbrella builds expose Config without ReadInt/WriteInt; fall back to defaults.
 local function ReadBool(key, default)
     local fallback = default and 1 or 0
-    return Config.ReadInt(CONFIG_SECTION, key, fallback) ~= 0
+    if not Config or type(Config.ReadInt) ~= "function" then
+        return default and true or false
+    end
+    local ok, value = TryCall(Config.ReadInt, CONFIG_SECTION, key, fallback)
+    if not ok or type(value) ~= "number" then
+        return default and true or false
+    end
+    return value ~= 0
 end
 
 local function WriteBool(key, value)
-    Config.WriteInt(CONFIG_SECTION, key, value and 1 or 0)
+    if not Config or type(Config.WriteInt) ~= "function" then
+        return
+    end
+    TryCall(Config.WriteInt, CONFIG_SECTION, key, value and 1 or 0)
 end
 
 local function ReadInt(key, default)
-    return Config.ReadInt(CONFIG_SECTION, key, default)
+    if not Config or type(Config.ReadInt) ~= "function" then
+        return default
+    end
+    local ok, value = TryCall(Config.ReadInt, CONFIG_SECTION, key, default)
+    if not ok or type(value) ~= "number" then
+        return default
+    end
+    return value
 end
 
 local function WriteInt(key, value)
-    Config.WriteInt(CONFIG_SECTION, key, value)
+    if not Config or type(Config.WriteInt) ~= "function" then
+        return
+    end
+    TryCall(Config.WriteInt, CONFIG_SECTION, key, value)
 end
 
 local function Dist2D(a, b)

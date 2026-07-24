@@ -53,6 +53,7 @@ local PANEL_CHIP_DISABLED_ALPHA = 105
 local PANEL_CHIP_MIN_BORDER_LUMA = 90
 local PANEL_MIN_WIDTH = 110
 local PANEL_BLUR_BASE_STRENGTH = 2.5
+local PANEL_SHADOW_THICKNESS = 14
 local PANEL_TITLE_TEXT = "Auto Save"
 
 -- Ally debuffs that mark a circular no-blink zone (stay outside while saving).
@@ -267,6 +268,7 @@ local Colors = {
     BorderEnabled = Color(180, 180, 190, 255),
     CellBg = Color(12, 12, 16, 255),
     Quiet = Color(40, 40, 50, 200),
+    Shadow = Color(0, 0, 0, 160),
 }
 
 local LangState = {
@@ -618,6 +620,33 @@ local function DrawPanelBlur(layout, scale)
         1.0,
         PANEL_HEADER_RADIUS * scale,
         Enum.DrawFlags.None)
+end
+
+local function DrawPanelHeaderShadow(layout, scale)
+    local shadow = Colors.Shadow
+    if not shadow or not Render or not Render.Shadow then
+        return
+    end
+
+    local alpha = shadow.a
+    if alpha == nil then
+        alpha = 0
+    end
+    if alpha <= 0 then
+        return
+    end
+
+    local thickness = math.max(6, PANEL_SHADOW_THICKNESS * scale * (0.55 + alpha / 255))
+    local radius = PANEL_HEADER_RADIUS * scale
+    local flags = Enum and Enum.DrawFlags and Enum.DrawFlags.ShadowCutOutShapeBackground or nil
+    SafeCall(
+        Render.Shadow,
+        Vec2(layout.x, layout.y),
+        Vec2(layout.x + layout.width, layout.y + layout.titleH),
+        shadow,
+        thickness,
+        radius,
+        flags)
 end
 
 local function GetUILanguage()
@@ -2571,6 +2600,11 @@ local function SyncColors()
     if quiet then
         Colors.Quiet = quiet
     end
+
+    local shadow = TryGetThemeColor("shadow")
+    if shadow then
+        Colors.Shadow = shadow
+    end
 end
 
 local function ColorLuminance(color)
@@ -3002,6 +3036,7 @@ function Script.OnDraw()
     local cellRadius = PANEL_CELL_RADIUS * scale
 
     DrawPanelBlur(layout, scale)
+    DrawPanelHeaderShadow(layout, scale)
 
     Render.FilledRect(
         Vec2(layout.x, layout.y),
