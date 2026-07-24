@@ -10,7 +10,6 @@ local Script = {}
 local NAME = "WarlockControlGolems"
 local UPDATE_INTERVAL = 0.15
 local CONFIG_INI_REL = "configs/" .. NAME .. ".ini"
-local PANEL_SAVE_INTERVAL = 0.25
 
 local MENU_FIRST = "Heroes"
 local MENU_SECTION = "Hero List"
@@ -23,21 +22,21 @@ local GOLEM_PREFIX = "npc_dota_warlock_golem"
 local GOLEM_PREFIX_LEN = #GOLEM_PREFIX
 local MODIFIER_KILL = "modifier_kill"
 
-local ORDER_ATTACK = "warlock_control_golems.attack"
-local ORDER_PUSH = "warlock_control_golems.push"
+local ORDER_PREFIX = "warlock_control_golems."
+local ORDER_ATTACK = ORDER_PREFIX .. "attack"
+local ORDER_PUSH = ORDER_PREFIX .. "push"
 
 local ICON_ENABLE = "\u{f00c}"
 local ICON_FORCE = "\u{e1c1}"
 local ICON_SEARCH = "\u{f689}"
 local ICON_OVERLAY = "\u{f0ce}"
 
-local SPELL_ICON = "panorama/images/spellicons/warlock_rain_of_chaos_png.vtex_c"
 local PANEL_CENTER_SENTINEL = -1
 
 local PANEL_BLUR_BASE = 2.5
 local PANEL_HEADER_H = 32
 local PANEL_PAD_X = 10
-local PANEL_RADIUS = 5
+local PANEL_RADIUS = 8
 local PANEL_ROW_H = 20
 local PANEL_WIDTH = 220
 
@@ -96,7 +95,6 @@ local PanelDrag = {
     IsDragging = false,
     OffsetX = 0,
     OffsetY = 0,
-    lastSaveAt = -math.huge,
 }
 
 local PanelLayoutCache = {
@@ -109,8 +107,6 @@ local Persistent = {
     logger = nil,
     ---@type integer|nil
     font = nil,
-    ---@type integer|nil
-    spellIcon = nil,
     ---@type CMenuSliderFloat|CMenuSliderInt|nil
     blurFactor = nil,
     wasMousePressed = false,
@@ -121,10 +117,6 @@ local Persistent = {
 ---@field targetIndex integer|nil
 ---@field destX number|nil
 ---@field destY number|nil
-
----@class WarlockPushRoute
----@field lane string
----@field dest Vector
 
 ---@class WarlockGolemHudRow
 ---@field remain number|nil
@@ -138,8 +130,8 @@ local Runtime = {
     enemyFort = nil,
     ---@type userdata|nil
     allyFort = nil,
-    ---@type WarlockPushRoute|nil
-    pushRoute = nil,
+    ---@type Vector|nil
+    pushDest = nil,
     controlActive = false,
     ---@type WarlockGolemHudRow[]
     hudRows = {},
@@ -252,6 +244,7 @@ local function ResolveFont()
     end
     return nil
 end
+
 --#endregion
 
 --#region Helpers
@@ -260,7 +253,7 @@ local function ResetRuntime()
     Runtime.lastOrders = {}
     Runtime.enemyFort = nil
     Runtime.allyFort = nil
-    Runtime.pushRoute = nil
+    Runtime.pushDest = nil
     Runtime.controlActive = false
     Runtime.hudRows = {}
 end
@@ -493,23 +486,18 @@ local function ResolveLanePushDestination(me, lane)
     return nil
 end
 
-local function EnsurePushRoute(me)
-    local route = Runtime.pushRoute
-    if route and route.dest then
-        return route
+local function EnsurePushDest(me)
+    if Runtime.pushDest then
+        return Runtime.pushDest
     end
 
-    local lane = DetectLane(Entity.GetAbsOrigin(me))
-    local dest = ResolveLanePushDestination(me, lane)
+    local dest = ResolveLanePushDestination(me, DetectLane(Entity.GetAbsOrigin(me)))
     if not dest then
         return nil
     end
 
-    Runtime.pushRoute = {
-        lane = lane,
-        dest = Vector(dest.x, dest.y, dest.z),
-    }
-    return Runtime.pushRoute
+    Runtime.pushDest = Vector(dest.x, dest.y, dest.z)
+    return Runtime.pushDest
 end
 
 local function SameAttackOrder(state, target, kind)
@@ -591,10 +579,32 @@ local function ControlGolem(player, me, golem, searchRange)
         return
     end
 
-    local route = EnsurePushRoute(me)
-    if route and route.dest then
-        IssuePush(player, golem, route.dest)
+    local dest = EnsurePushDest(me)
+    if dest then
+        IssuePush(player, golem, dest)
     end
+end
+
+local function InvalidateGolemOrder(unit)
+    if not unit or IsWarlockGolem(unit) ~= true then
+        return
+    end
+    Runtime.lastOrders[Entity.GetIndex(unit)] = nil
+end
+
+local function InvalidateGolemOrdersFromIssuer(npc)
+    if type(npc) == "table" then
+        for i = 1, #npc do
+            InvalidateGolemOrder(npc[i])
+        end
+        return
+    end
+    InvalidateGolemOrder(npc)
+end
+
+local function IsOwnOrderIdentifier(identifier)
+    return type(identifier) == "string"
+        and string.sub(identifier, 1, #ORDER_PREFIX) == ORDER_PREFIX
 end
 
 local function UpdateFeature(me, player, controlActive)
@@ -606,21 +616,26 @@ local function UpdateFeature(me, player, controlActive)
     local searchRange = UI.searchRange:Get()
     local golems = CollectGolems(playerId)
     if #golems == 0 then
-        Runtime.pushRoute = nil
+        Runtime.pushDest = nil
         Runtime.lastOrders = {}
     end
 
-    if controlActive == true then
-        for i = 1, #golems do
-            ControlGolem(player, me, golems[i], searchRange)
-        end
+    if controlActive ~= true then
+        -- Drop dedupe cache so the next resume re-issues attack/push.
+        Runtime.lastOrders = {}
+        RefreshHud(golems, false)
+        return
     end
 
-    RefreshHud(golems, controlActive)
+    for i = 1, #golems do
+        ControlGolem(player, me, golems[i], searchRange)
+    end
+
+    RefreshHud(golems, true)
 end
 --#endregion
 
---#region Draw
+--#region Rendering
 local function DrawTextShadowed(font, size, text, pos, color)
     local shadow = Colors.TextShadow
     if shadow and (shadow.a or 0) > 0 then
@@ -704,88 +719,81 @@ local function ClampPanelPos(x, y, width, height, screen)
     return math.max(0, math.min(x, maxX)), math.max(0, math.min(y, maxY))
 end
 
-local function ResolveIniPath()
+local function IsScreenSizeUsable(screen, width, height)
+    return screen ~= nil
+        and type(screen.x) == "number"
+        and type(screen.y) == "number"
+        and screen.x > width
+        and screen.y > height
+end
+
+local function ForEachPanelIniPath(callback)
     local root = Engine.GetCheatDirectory()
     if type(root) == "string" and root ~= "" then
         local slash = string.find(root, "/", 1, true) and "/" or "\\"
-        return root .. slash .. "configs" .. slash .. NAME .. ".ini"
+        callback(root .. slash .. "configs" .. slash .. NAME .. ".ini")
     end
-    return CONFIG_INI_REL
+    if CONFIG_INI_REL ~= "" then
+        callback(CONFIG_INI_REL)
+    end
 end
 
-local function WritePanelIni(x, y, saved)
-    local savedFlag = 0
-    if saved == true then
-        savedFlag = 1
-    end
+local function WritePanelIni(x, y)
     local body = string.format(
-        "[config]\npanel_saved=%d\npanel_x=%d\npanel_y=%d\n",
-        savedFlag,
+        "[config]\npanel_saved=1\npanel_x=%d\npanel_y=%d\n",
         x,
         y
     )
-
-    local paths = {
-        CONFIG_INI_REL,
-        ResolveIniPath(),
-    }
-
-    for i = 1, #paths do
-        local path = paths[i]
-        if path and path ~= "" then
-            local file = io.open(path, "w")
-            if file then
-                file:write(body)
-                file:close()
-                return true
-            end
+    ForEachPanelIniPath(function(path)
+        local file = io.open(path, "w")
+        if file then
+            file:write(body)
+            file:close()
         end
-    end
-    return false
+    end)
 end
 
 local function ReadPanelIni()
-    local paths = {
-        CONFIG_INI_REL,
-        ResolveIniPath(),
-    }
-
-    for i = 1, #paths do
-        local path = paths[i]
-        if path and path ~= "" then
-            local file = io.open(path, "r")
-            if file then
-                local content = file:read("*a")
-                file:close()
-                if type(content) == "string" then
-                    local saved = tonumber(string.match(content, "panel_saved%s*=%s*(%-?%d+)"))
-                    local x = tonumber(string.match(content, "panel_x%s*=%s*(%-?%d+)"))
-                    local y = tonumber(string.match(content, "panel_y%s*=%s*(%-?%d+)"))
-                    if x ~= nil and y ~= nil and (saved == 1 or x >= 0) then
-                        return math.floor(x), math.floor(y)
-                    end
-                end
-            end
+    local foundX, foundY = nil, nil
+    ForEachPanelIniPath(function(path)
+        if foundX ~= nil then
+            return
         end
-    end
-    return nil, nil
+        local file = io.open(path, "r")
+        if not file then
+            return
+        end
+        local content = file:read("*a")
+        file:close()
+        if type(content) ~= "string" then
+            return
+        end
+        local saved = tonumber(string.match(content, "panel_saved%s*=%s*(%-?%d+)"))
+        local x = tonumber(string.match(content, "panel_x%s*=%s*(%-?%d+)"))
+        local y = tonumber(string.match(content, "panel_y%s*=%s*(%-?%d+)"))
+        if saved == 1 and x ~= nil and y ~= nil then
+            foundX = math.floor(x)
+            foundY = math.floor(y)
+        end
+    end)
+    return foundX, foundY
 end
 
 local function LoadPanelPos()
-    local saved = Config.ReadInt(NAME, "panel_saved", 0)
-    local x = Config.ReadInt(NAME, "panel_x", PANEL_CENTER_SENTINEL)
-    local y = Config.ReadInt(NAME, "panel_y", 200)
-    if saved == 1 or x >= 0 then
-        PanelConfig.X = math.floor(x)
-        PanelConfig.Y = math.floor(y)
-        PanelConfig.Saved = true
-        return
-    end
-
     local iniX, iniY = ReadPanelIni()
     if iniX ~= nil and iniY ~= nil then
         PanelConfig.X = iniX
         PanelConfig.Y = iniY
+        PanelConfig.Saved = true
+        return
+    end
+
+    local saved = Config.ReadInt(NAME, "panel_saved", 0)
+    local x = Config.ReadInt(NAME, "panel_x", PANEL_CENTER_SENTINEL)
+    local y = Config.ReadInt(NAME, "panel_y", 200)
+    if saved == 1 and x >= 0 then
+        PanelConfig.X = math.floor(x)
+        PanelConfig.Y = math.floor(y)
         PanelConfig.Saved = true
         return
     end
@@ -800,21 +808,27 @@ local function SavePanelPos()
         return
     end
 
-    local screen = Render.ScreenSize()
     local x = math.floor(PanelConfig.X + 0.5)
     local y = math.floor(PanelConfig.Y + 0.5)
-    x, y = ClampPanelPos(x, y, PanelLayoutCache.w, PanelLayoutCache.h, screen)
+    if x == PANEL_CENTER_SENTINEL then
+        return
+    end
+
+    if Engine.IsInGame() then
+        local screen = Render.ScreenSize()
+        if IsScreenSizeUsable(screen, PanelLayoutCache.w, PanelLayoutCache.h) then
+            x, y = ClampPanelPos(x, y, PanelLayoutCache.w, PanelLayoutCache.h, screen)
+        end
+    end
+
     PanelConfig.X = x
     PanelConfig.Y = y
+    PanelConfig.Saved = true
 
     Config.WriteInt(NAME, "panel_x", x)
     Config.WriteInt(NAME, "panel_y", y)
     Config.WriteInt(NAME, "panel_saved", 1)
-    WritePanelIni(x, y, true)
-    PanelConfig.Saved = true
-    if Engine.IsInGame() then
-        PanelDrag.lastSaveAt = GameRules.GetGameTime()
-    end
+    WritePanelIni(x, y)
 end
 
 local function IsMouse1Down()
@@ -859,20 +873,10 @@ local function UpdatePanelDrag(layout)
             SavePanelPos()
         end
         PanelDrag.IsDragging = false
-    end
-
-    if PanelDrag.IsDragging then
-        local nx = math.floor(mx - PanelDrag.OffsetX)
-        local ny = math.floor(my - PanelDrag.OffsetY)
-        if nx ~= PanelConfig.X or ny ~= PanelConfig.Y then
-            PanelConfig.X = nx
-            PanelConfig.Y = ny
-            PanelConfig.Saved = true
-            local now = GameRules.GetGameTime()
-            if now - PanelDrag.lastSaveAt >= PANEL_SAVE_INTERVAL then
-                SavePanelPos()
-            end
-        end
+    elseif PanelDrag.IsDragging then
+        PanelConfig.X = math.floor(mx - PanelDrag.OffsetX)
+        PanelConfig.Y = math.floor(my - PanelDrag.OffsetY)
+        PanelConfig.Saved = true
     end
 
     Persistent.wasMousePressed = isDown
@@ -919,24 +923,38 @@ local function DrawOverlayPanel()
     local bodyH = math.max(rowH, (#rows) * rowH + padX)
     local height = titleH + bodyH
     local screen = Render.ScreenSize()
+    local screenOk = IsScreenSizeUsable(screen, width, height)
+    if not screenOk and PanelConfig.X == PANEL_CENTER_SENTINEL then
+        return
+    end
 
-    if PanelConfig.X == PANEL_CENTER_SENTINEL and PanelConfig.Saved ~= true then
+    if screenOk
+        and PanelConfig.X == PANEL_CENTER_SENTINEL
+        and PanelConfig.Saved ~= true
+    then
         PanelConfig.X = math.floor((screen.x - width) * 0.5)
     end
 
-    local hitX, hitY = ClampPanelPos(PanelConfig.X, PanelConfig.Y, width, height, screen)
+    local x, y = PanelConfig.X, PanelConfig.Y
+    if screenOk then
+        x, y = ClampPanelPos(x, y, width, height, screen)
+    end
+
     UpdatePanelDrag({
-        x = hitX,
-        y = hitY,
+        x = x,
+        y = y,
         w = width,
         h = height,
         titleH = titleH,
     })
 
-    local x, y = ClampPanelPos(PanelConfig.X, PanelConfig.Y, width, height, screen)
-    if PanelDrag.IsDragging ~= true then
-        PanelConfig.X = x
-        PanelConfig.Y = y
+    x, y = PanelConfig.X, PanelConfig.Y
+    if screenOk then
+        x, y = ClampPanelPos(x, y, width, height, screen)
+        if PanelDrag.IsDragging ~= true then
+            PanelConfig.X = x
+            PanelConfig.Y = y
+        end
     end
 
     local headerStart = Vec2(x, y)
@@ -945,7 +963,7 @@ local function DrawOverlayPanel()
     local bodyEnd = Vec2(x + width, y + height)
 
     if Colors.Shadow and (Colors.Shadow.a or 0) > 0 then
-        Render.Shadow(headerStart, bodyEnd, Colors.Shadow, 18 * scale, radius)
+        Render.Shadow(headerStart, headerEnd, Colors.Shadow, 18 * scale, radius)
     end
 
     local blur = GetBlurStrength()
@@ -955,23 +973,18 @@ local function DrawOverlayPanel()
     end
 
     Render.FilledRect(headerStart, headerEnd, Colors.HeaderBg, radius, Enum.DrawFlags.RoundCornersTop)
-    Render.FilledRect(bodyStart, bodyEnd, ColorWithAlpha(Colors.BodyBg, math.min(Colors.BodyBg.a or 220, 230)), radius, Enum.DrawFlags.RoundCornersBottom)
-
-    local iconSize = 18 * scale
-    local textX = x + padX
-    if Persistent.spellIcon then
-        Render.Image(
-            Persistent.spellIcon,
-            Vec2(x + padX, y + (titleH - iconSize) * 0.5),
-            Vec2(iconSize, iconSize),
-            Color(255, 255, 255, 255),
-            3 * scale
-        )
-        textX = textX + iconSize + 6 * scale
-    end
+    Render.FilledRect(
+        bodyStart,
+        bodyEnd,
+        ColorWithAlpha(Colors.BodyBg, 150),
+        radius,
+        Enum.DrawFlags.RoundCornersBottom
+    )
 
     local titleSize = 14 * scale
-    DrawTextShadowed(font, titleSize, "Golems", Vec2(textX, y + (titleH - titleSize) * 0.45), Colors.TextHeader)
+    local textX = x + padX
+    local titleY = y + (titleH - titleSize) * 0.45
+    DrawTextShadowed(font, titleSize, "Golems", Vec2(textX, titleY), Colors.TextHeader)
 
     local countText = tostring(#rows)
     local countSize = Render.TextSize(font, titleSize, countText)
@@ -1033,14 +1046,8 @@ function Script.OnScriptsLoaded()
     Persistent.logger = Logger(NAME)
     SyncColors()
     Persistent.font = ResolveFont()
-    Persistent.spellIcon = Render.LoadImage(SPELL_ICON)
     Persistent.blurFactor = Menu.Find("SettingsHidden", "", "", "", "Visual", "Menu Blur Factor")
     LoadPanelPos()
-    if PanelConfig.Saved == true then
-        SavePanelPos()
-    else
-        WritePanelIni(PANEL_CENTER_SENTINEL, 200, false)
-    end
 
     local group = Menu.Create(MENU_FIRST, MENU_SECTION, MENU_SECOND, MENU_THIRD, MENU_GROUP)
 
@@ -1065,6 +1072,28 @@ end
 
 function Script.OnThemeUpdate()
     SyncColors()
+end
+
+function Script.OnPrepareUnitOrders(data, player, order, target, position, ability, orderIssuer, npc, queue, showEffects)
+    if IsOwnOrderIdentifier(data and data.identifier) then
+        return true
+    end
+
+    local localPlayer = Players.GetLocal()
+    if not localPlayer or player ~= localPlayer then
+        return true
+    end
+
+    InvalidateGolemOrdersFromIssuer(npc)
+
+    local selected = Player.GetSelectedUnits(localPlayer)
+    if type(selected) == "table" then
+        for i = 1, #selected do
+            InvalidateGolemOrder(selected[i])
+        end
+    end
+
+    return true
 end
 
 function Script.OnUpdate()
@@ -1127,7 +1156,6 @@ function Script.OnGameEnd()
     end
     ResetRuntime()
     PanelDrag.IsDragging = false
-    PanelDrag.lastSaveAt = -math.huge
     Persistent.wasMousePressed = false
 end
 --#endregion
