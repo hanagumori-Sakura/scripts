@@ -145,14 +145,46 @@ local Icons = {
     draw = "\u{f06e}",
 }
 
-local Theme = {
-    line = Color(236, 214, 168, 210),
-    lineSoft = Color(236, 214, 168, 70),
-    accent = Color(255, 186, 92, 230),
-    ring = Color(255, 255, 255, 55),
-    iconBg = Color(12, 12, 16, 170),
-    text = Color(240, 232, 214, 220),
+-- Full Menu.Style catalog (HUD-PANELS.md). Neutral fallbacks only — never theme-file RGB.
+local STYLE_KEYS = {
+    "active_widgets_text", "additional_background", "button_active_background",
+    "button_background", "combo_frame", "combo_item", "combo_item_active",
+    "disabled_switch_background", "disabled_switch_circle", "enabled_switch_background",
+    "group_background", "group_outline", "healthbar_ally", "healthbar_enemy",
+    "healthbar_roshan", "healthbar_self", "hero_tab_filter_background",
+    "hero_tab_filter_separator", "indication_active", "indication_inactive",
+    "input_text_bg", "keybind_background", "keybind_background_active",
+    "left_tabs_background", "main_background", "manabar", "multiselect_item",
+    "multiselect_item_selected", "outline", "popup_background", "popup_border",
+    "primary", "primary_first_tab_text", "primary_second_tab_text",
+    "primary_widgets_text", "scrollbar_bg", "search_outline", "search_text",
+    "section_group_text", "selected_tabs_background", "separator", "shadow",
+    "slider_background", "slider_background_active", "slider_grab",
+    "slider_grab_active", "text_shadow", "third_tab_text", "widgets_shadow",
 }
+
+local Style = {}
+
+---Overlay / HUD roles derived from Style (synced in SyncColors).
+local Colors = {
+    line = Color(180, 180, 190, 210),
+    lineSoft = Color(180, 180, 190, 70),
+    accent = Color(180, 180, 190, 230),
+    ring = Color(245, 247, 250, 55),
+    iconBg = Color(12, 12, 16, 170),
+    text = Color(245, 247, 250, 220),
+    textShadow = Color(0, 0, 0, 140),
+    HeaderBg = Color(18, 18, 22, 255),
+    TextHeader = Color(245, 247, 250, 255),
+    Accent = Color(180, 180, 190, 255),
+    BodyBg = Color(12, 12, 16, 255),
+    Shadow = Color(0, 0, 0, 160),
+    WidgetsShadow = Color(0, 0, 0, 0),
+    TextShadow = Color(0, 0, 0, 140),
+}
+
+-- Backward-compatible alias for draw helpers.
+local Theme = Colors
 
 local STAGE = {
     IDLE = "idle",
@@ -395,17 +427,121 @@ local function TryCall(fn, ...)
     return pcall(fn, ...)
 end
 
----@generic T
----@param fn fun(...): T
----@param ... any
----@return T|nil
-local function SafeValue(fn, ...)
-    local ok, value = TryCall(fn, ...)
-    if not ok then
-        return nil
+---@param value number
+---@param fallback number
+---@return number
+local function ClampThemeByte(value, fallback)
+    if type(value) ~= "number" then
+        return fallback
+    end
+    value = math.floor(value + 0.5)
+    if value < 0 then
+        return 0
+    end
+    if value > 255 then
+        return 255
     end
     return value
 end
+
+---@param col any
+---@return Color|nil
+local function NormalizeThemeColor(col)
+    if col == nil then
+        return nil
+    end
+    local r, g, b, a = col.r, col.g, col.b, col.a
+    if type(r) ~= "number" or type(g) ~= "number" or type(b) ~= "number" then
+        return nil
+    end
+    if a == nil then
+        a = 255
+    end
+    if r <= 1 and g <= 1 and b <= 1 and a <= 1 then
+        r, g, b, a = r * 255, g * 255, b * 255, a * 255
+    end
+    return Color(
+        ClampThemeByte(r, 255),
+        ClampThemeByte(g, 255),
+        ClampThemeByte(b, 255),
+        ClampThemeByte(a, 255)
+    )
+end
+
+---@param name string
+---@param styleTable table|nil
+---@return Color|nil
+local function TryGetThemeColor(name, styleTable)
+    local ok, col = TryCall(Menu.Style, name)
+    local normalized = NormalizeThemeColor(ok and col or nil)
+    if normalized then
+        return normalized
+    end
+    if type(styleTable) == "table" then
+        return NormalizeThemeColor(styleTable[name])
+    end
+    return nil
+end
+
+local function SyncColors()
+    local okAll, all = TryCall(Menu.Style)
+    local styleTable = (okAll and type(all) == "table") and all or nil
+
+    for i = 1, #STYLE_KEYS do
+        local key = STYLE_KEYS[i]
+        Style[key] = TryGetThemeColor(key, styleTable)
+    end
+    if styleTable then
+        for key, _ in pairs(styleTable) do
+            if Style[key] == nil then
+                Style[key] = TryGetThemeColor(key, styleTable)
+            end
+        end
+    end
+
+    Colors.HeaderBg = Style.additional_background
+        or Style.popup_background
+        or Style.main_background
+        or Style.group_background
+        or Colors.HeaderBg
+    Colors.TextHeader = Style.primary_widgets_text
+        or Style.active_widgets_text
+        or Colors.TextHeader
+    Colors.Accent = Style.enabled_switch_background
+        or Style.combo_item_active
+        or Style.primary
+        or Style.indication_active
+        or Style.multiselect_item_selected
+        or Style.button_active_background
+        or Style.slider_grab_active
+        or Colors.Accent
+    Colors.BodyBg = Style.group_background
+        or Style.button_background
+        or Style.combo_frame
+        or Style.input_text_bg
+        or Colors.BodyBg
+    Colors.Shadow = Style.shadow or Colors.Shadow
+    Colors.WidgetsShadow = Style.widgets_shadow or Colors.WidgetsShadow
+    if Style.text_shadow and (Style.text_shadow.a or 0) > 0 then
+        Colors.TextShadow = Style.text_shadow
+        Colors.textShadow = Style.text_shadow
+    else
+        Colors.TextShadow = Color(0, 0, 0, 140)
+        Colors.textShadow = Colors.TextShadow
+    end
+
+    local accent = Colors.Accent
+    local text = Colors.TextHeader
+    local body = Colors.BodyBg
+    Colors.line = Color(accent.r, accent.g, accent.b, 210)
+    Colors.lineSoft = Color(accent.r, accent.g, accent.b, 70)
+    Colors.accent = Color(accent.r, accent.g, accent.b, 230)
+    Colors.ring = Color(text.r, text.g, text.b, 55)
+    Colors.iconBg = Color(body.r, body.g, body.b, 170)
+    Colors.text = Color(text.r, text.g, text.b, 220)
+end
+
+SyncColors()
 
 local function ResetRuntime()
     Runtime.lastUpdateAt = -math.huge
@@ -459,12 +595,9 @@ local function ResetRuntime()
     Runtime.draw.rolling = false
 end
 
--- Some Umbrella builds expose Config without ReadInt/WriteInt; fall back to defaults.
+-- Config.ReadInt is stub-declared; TryCall covers rare builds where the field is absent at runtime.
 local function ReadBool(key, default)
     local fallback = default and 1 or 0
-    if not Config or type(Config.ReadInt) ~= "function" then
-        return default and true or false
-    end
     local ok, value = TryCall(Config.ReadInt, CONFIG_SECTION, key, fallback)
     if not ok or type(value) ~= "number" then
         return default and true or false
@@ -473,16 +606,10 @@ local function ReadBool(key, default)
 end
 
 local function WriteBool(key, value)
-    if not Config or type(Config.WriteInt) ~= "function" then
-        return
-    end
     TryCall(Config.WriteInt, CONFIG_SECTION, key, value and 1 or 0)
 end
 
 local function ReadInt(key, default)
-    if not Config or type(Config.ReadInt) ~= "function" then
-        return default
-    end
     local ok, value = TryCall(Config.ReadInt, CONFIG_SECTION, key, default)
     if not ok or type(value) ~= "number" then
         return default
@@ -491,9 +618,6 @@ local function ReadInt(key, default)
 end
 
 local function WriteInt(key, value)
-    if not Config or type(Config.WriteInt) ~= "function" then
-        return
-    end
     TryCall(Config.WriteInt, CONFIG_SECTION, key, value)
 end
 
@@ -563,29 +687,26 @@ local function L(key)
 end
 
 local function MenuIcon(widget, icon)
-    if not widget or not icon or not widget.Icon then
+    if not widget or not icon then
         return
     end
-    local ok = pcall(widget.Icon, widget, icon)
-    if not ok then
-        pcall(widget.Icon, icon)
-    end
+    widget:Icon(icon)
 end
 
 local function MenuImage(widget, imagePath)
-    if widget and widget.Image and imagePath then
+    if widget and imagePath then
         widget:Image(imagePath)
     end
 end
 
 local function MenuTip(widget, key)
-    if widget and widget.ToolTip then
+    if widget then
         widget:ToolTip(L(key))
     end
 end
 
 local function MenuLabel(widget, key)
-    if widget and widget.ForceLocalization then
+    if widget then
         widget:ForceLocalization(L(key))
     end
 end
@@ -640,7 +761,7 @@ local function Dbg(fmt, ...)
     if not UI.debug or UI.debug:Get() ~= true or not Persistent.logger then
         return
     end
-    Runtime.lastDebugAt = SafeValue(GameRules.GetGameTime) or 0
+    Runtime.lastDebugAt = GameRules.GetGameTime() or 0
     Persistent.logger:info(string.format(fmt, ...))
 end
 
@@ -685,7 +806,7 @@ end
 
 ---@return integer
 local function GetOrderQueueCount()
-    local queue = SafeValue(Humanizer.GetOrderQueue)
+    local queue = Humanizer.GetOrderQueue()
     if type(queue) ~= "table" then
         return 0
     end
@@ -698,7 +819,7 @@ local function CanSendOrder(me)
     if GetOrderQueueCount() > C.ORDER_QUEUE_MAX then
         return false
     end
-    if SafeValue(NPC.IsStunned, me) == true then
+    if NPC.IsStunned(me) == true then
         return false
     end
     return true
@@ -707,21 +828,21 @@ end
 ---@param unit userdata|nil
 ---@return boolean
 local function IsAliveUnit(unit)
-    return unit ~= nil and SafeValue(Entity.IsAlive, unit) == true
+    return unit ~= nil and Entity.IsAlive(unit) == true
 end
 
 ---@param unit userdata|nil
 ---@param me userdata
 ---@return boolean
 local function IsEnemyUnit(unit, me)
-    if not IsAliveUnit(unit) or unit == me then
+    if unit == nil or unit == me or Entity.IsAlive(unit) ~= true then
         return false
     end
-    if SafeValue(NPC.IsIllusion, unit) == true then
+    if NPC.IsIllusion(unit) == true then
         return false
     end
-    local myTeam = SafeValue(Entity.GetTeamNum, me)
-    local theirTeam = SafeValue(Entity.GetTeamNum, unit)
+    local myTeam = Entity.GetTeamNum(me)
+    local theirTeam = Entity.GetTeamNum(unit)
     if myTeam == nil or theirTeam == nil or myTeam == theirTeam then
         return false
     end
@@ -732,24 +853,22 @@ end
 ---@param me userdata
 ---@return boolean
 local function IsValidEnemy(unit, me)
-    if not IsEnemyUnit(unit, me) then
+    if unit == nil or not IsEnemyUnit(unit, me) then
         return false
     end
-    if SafeValue(Entity.IsDormant, unit) == true then
+    if Entity.IsDormant(unit) == true then
         return false
     end
-    if SafeValue(NPC.IsVisible, unit) == false then
+    if NPC.IsVisible(unit) ~= true then
         return false
     end
     local states = Enum.modifierState
-    if states and SafeValue(NPC.HasState, unit, states.MODIFIER_STATE_INVULNERABLE) == true then
+    if states and NPC.HasState(unit, states.MODIFIER_STATE_INVULNERABLE) == true then
         return false
     end
-    if Humanizer and Humanizer.IsSafeTarget then
-        local ok, safe = TryCall(Humanizer.IsSafeTarget, unit)
-        if ok and safe == false then
-            return false
-        end
+    local ok, safe = TryCall(Humanizer.IsSafeTarget, unit)
+    if ok and safe == false then
+        return false
     end
     return true
 end
@@ -765,20 +884,20 @@ end
 ---@param me userdata
 ---@return boolean
 local function HasGyroshell(me)
-    return SafeValue(NPC.HasModifier, me, MOD_GYROSHELL) == true
-        or SafeValue(NPC.HasModifier, me, MOD_RICOCHET) == true
+    return NPC.HasModifier(me, MOD_GYROSHELL) == true
+        or NPC.HasModifier(me, MOD_RICOCHET) == true
 end
 
 ---@param me userdata
 ---@return boolean
 local function HasShieldJump(me)
-    return SafeValue(NPC.HasModifier, me, MOD_SHIELD_JUMP) == true
+    return NPC.HasModifier(me, MOD_SHIELD_JUMP) == true
 end
 
 ---@param me userdata
 ---@return boolean
 local function HasRollUp(me)
-    return SafeValue(NPC.HasModifier, me, MOD_ROLLUP) == true
+    return NPC.HasModifier(me, MOD_ROLLUP) == true
 end
 
 ---@param me userdata
@@ -795,7 +914,7 @@ local function IsRolling(me, now)
     if HasShieldJump(me) then
         return true
     end
-    now = now or SafeValue(GameRules.GetGameTime) or 0
+    now = now or GameRules.GetGameTime() or 0
     -- Tiny grace right after W while gyroshell may flicker, only before rollLostAt.
     if Runtime.rollSeen and not Runtime.rollLostAt and now < (Runtime.shieldJumpUntil or -math.huge) then
         return true
@@ -806,7 +925,7 @@ end
 ---@param me userdata
 ---@return boolean
 local function IsRicocheting(me)
-    return SafeValue(NPC.HasModifier, me, MOD_RICOCHET) == true
+    return NPC.HasModifier(me, MOD_RICOCHET) == true
 end
 
 ---@param ability userdata|nil
@@ -817,8 +936,9 @@ local function ReadSpecial(ability, name, fallback)
     if not ability then
         return fallback
     end
-    local value = SafeValue(Ability.GetLevelSpecialValueFor, ability, name)
-    if type(value) == "number" and value > 0 then
+    -- Stub-declared; prose in QUIRKS notes alternate name — keep this call, confirm via KV smoke.
+    local ok, value = TryCall(Ability.GetLevelSpecialValueFor, ability, name)
+    if ok and type(value) == "number" and value > 0 then
         return value
     end
     return fallback
@@ -828,7 +948,7 @@ end
 ---@return userdata|nil
 local function GetGyroshell(me)
     ---@type userdata|nil
-    local ability = SafeValue(NPC.GetAbility, me, ABILITY_GYROSHELL)
+    local ability = NPC.GetAbility(me, ABILITY_GYROSHELL)
     return ability
 end
 
@@ -838,7 +958,7 @@ local function GetBlink(me)
     for i = 1, #BLINK_ITEMS do
         local name = BLINK_ITEMS[i]
         ---@type userdata|nil
-        local item = SafeValue(NPC.GetItem, me, name, true)
+        local item = NPC.GetItem(me, name, true)
         if item then
             return item, name
         end
@@ -850,21 +970,18 @@ end
 ---@param ability userdata
 ---@return boolean
 local function IsAbilityCastable(me, ability)
-    local mana = SafeValue(NPC.GetMana, me) or 0
-    return SafeValue(Ability.IsCastable, ability, mana) == true
+    local mana = NPC.GetMana(me) or 0
+    return Ability.IsCastable(ability, mana) == true
 end
 
 ---@param pos Vector|nil
 ---@return boolean
 local function IsWorldTraversable(pos)
-    if not pos or not GridNav or not GridNav.IsTraversable then
-        return true
+    if not pos then
+        return false
     end
     local ok, result = TryCall(GridNav.IsTraversable, pos, C.GRID_FLAG, C.GRID_EXCLUDED)
-    if ok then
-        return result == true
-    end
-    return true
+    return ok and result == true
 end
 
 ---Gyroshell breaks trees and does not bounce on them. ignoreTrees=true.
@@ -875,11 +992,9 @@ local function IsBallPathClear(from, to)
     if not from or not to then
         return false
     end
-    if GridNav and GridNav.IsTraversableFromTo then
-        local ok, result = TryCall(GridNav.IsTraversableFromTo, from, to, true, nil)
-        if ok then
-            return result == true
-        end
+    local ok, result = TryCall(GridNav.IsTraversableFromTo, from, to, true, nil)
+    if ok then
+        return result == true
     end
     return IsWorldTraversable(to)
 end
@@ -891,11 +1006,9 @@ local function IsPathClear(from, to)
     if not from or not to then
         return false
     end
-    if GridNav and GridNav.IsTraversableFromTo then
-        local ok, result = TryCall(GridNav.IsTraversableFromTo, from, to, false, nil)
-        if ok then
-            return result == true
-        end
+    local ok, result = TryCall(GridNav.IsTraversableFromTo, from, to, false, nil)
+    if ok then
+        return result == true
     end
     return IsWorldTraversable(to)
 end
@@ -930,7 +1043,7 @@ end
 ---@param me userdata
 ---@return number, number, number
 local function GetForward2D(me)
-    local rot = SafeValue(Entity.GetRotation, me)
+    local rot = Entity.GetRotation(me)
     if rot and rot.GetForward then
         local forward = rot:GetForward()
         if forward then
@@ -940,8 +1053,8 @@ local function GetForward2D(me)
             end
         end
     end
-    local tip = SafeValue(Entity.GetForwardPosition, me, 100)
-    local origin = SafeValue(Entity.GetAbsOrigin, me)
+    local tip = Entity.GetForwardPosition(me, 100)
+    local origin = Entity.GetAbsOrigin(me)
     if tip and origin then
         return Normalize2D(tip.x - origin.x, tip.y - origin.y)
     end
@@ -952,7 +1065,7 @@ end
 ---@param pos Vector
 ---@return number
 local function GetFacingDot(me, pos)
-    local origin = SafeValue(Entity.GetAbsOrigin, me)
+    local origin = Entity.GetAbsOrigin(me)
     if not origin then
         return 0
     end
@@ -969,22 +1082,22 @@ end
 ---@return Vector|nil
 local function PredictPosition(target, lead)
     ---@type Vector|nil
-    local pos = SafeValue(Entity.GetAbsOrigin, target)
+    local pos = Entity.GetAbsOrigin(target)
     if not pos then
         return nil
     end
-    if lead <= 0 or SafeValue(NPC.IsRunning, target) ~= true then
+    if lead <= 0 or NPC.IsRunning(target) ~= true then
         return pos
     end
-    if SafeValue(NPC.IsStunned, target) == true then
+    if NPC.IsStunned(target) == true then
         return pos
     end
-    local speed = SafeValue(NPC.GetMoveSpeed, target) or 0
+    local speed = NPC.GetMoveSpeed(target) or 0
     if type(speed) ~= "number" or speed <= 1 then
         return pos
     end
     ---@type Vector|nil
-    local tip = SafeValue(Entity.GetForwardPosition, target, speed * lead)
+    local tip = Entity.GetForwardPosition(target, speed * lead)
     if tip then
         return tip
     end
@@ -995,12 +1108,12 @@ end
 ---@param now number
 ---@return number|nil remaining
 local function GetGyroStunRemaining(target, now)
-    local mod = SafeValue(NPC.GetModifier, target, MOD_STUNNED)
-    if not mod then
+    local okMod, mod = TryCall(NPC.GetModifier, target, MOD_STUNNED)
+    if not okMod or not mod then
         return nil
     end
-    local die = SafeValue(Modifier.GetDieTime, mod)
-    if type(die) ~= "number" then
+    local okDie, die = TryCall(Modifier.GetDieTime, mod)
+    if not okDie or type(die) ~= "number" then
         return nil
     end
     return math.max(0, die - now)
@@ -1017,7 +1130,7 @@ end
 
 ---@return boolean
 local function IsKeyHeld()
-    return UI.key ~= nil and UI.key.IsDown and SafeValue(UI.key.IsDown, UI.key) == true
+    return UI.key ~= nil and UI.key:IsDown() == true
 end
 
 ---@return boolean
@@ -1092,7 +1205,7 @@ local function CanStartNewUlt(now, me, ability)
     if HasGyroshell(me) or HasShieldJump(me) then
         return false
     end
-    if ability and SafeValue(Ability.IsInAbilityPhase, ability) == true then
+    if ability and Ability.IsInAbilityPhase(ability) == true then
         return false
     end
     -- Brief pause after ball ends — shield armor buff must not extend this.
@@ -1373,15 +1486,15 @@ end
 ---@param me userdata
 ---@return userdata|nil
 local function SelectTarget(me)
-    local mePos = SafeValue(Entity.GetAbsOrigin, me)
-    local team = SafeValue(Entity.GetTeamNum, me)
+    local mePos = Entity.GetAbsOrigin(me)
+    local team = Entity.GetTeamNum(me)
     if not mePos or team == nil or not Heroes then
         return nil
     end
 
     local locked = Runtime.lockedTarget
     if locked and IsValidEnemy(locked, me) then
-        local pos = SafeValue(Entity.GetAbsOrigin, locked)
+        local pos = Entity.GetAbsOrigin(locked)
         if pos then
             Runtime.lastTargetPos = pos
         end
@@ -1393,23 +1506,10 @@ local function SelectTarget(me)
         return locked
     end
 
-    ---@type userdata[]
-    local heroes = {}
-    if Heroes.GetAll then
-        heroes = SafeValue(Heroes.GetAll) or {}
-    elseif Heroes.InRadius then
-        heroes = SafeValue(
-            Heroes.InRadius,
-            mePos,
-            30000,
-            team,
-            Enum.TeamType.TEAM_ENEMY,
-            true,
-            true
-        ) or {}
-    end
+    -- Map-wide: Cursor Priority only biases score; range slider is not a hard cap.
+    local heroes = Heroes.GetAll() or {}
 
-    local cursor = SafeValue(Input.GetWorldCursorPos)
+    local cursor = Input.GetWorldCursorPos()
     local cursorPriority = GetSearchRange()
     local best = nil
     local bestScore = -math.huge
@@ -1417,7 +1517,7 @@ local function SelectTarget(me)
     for i = 1, #heroes do
         local enemy = heroes[i]
         if IsValidEnemy(enemy, me) then
-            local enemyPos = SafeValue(Entity.GetAbsOrigin, enemy)
+            local enemyPos = Entity.GetAbsOrigin(enemy)
             if enemyPos then
                 local dist = Dist2D(mePos, enemyPos)
                 local score = 20000 - dist
@@ -1436,7 +1536,7 @@ local function SelectTarget(me)
     end
 
     if best then
-        local pos = SafeValue(Entity.GetAbsOrigin, best)
+        local pos = Entity.GetAbsOrigin(best)
         if pos then
             Runtime.lastTargetPos = pos
         end
@@ -1454,7 +1554,7 @@ local function IsUltBusy(me, ability)
     if Runtime.ultIssued or Runtime.pendingUltAt then
         return true
     end
-    if ability and SafeValue(Ability.IsInAbilityPhase, ability) == true then
+    if ability and Ability.IsInAbilityPhase(ability) == true then
         return true
     end
     return IsRolling(me)
@@ -1473,7 +1573,7 @@ local function IssueFace(now, me, targetPos)
         return false
     end
 
-    local origin = SafeValue(Entity.GetAbsOrigin, me)
+    local origin = Entity.GetAbsOrigin(me)
     if not origin then
         return false
     end
@@ -1484,7 +1584,7 @@ local function IssueFace(now, me, targetPos)
     end
 
     local point = Vector(origin.x + dx * C.FACE_NUDGE, origin.y + dy * C.FACE_NUDGE, origin.z)
-    local player = SafeValue(Players.GetLocal)
+    local player = Players.GetLocal()
     if player and Enum.UnitOrder and Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_DIRECTION then
         local ok = TryCall(
             Player.PrepareUnitOrders,
@@ -1570,7 +1670,7 @@ end
 ---@param blink userdata
 ---@return number
 local function GetBlinkCooldown(blink)
-    local cd = SafeValue(Ability.GetCooldown, blink)
+    local cd = Ability.GetCooldown(blink)
     if type(cd) == "number" then
         return cd
     end
@@ -1614,7 +1714,7 @@ local function IssueBlink(now, me, blink, landPos, chase)
         Runtime.blinkAttempts = 0
     end
 
-    local origin = SafeValue(Entity.GetAbsOrigin, me)
+    local origin = Entity.GetAbsOrigin(me)
     Runtime.blinkCdBefore = GetBlinkCooldown(blink)
     Runtime.blinkOrigin = origin
 
@@ -1657,7 +1757,7 @@ local function UpdateBlinkConfirm(now, me, blink)
         return true
     end
 
-    local origin = SafeValue(Entity.GetAbsOrigin, me)
+    local origin = Entity.GetAbsOrigin(me)
     if origin and Runtime.blinkOrigin and Dist2D(origin, Runtime.blinkOrigin) >= 150 then
         Runtime.blinkConfirmed = true
         Runtime.pendingBlinkAt = nil
@@ -1744,8 +1844,8 @@ local function ComputeBlinkLandPos(me, myPos, targetPos, blink)
         return nil
     end
 
-    local castRange = SafeValue(Ability.GetCastRange, blink) or 0
-    castRange = castRange + (SafeValue(NPC.GetCastRangeBonus, me) or 0)
+    local castRange = Ability.GetCastRange(blink) or 0
+    castRange = castRange + (NPC.GetCastRangeBonus(me) or 0)
     if castRange <= 0 then
         castRange = C.BLINK_RANGE_FALLBACK
     end
@@ -1804,9 +1904,9 @@ end
 
 local function UpdateInitiate(now, me, ability, target)
     ---@type Vector|nil
-    local myPos = SafeValue(Entity.GetAbsOrigin, me)
+    local myPos = Entity.GetAbsOrigin(me)
     ---@type Vector|nil
-    local targetPos = SafeValue(Entity.GetAbsOrigin, target)
+    local targetPos = Entity.GetAbsOrigin(target)
     if not myPos or not targetPos then
         return
     end
@@ -1827,7 +1927,7 @@ local function UpdateInitiate(now, me, ability, target)
         end
     end
 
-    local inPhase = SafeValue(Ability.IsInAbilityPhase, ability) == true
+    local inPhase = Ability.IsInAbilityPhase(ability) == true
     if inPhase then
         Runtime.ultIssued = true
         Runtime.pendingUltAt = Runtime.pendingUltAt or now
@@ -1844,7 +1944,7 @@ local function UpdateInitiate(now, me, ability, target)
 
     -- Never face/move after ult order — that cancels cast and can proc Swashbuckle Aim.
     if CanStartNewUlt(now, me, ability) and not inPhase then
-        local faceTime = SafeValue(NPC.GetTimeToFacePosition, me, targetPos) or 0
+        local faceTime = NPC.GetTimeToFacePosition(me, targetPos) or 0
         if faceTime > C.FACE_TIME_MAX then
             SetStage(STAGE.FACE, now)
             IssueFace(now, me, targetPos)
@@ -1891,9 +1991,9 @@ end
 local function FindWallAlongRay(origin, dirX, dirY, maxDist)
     local prev = origin
     local prevZ = origin.z
-    if World and World.GetGroundZ then
-        local gz = SafeValue(World.GetGroundZ, origin.x, origin.y)
-        if type(gz) == "number" then
+    do
+        local okZ, gz = TryCall(World.GetGroundZ, origin.x, origin.y)
+        if okZ and type(gz) == "number" then
             prevZ = gz
         end
     end
@@ -1901,12 +2001,10 @@ local function FindWallAlongRay(origin, dirX, dirY, maxDist)
     for dist = C.WALL_SCAN_STEP, maxDist, C.WALL_SCAN_STEP do
         local sample = Vector(origin.x + dirX * dist, origin.y + dirY * dist, origin.z)
         local groundZ = sample.z
-        if World and World.GetGroundZ then
-            local gz = SafeValue(World.GetGroundZ, sample.x, sample.y)
-            if type(gz) == "number" then
-                groundZ = gz
-                sample = Vector(sample.x, sample.y, gz)
-            end
+        local okZ, gz = TryCall(World.GetGroundZ, sample.x, sample.y)
+        if okZ and type(gz) == "number" then
+            groundZ = gz
+            sample = Vector(sample.x, sample.y, gz)
         end
 
         local hard, isCliff = IsHardBounceSurface(prev, sample, prevZ, groundZ)
@@ -2129,11 +2227,9 @@ end
 ---@param fallback number
 ---@return number
 local function GetGroundZAt(x, y, fallback)
-    if World and World.GetGroundZ then
-        local gz = SafeValue(World.GetGroundZ, x, y)
-        if type(gz) == "number" then
-            return gz
-        end
+    local okZ, gz = TryCall(World.GetGroundZ, x, y)
+    if okZ and type(gz) == "number" then
+        return gz
     end
     return fallback
 end
@@ -2213,19 +2309,11 @@ local function NeedsTerrainHopToward(me, myPos, targetPos, jumpDist)
 end
 
 local function CountEnemiesInShieldRadius(me, myPos, radius)
-    local team = SafeValue(Entity.GetTeamNum, me)
-    if team == nil or not Heroes or not Heroes.InRadius then
+    local team = Entity.GetTeamNum(me)
+    if team == nil then
         return 0
     end
-    local heroes = SafeValue(
-        Heroes.InRadius,
-        myPos,
-        radius,
-        team,
-        Enum.TeamType.TEAM_ENEMY,
-        true,
-        true
-    ) or {}
+    local heroes = Heroes.InRadius(myPos, radius, team, Enum.TeamType.TEAM_ENEMY, true, true) or {}
     local count = 0
     for i = 1, #heroes do
         if IsValidEnemy(heroes[i], me) then
@@ -2257,12 +2345,12 @@ local function TryShieldCrash(now, me, bounceAim)
     if (Runtime.shieldCastsThisRoll or 0) >= C.SHIELD_MAX_PER_ROLL then
         return false
     end
-    local shield = SafeValue(NPC.GetAbility, me, ABILITY_SHIELD_CRASH)
+    local shield = NPC.GetAbility(me, ABILITY_SHIELD_CRASH)
     if not shield or not IsAbilityCastable(me, shield) then
         return false
     end
 
-    local myPos = SafeValue(Entity.GetAbsOrigin, me)
+    local myPos = Entity.GetAbsOrigin(me)
     if not myPos then
         return false
     end
@@ -2276,7 +2364,7 @@ local function TryShieldCrash(now, me, bounceAim)
     local locked = Runtime.lockedTarget
     if locked and IsKeepableRollTarget(locked, me) then
         targetPos = PredictPosition(locked, 0.10)
-            or SafeValue(Entity.GetAbsOrigin, locked)
+            or Entity.GetAbsOrigin(locked)
             or Runtime.lastTargetPos
     end
     local needHop = false
@@ -2373,7 +2461,7 @@ local function IssueRollUpStop(now, me)
     if not HasRollUp(me) then
         return false
     end
-    local stop = SafeValue(NPC.GetAbility, me, ABILITY_ROLLUP_STOP)
+    local stop = NPC.GetAbility(me, ABILITY_ROLLUP_STOP)
     if not stop then
         Dbg("rollup stop ability missing")
         return false
@@ -2409,14 +2497,14 @@ local function TryRollUp(now, me, target)
         return false
     end
 
-    local rollup = SafeValue(NPC.GetAbility, me, ABILITY_ROLLUP)
+    local rollup = NPC.GetAbility(me, ABILITY_ROLLUP)
     if not rollup or not IsAbilityCastable(me, rollup) then
         return false
     end
 
     local gyro = GetGyroshell(me)
     local bounceDur = ReadSpecial(gyro, "bounce_duration", C.DEFAULT_BOUNCE_DURATION)
-    local shield = SafeValue(NPC.GetAbility, me, ABILITY_SHIELD_CRASH)
+    local shield = NPC.GetAbility(me, ABILITY_SHIELD_CRASH)
     local jumpRecover = ReadSpecial(shield, "jump_recover_time", C.DEFAULT_JUMP_RECOVER)
 
     -- KV jump_recover_time: no mobility tech right after W land.
@@ -2428,15 +2516,21 @@ local function TryRollUp(now, me, target)
         return false
     end
     -- Need enough gyroshell time left to re-aim and hit again.
-    local gyroMod = SafeValue(NPC.GetModifier, me, MOD_GYROSHELL)
-    local gyroDie = gyroMod and SafeValue(Modifier.GetDieTime, gyroMod) or nil
+    local okGyro, gyroMod = TryCall(NPC.GetModifier, me, MOD_GYROSHELL)
+    local gyroDie = nil
+    if okGyro and gyroMod then
+        local okDie, die = TryCall(Modifier.GetDieTime, gyroMod)
+        if okDie and type(die) == "number" then
+            gyroDie = die
+        end
+    end
     if type(gyroDie) == "number" and (gyroDie - now) < 1.35 then
         return false
     end
 
-    local myPos = SafeValue(Entity.GetAbsOrigin, me)
+    local myPos = Entity.GetAbsOrigin(me)
     local targetPos = PredictPosition(target, 0.12)
-        or SafeValue(Entity.GetAbsOrigin, target)
+        or Entity.GetAbsOrigin(target)
         or Runtime.lastTargetPos
     if not myPos or not targetPos then
         return false
@@ -2536,9 +2630,9 @@ local function UpdateRollUpSteer(now, me, target)
         return true
     end
 
-    local myPos = SafeValue(Entity.GetAbsOrigin, me)
+    local myPos = Entity.GetAbsOrigin(me)
     local targetPos = PredictPosition(target, 0.10)
-        or SafeValue(Entity.GetAbsOrigin, target)
+        or Entity.GetAbsOrigin(target)
         or Runtime.lastTargetPos
     if not myPos or not targetPos then
         return true
@@ -2554,10 +2648,10 @@ local function UpdateRollUpSteer(now, me, target)
 
     -- End Roll Up as soon as we face the enemy (rollup_stop is IMMEDIATE).
     local facingDot = GetFacingDot(me, targetPos)
-    local faceTime = SafeValue(NPC.GetTimeToFacePosition, me, targetPos)
+    local faceTime = NPC.GetTimeToFacePosition(me, targetPos)
     local faced = facingDot >= C.ROLLUP_FACE_DOT
         or (type(faceTime) == "number" and faceTime <= C.ROLLUP_FACE_TIME)
-    local rollupAb = SafeValue(NPC.GetAbility, me, ABILITY_ROLLUP)
+    local rollupAb = NPC.GetAbility(me, ABILITY_ROLLUP)
     local maxHold = ReadSpecial(rollupAb, "duration", C.DEFAULT_ROLLUP_DURATION) - 0.20
     if maxHold < 0.8 then
         maxHold = C.ROLLUP_MAX_HOLD
@@ -2615,9 +2709,9 @@ local function TryBlinkDuringRoll(now, me, target)
     end
 
     ---@type Vector|nil
-    local myPos = SafeValue(Entity.GetAbsOrigin, me)
+    local myPos = Entity.GetAbsOrigin(me)
     ---@type Vector|nil
-    local targetPos = PredictPosition(target, 0.12) or SafeValue(Entity.GetAbsOrigin, target)
+    local targetPos = PredictPosition(target, 0.12) or Entity.GetAbsOrigin(target)
     if not myPos or not targetPos then
         return false
     end
@@ -2680,7 +2774,7 @@ local function TryBlinkDuringRoll(now, me, target)
         return false
     end
 
-    local shield = SafeValue(NPC.GetAbility, me, ABILITY_SHIELD_CRASH)
+    local shield = NPC.GetAbility(me, ABILITY_SHIELD_CRASH)
     local jumpGyro = ReadSpecial(shield, "jump_duration_gyroshell", C.DEFAULT_JUMP_GYRO)
     local jumpRecover = ReadSpecial(shield, "jump_recover_time", C.DEFAULT_JUMP_RECOVER)
     if now - (Runtime.lastShieldAt or -math.huge) < math.max(C.CHASE_BLINK_AFTER_W, jumpGyro, jumpRecover + 0.05) then
@@ -2748,7 +2842,7 @@ end
 ---@return Vector|nil
 local function ComputeSteerAim(now, me, ability, target)
     ---@type Vector|nil
-    local myPos = SafeValue(Entity.GetAbsOrigin, me)
+    local myPos = Entity.GetAbsOrigin(me)
     if not myPos then
         return nil
     end
@@ -2760,7 +2854,7 @@ local function ComputeSteerAim(now, me, ability, target)
     ---@type Vector|nil
     local targetPos = PredictPosition(target, 0.15)
     if not targetPos then
-        targetPos = SafeValue(Entity.GetAbsOrigin, target)
+        targetPos = Entity.GetAbsOrigin(target)
     end
     if not targetPos then
         targetPos = Runtime.lastTargetPos
@@ -2962,10 +3056,10 @@ local function UpdateSteer(now, me, ability, target)
         return
     end
 
-    local myPos = SafeValue(Entity.GetAbsOrigin, me)
+    local myPos = Entity.GetAbsOrigin(me)
     ---@type Vector|nil
     local targetPos = PredictPosition(target, 0.12)
-        or SafeValue(Entity.GetAbsOrigin, target)
+        or Entity.GetAbsOrigin(target)
         or Runtime.lastTargetPos
 
     if IsRicocheting(me) then
@@ -3155,14 +3249,14 @@ local function RefreshDrawState(me)
         return
     end
 
-    local mePos = SafeValue(Entity.GetAbsOrigin, me)
-    local targetPos = SafeValue(Entity.GetAbsOrigin, target) or Runtime.lastTargetPos
+    local mePos = Entity.GetAbsOrigin(me)
+    local targetPos = Entity.GetAbsOrigin(target) or Runtime.lastTargetPos
     if not mePos or not targetPos then
         Runtime.draw.active = false
         return
     end
 
-    local now = SafeValue(GameRules.GetGameTime) or 0
+    local now = GameRules.GetGameTime() or 0
     local stageLabel = "LOCK"
     if Runtime.stage == STAGE.FACE or Runtime.stage == STAGE.CAST_ULT or Runtime.stage == STAGE.BLINK then
         stageLabel = "CAST"
@@ -3188,7 +3282,7 @@ local function RefreshDrawState(me)
     Runtime.draw.targetPos = targetPos
     Runtime.draw.aimPos = Runtime.lastAimPos
     Runtime.draw.wallPos = Runtime.lastWallPos
-    Runtime.draw.targetName = SafeValue(NPC.GetUnitName, target)
+    Runtime.draw.targetName = NPC.GetUnitName(target)
     Runtime.draw.stageLabel = stageLabel
     Runtime.draw.debugText = table.concat(parts, " | ")
     Runtime.draw.rolling = rolling
@@ -3214,9 +3308,9 @@ local function EnsureFont()
     if IsValidHandle(Persistent.font) then
         return Persistent.font
     end
-    Persistent.font = SafeValue(Render.LoadFont, "Segoe UI", Enum.FontCreate.FONTFLAG_ANTIALIAS, 500)
-        or SafeValue(Render.LoadFont, "Tahoma", Enum.FontCreate.FONTFLAG_ANTIALIAS, 500)
-        or SafeValue(Render.LoadFont, "Arial")
+    Persistent.font = Render.LoadFont("Segoe UI", Enum.FontCreate.FONTFLAG_ANTIALIAS, 500)
+        or Render.LoadFont("Tahoma", Enum.FontCreate.FONTFLAG_ANTIALIAS, 500)
+        or Render.LoadFont("Arial")
     return Persistent.font
 end
 
@@ -3234,7 +3328,7 @@ local function GetHeroIcon(unitName)
         return cached
     end
     local path = "panorama/images/heroes/icons/" .. unitName .. "_png.vtex_c"
-    local handle = SafeValue(Render.LoadImage, path)
+    local handle = Render.LoadImage(path)
     if IsValidHandle(handle) then
         Persistent.heroIcons[unitName] = handle
         return handle
@@ -3247,7 +3341,7 @@ end
 ---@return Vec2|nil
 ---@return boolean
 local function WorldToScreenPos(worldPos)
-    if not Render or not Render.WorldToScreen or not worldPos then
+    if not worldPos then
         return nil, false
     end
     local ok, screen, visible = TryCall(Render.WorldToScreen, worldPos)
@@ -3297,15 +3391,8 @@ local function DrawArcLine(from, to, pulse)
 
     local soft = WithAlpha(Theme.lineSoft, 55 + 25 * pulse)
     local hard = WithAlpha(Theme.line, 170 + 50 * pulse)
-    if Render.PolyLine then
-        TryCall(Render.PolyLine, points, soft, 4.5)
-        TryCall(Render.PolyLine, points, hard, 1.6)
-    else
-        for i = 2, #points do
-            TryCall(Render.Line, points[i - 1], points[i], soft, 4.5)
-            TryCall(Render.Line, points[i - 1], points[i], hard, 1.6)
-        end
-    end
+    TryCall(Render.PolyLine, points, soft, 4.5)
+    TryCall(Render.PolyLine, points, hard, 1.6)
 end
 
 ---@param targetScreen Vec2
@@ -3319,15 +3406,11 @@ local function DrawTargetBadge(targetScreen, iconHandle, label, pulse, rolling)
     local half = size * 0.5
     local accent = rolling and Theme.accent or Theme.line
 
-    if Render.FilledCircle then
-        TryCall(Render.FilledCircle, Vec2(cx, cy), half + 7, WithAlpha(Theme.iconBg, 160))
-    end
-    if Render.Circle then
-        TryCall(Render.Circle, Vec2(cx, cy), half + 8 + pulse * 1.5, WithAlpha(Theme.ring, 40 + 30 * pulse), 1.4)
-        TryCall(Render.Circle, Vec2(cx, cy), half + 3, WithAlpha(accent, 200), 1.7)
-    end
+    TryCall(Render.FilledCircle, Vec2(cx, cy), half + 7, WithAlpha(Theme.iconBg, 160))
+    TryCall(Render.Circle, Vec2(cx, cy), half + 8 + pulse * 1.5, WithAlpha(Theme.ring, 40 + 30 * pulse), 1.4)
+    TryCall(Render.Circle, Vec2(cx, cy), half + 3, WithAlpha(accent, 200), 1.7)
 
-    if iconHandle and Render.ImageCentered then
+    if iconHandle then
         TryCall(
             Render.ImageCentered,
             iconHandle,
@@ -3337,26 +3420,19 @@ local function DrawTargetBadge(targetScreen, iconHandle, label, pulse, rolling)
             size * 0.5,
             Enum.DrawFlags.None
         )
-    elseif iconHandle and Render.Image then
-        TryCall(
-            Render.Image,
-            iconHandle,
-            Vec2(cx - half, cy - half),
-            Vec2(size, size),
-            Color(255, 255, 255, 245),
-            6,
-            Enum.DrawFlags.None
-        )
     end
 
     local font = EnsureFont()
-    if label and IsValidHandle(font) and Render.Text then
+    if label and IsValidHandle(font) then
         local fontSize = 11
-        local textSize = SafeValue(Render.TextSize, font, fontSize, label)
-        local tw = (textSize and textSize.x) or (#label * 6)
+        local okSize, textSize = TryCall(Render.TextSize, font, fontSize, label)
+        local tw = (okSize and textSize and textSize.x) or (#label * 6)
         local textPos = Vec2(cx - tw * 0.5, cy + half + 8)
-        TryCall(Render.Text, font, fontSize, label, Vec2(textPos.x + 1, textPos.y + 1), Color(0, 0, 0, 160))
-        TryCall(Render.Text, font, fontSize, label, textPos, WithAlpha(Theme.text, 230))
+        local shadow = Colors.TextShadow
+        if shadow and (shadow.a or 0) > 0 then
+            TryCall(Render.Text, font, fontSize, label, Vec2(textPos.x + 1, textPos.y + 1), shadow)
+        end
+        TryCall(Render.Text, font, fontSize, label, textPos, WithAlpha(Colors.text, 230))
     end
 end
 
@@ -3366,13 +3442,9 @@ end
 local function DrawOriginDot(meScreen, pulse, rolling)
     local accent = rolling and Theme.accent or Theme.line
     local r = 3.2 + pulse
-    if Render.FilledCircle then
-        TryCall(Render.FilledCircle, meScreen, r + 3, WithAlpha(accent, 40))
-        TryCall(Render.FilledCircle, meScreen, r, WithAlpha(accent, 220))
-    end
-    if Render.Circle then
-        TryCall(Render.Circle, meScreen, r + 5, WithAlpha(Theme.ring, 90), 1.2)
-    end
+    TryCall(Render.FilledCircle, meScreen, r + 3, WithAlpha(accent, 40))
+    TryCall(Render.FilledCircle, meScreen, r, WithAlpha(accent, 220))
+    TryCall(Render.Circle, meScreen, r + 5, WithAlpha(Theme.ring, 90), 1.2)
 end
 
 local function DrawOverlay()
@@ -3381,7 +3453,7 @@ local function DrawOverlay()
         return
     end
 
-    local now = SafeValue(GameRules.GetGameTime) or 0
+    local now = GameRules.GetGameTime() or 0
     local pulse = 0.5 + 0.5 * math.sin(now * 3.2)
 
     local meScreen, meVis = WorldToScreenPos(draw.mePos)
@@ -3402,9 +3474,7 @@ local function DrawOverlay()
         local aimScreen, aimVis = WorldToScreenPos(draw.aimPos)
         if aimVis and aimScreen and meScreen then
             TryCall(Render.Line, meScreen, aimScreen, WithAlpha(Theme.accent, 70), 1.1)
-            if Render.FilledCircle then
-                TryCall(Render.FilledCircle, aimScreen, 2.4, WithAlpha(Theme.accent, 180))
-            end
+            TryCall(Render.FilledCircle, aimScreen, 2.4, WithAlpha(Theme.accent, 180))
         end
     end
 
@@ -3412,30 +3482,31 @@ local function DrawOverlay()
         local wallScreen, wallVis = WorldToScreenPos(draw.wallPos)
         if wallVis and wallScreen then
             TryCall(Render.Line, meScreen, wallScreen, WithAlpha(Theme.line, 90), 1.0)
-            if Render.FilledCircle then
-                TryCall(Render.FilledCircle, wallScreen, 3.0, WithAlpha(Theme.line, 200))
-            end
+            TryCall(Render.FilledCircle, wallScreen, 3.0, WithAlpha(Theme.line, 200))
         end
     end
 
     if draw.debugText and meVis and meScreen then
         local font = EnsureFont()
-        if IsValidHandle(font) and Render.Text then
+        if IsValidHandle(font) then
             local fontSize = 12
             local pos = Vec2(meScreen.x + 14, meScreen.y - 18)
-            TryCall(Render.Text, font, fontSize, draw.debugText, Vec2(pos.x + 1, pos.y + 1), Color(0, 0, 0, 170))
-            TryCall(Render.Text, font, fontSize, draw.debugText, pos, WithAlpha(Theme.text, 235))
+            local shadow = Colors.TextShadow
+            if shadow and (shadow.a or 0) > 0 then
+                TryCall(Render.Text, font, fontSize, draw.debugText, Vec2(pos.x + 1, pos.y + 1), shadow)
+            end
+            TryCall(Render.Text, font, fontSize, draw.debugText, pos, WithAlpha(Colors.text, 235))
         end
     end
 
-    if draw.targetName and draw.targetPos and MiniMap and MiniMap.DrawHeroIcon then
+    if draw.targetName and draw.targetPos then
         TryCall(
             MiniMap.DrawHeroIcon,
             draw.targetName,
             draw.targetPos,
-            Theme.accent.r,
-            Theme.accent.g,
-            Theme.accent.b,
+            Colors.accent.r,
+            Colors.accent.g,
+            Colors.accent.b,
             210,
             700
         )
@@ -3446,9 +3517,14 @@ end
 --#region Lifecycle
 function Script.OnScriptsLoaded()
     Persistent.logger = Logger(NAME)
+    SyncColors()
     EnsureMenu()
     EnsureFont()
     Persistent.logger:info("loaded")
+end
+
+function Script.OnThemeUpdate()
+    SyncColors()
 end
 
 function Script.OnUpdate()
@@ -3464,7 +3540,7 @@ function Script.OnUpdate()
         return
     end
 
-    local now = SafeValue(GameRules.GetGameTime)
+    local now = GameRules.GetGameTime()
     if type(now) ~= "number" then
         return
     end
@@ -3474,7 +3550,7 @@ function Script.OnUpdate()
     Runtime.lastUpdateAt = now
 
     local me = Heroes.GetLocal()
-    if not me or SafeValue(NPC.GetUnitName, me) ~= HERO_NAME then
+    if not me or NPC.GetUnitName(me) ~= HERO_NAME then
         return
     end
     if not IsAliveUnit(me) then
@@ -3505,7 +3581,7 @@ function Script.OnDraw()
     if not Engine.IsInGame() then
         return
     end
-    if Menu and Menu.VisualsIsEnabled and SafeValue(Menu.VisualsIsEnabled) == false then
+    if Menu.VisualsIsEnabled() == false then
         return
     end
     if not UI.enabled or UI.enabled:Get() ~= true then
@@ -3521,7 +3597,7 @@ function Script.OnDraw()
 end
 
 function Script.OnPrepareUnitOrders(data, player, order, target, position, ability)
-    local identifier = type(data) == "table" and (data.identifier or data.orderIdentifier) or nil
+    local identifier = type(data) == "table" and data.identifier or nil
     if IsOurOrder(identifier) then
         return true
     end
@@ -3529,10 +3605,10 @@ function Script.OnPrepareUnitOrders(data, player, order, target, position, abili
     -- Block Swashbuckle / stop during cast+roll. Shield Crash is allowed while rolling.
     if UI.enabled and UI.enabled:Get() == true and IsKeyHeld() then
         local me = Heroes.GetLocal()
-        if me and SafeValue(NPC.GetUnitName, me) == HERO_NAME and ability then
-            local name = SafeValue(Ability.GetName, ability)
+        if me and NPC.GetUnitName(me) == HERO_NAME and ability then
+            local name = Ability.GetName(ability)
             local gyroshell = GetGyroshell(me)
-            local inPhase = gyroshell and SafeValue(Ability.IsInAbilityPhase, gyroshell) == true
+            local inPhase = gyroshell and Ability.IsInAbilityPhase(gyroshell) == true
             if name == ABILITY_GYROSHELL_STOP and IsUltBusy(me, gyroshell) then
                 Dbg("veto gyroshell_stop")
                 return false
