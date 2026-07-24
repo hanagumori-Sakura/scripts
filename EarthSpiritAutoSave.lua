@@ -44,19 +44,20 @@ local PANEL_HEADER_FONT_CANDIDATES = {
 local PANEL_HEADER_HEIGHT = 28
 local PANEL_HEADER_PAD_X = 8
 local PANEL_HEADER_TEXT_SIZE = 14
-local PANEL_HEADER_ICON_SIZE = 13
-local PANEL_HEADER_ICON_GAP = 5
+local PANEL_HEADER_ICON_SIZE = 14
+local PANEL_HEADER_ICON_GAP = 6
 local PANEL_HEADER_RADIUS = 5
+local PANEL_BODY_PAD_Y = 6
 local PANEL_CELL_W = 44
 local PANEL_CELL_H = 26
-local PANEL_CELL_SPACING = 3
-local PANEL_BODY_PAD_Y = 5
-local PANEL_MIN_WIDTH = 100
+local PANEL_CELL_SPACING = 6
+local PANEL_CELL_RADIUS = 3
+local PANEL_CHIP_ENABLED_ALPHA = 255
+local PANEL_CHIP_DISABLED_ALPHA = 105
+local PANEL_CHIP_MIN_BORDER_LUMA = 90
+local PANEL_MIN_WIDTH = 110
 local PANEL_BLUR_BASE_STRENGTH = 2.5
 local PANEL_TITLE_TEXT = "Auto Save"
-local PANEL_SIZE_ITEMS = { "50%", "75%", "100%", "125%", "150%" }
-local PANEL_SIZE_SCALES = { 0.50, 0.75, 1.00, 1.25, 1.50 }
-local PANEL_SIZE_DEFAULT_INDEX = 2
 
 -- Ally debuffs that mark a circular no-blink zone (stay outside while saving).
 local SAVE_HAZARD_MODIFIERS = {
@@ -317,7 +318,9 @@ local PanelDrag = {
 local Colors = {
     HeaderBg = Color(18, 18, 22, 255),
     TextHeader = Color(245, 247, 250, 255),
-    BorderEnabled = Color(191, 140, 255, 255),
+    BorderEnabled = Color(180, 180, 190, 255),
+    CellBg = Color(12, 12, 16, 255),
+    Quiet = Color(40, 40, 50, 200),
 }
 
 local LangState = {
@@ -1982,13 +1985,18 @@ local function SyncColors()
     local headerBg = TryGetThemeColorAny({
         "additional_background",
         "popup_background",
+        "main_background",
         "background",
+        "group_background",
     })
     if headerBg then
         Colors.HeaderBg = headerBg
     end
 
-    local textHeader = TryGetThemeColor("primary_widgets_text")
+    local textHeader = TryGetThemeColorAny({
+        "primary_widgets_text",
+        "active_widgets_text",
+    })
     if textHeader then
         Colors.TextHeader = textHeader
     end
@@ -1997,6 +2005,43 @@ local function SyncColors()
     if borderSource then
         Colors.BorderEnabled = borderSource
     end
+
+    local cellBg = TryGetThemeColorAny({
+        "group_background",
+        "button_background",
+        "combo_frame",
+        "input_text_bg",
+    })
+    if cellBg then
+        -- Keep chips opaque so hero icons stay readable on glass themes.
+        Colors.CellBg = Color(cellBg.r, cellBg.g, cellBg.b, 255)
+    end
+
+    local quiet = TryGetThemeColorAny({
+        "indication_inactive",
+        "disabled_switch_background",
+        "multiselect_item",
+    })
+    if quiet then
+        Colors.Quiet = quiet
+    end
+end
+
+local function ColorLuminance(color)
+    if not color then
+        return 0
+    end
+    return 0.299 * (color.r or 0) + 0.587 * (color.g or 0) + 0.114 * (color.b or 0)
+end
+
+local function GetChipBorderColor()
+    local accent = Colors.BorderEnabled
+    if ColorLuminance(accent) >= PANEL_CHIP_MIN_BORDER_LUMA then
+        return Color(accent.r, accent.g, accent.b, 255)
+    end
+
+    local text = Colors.TextHeader
+    return Color(text.r, text.g, text.b, 255)
 end
 
 SyncColors()
@@ -2075,6 +2120,11 @@ local function InitializeUI()
         "Only when Aghs Petrify is needed (Grip blocked/out of range): Blink in, then Petrify. Skips Chronosphere.",
         "Только если нужен Aghs Petrify (Grip недоступен): блинк в радиус и Petrify. Обходит Chronosphere."))
 
+    ui.DrawPanel = gear:Switch(L("Draw Ally Panel", "Показывать панель союзников"), true, Icons.panel)
+    WithTooltip(ui.DrawPanel, L(
+        "HUD panel to choose allies and drag the header to reposition.",
+        "HUD-панель выбора союзников. Перетаскивайте заголовок для перемещения."))
+
     ui.Debug = gear:Switch(L("Debug logs", "Debug логи"), false)
     MenuIcon(ui.Debug, Icons.bug)
     WithTooltip(ui.Debug, L(
@@ -2086,38 +2136,16 @@ local function InitializeUI()
     SafeCall(ui.PanelX.Visible, ui.PanelX, false)
     SafeCall(ui.PanelY.Visible, ui.PanelY, false)
 
-    ui.Panel = group:Label(L("Panel", "Панель"), Icons.panel)
-    WithTooltip(ui.Panel, L(
-        "Ally HUD panel settings.",
-        "Настройки HUD-панели союзников."))
-
-    local panelGear = ui.Panel:Gear(L("Panel", "Панель"), Icons.gear, true)
-
-    ui.DrawPanel = panelGear:Switch(L("Enable", "Включить"), true, Icons.enable)
-    WithTooltip(ui.DrawPanel, L(
-        "HUD panel to choose allies and drag the header to reposition.",
-        "HUD-панель выбора союзников. Перетаскивайте заголовок для перемещения."))
-
-    ui.PanelSize = panelGear:Combo(L("Panel Size", "Размер панели"), PANEL_SIZE_ITEMS, PANEL_SIZE_DEFAULT_INDEX)
-    WithTooltip(ui.PanelSize, L(
-        "Scale the ally HUD panel (50%–150%).",
-        "Масштаб HUD-панели союзников (50%–150%)."))
-
     local gearWidgets = {
         ui.ManaThreshold,
         ui.UseBlink,
-        ui.Debug,
-    }
-
-    local panelWidgets = {
         ui.DrawPanel,
-        ui.PanelSize,
+        ui.Debug,
     }
 
     local mainWidgets = {
         ui.Abilities,
         ui.Versus,
-        ui.Panel,
     }
 
     local function UpdateControls()
@@ -2128,11 +2156,6 @@ local function InitializeUI()
             end
         end
         for _, widget in ipairs(gearWidgets) do
-            if widget and widget.Disabled then
-                widget:Disabled(not enabled)
-            end
-        end
-        for _, widget in ipairs(panelWidgets) do
             if widget and widget.Disabled then
                 widget:Disabled(not enabled)
             end
@@ -2302,21 +2325,6 @@ local function DrawPanelText(size, text, pos, color)
     return false
 end
 
-local function GetPanelSizeScale()
-    if not UI or not UI.PanelSize or not UI.PanelSize.Get then
-        return PANEL_SIZE_SCALES[PANEL_SIZE_DEFAULT_INDEX + 1] or 1.0
-    end
-    local idx = UI.PanelSize:Get()
-    if type(idx) ~= "number" then
-        idx = PANEL_SIZE_DEFAULT_INDEX
-    end
-    return PANEL_SIZE_SCALES[idx + 1] or 1.0
-end
-
-local function GetHudScale()
-    return ((SafeCall(Menu.Scale) or 100) / 100) * GetPanelSizeScale()
-end
-
 local function GetPanelLayout(scale, numAllies, screenSize)
     local cellW = PANEL_CELL_W * scale
     local cellH = PANEL_CELL_H * scale
@@ -2395,7 +2403,6 @@ function Script.OnDraw()
     if not Engine.IsInGame() or not UI.Enabled:Get() or not UI.DrawPanel:Get() then
         return
     end
-    SyncColors()
     if Menu and Menu.VisualsIsEnabled and not SafeCall(Menu.VisualsIsEnabled) then
         return
     end
@@ -2410,7 +2417,7 @@ function Script.OnDraw()
         return
     end
 
-    local scale = GetHudScale()
+    local scale = (SafeCall(Menu.Scale) or 100) / 100
     local screenSize = SafeCall(Render.ScreenSize)
     if not screenSize or screenSize.x <= 1 or screenSize.y <= 1 then
         return
@@ -2444,6 +2451,9 @@ function Script.OnDraw()
     end
 
     local clickTriggered = isClicked
+    if clickTriggered and Input.IsInputCaptured and SafeCall(Input.IsInputCaptured) then
+        clickTriggered = false
+    end
     State.wasMousePressed = isDown
 
     local titleText = layout.titleText or PANEL_TITLE_TEXT
@@ -2459,6 +2469,7 @@ function Script.OnDraw()
     local titleContentY = layout.y + math.floor((layout.titleH - titleContentH) * 0.5 + 0.5)
     local textX = layout.x + layout.padX
     local textY = titleContentY + math.floor((titleContentH - titleSizeY) * 0.5 + 0.5)
+    local cellRadius = PANEL_CELL_RADIUS * scale
 
     DrawPanelBlur(layout, scale)
 
@@ -2485,16 +2496,15 @@ function Script.OnDraw()
         Vec2(textX, textY),
         Colors.TextHeader)
 
+    local borderColor = GetChipBorderColor()
+
     for i, cleanName in ipairs(State.cachedAllyNames) do
         local cellX = layout.cellsStartX + (i - 1) * (layout.cellW + layout.cellSpacing)
         local allyHero = State.cachedAllyEntities[cleanName]
         local enabled = IsAllySaveEnabled(cleanName)
 
-        local accentA = Colors.BorderEnabled.a
-        if accentA == nil then
-            accentA = 255
-        end
-        local imgAlpha = enabled and accentA or math.floor(accentA * 0.43)
+        -- Keep icon alphas theme-independent so translucent accents cannot wash out the toggle.
+        local imgAlpha = enabled and PANEL_CHIP_ENABLED_ALPHA or PANEL_CHIP_DISABLED_ALPHA
         local grayscale = enabled and 0.0 or 1.0
 
         local isCellHovered = isCursorValid
@@ -2504,13 +2514,19 @@ function Script.OnDraw()
         local heroNameRaw = allyHero and SafeCall(NPC.GetUnitName, allyHero) or ""
         local imgHandle = GetHeroIcon(heroNameRaw)
 
+        Render.FilledRect(
+            Vec2(cellX, layout.rowY),
+            Vec2(cellX + layout.cellW, layout.rowY + layout.cellH),
+            Colors.CellBg,
+            cellRadius)
+
         if imgHandle then
             Render.Image(
                 imgHandle,
                 Vec2(cellX, layout.rowY),
                 Vec2(layout.cellW, layout.cellH),
                 Color(255, 255, 255, imgAlpha),
-                3 * scale,
+                cellRadius,
                 Enum.DrawFlags.None,
                 Vec2(0, 0),
                 Vec2(1, 1),
@@ -2521,10 +2537,10 @@ function Script.OnDraw()
             Render.Rect(
                 Vec2(cellX, layout.rowY),
                 Vec2(cellX + layout.cellW, layout.rowY + layout.cellH),
-                Colors.BorderEnabled,
-                3 * scale,
+                borderColor,
+                cellRadius,
                 Enum.DrawFlags.None,
-                1.0)
+                1.3)
         end
 
         if isCellHovered and clickTriggered and not PanelDrag.IsDragging then
@@ -2550,7 +2566,7 @@ function Script.OnKeyEvent(_data, key, _event)
         return
     end
 
-    local scale = GetHudScale()
+    local scale = (SafeCall(Menu.Scale) or 100) / 100
     local screenSize = SafeCall(Render.ScreenSize)
     if not screenSize or screenSize.x <= 1 or screenSize.y <= 1 then
         return

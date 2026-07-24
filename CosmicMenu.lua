@@ -1,7 +1,7 @@
 ﻿--[[
     Cosmic Menu
     Full-screen cosmic overlay while the Umbrella menu is open.
-    Accent colors always follow Menu.Style / OnThemeUpdate.
+    Accent colors follow Menu.Style / OnThemeUpdate.
     Script by 花曇り hanagumori
 --]]
 
@@ -52,12 +52,19 @@ local CONSTANTS = {
     SCREEN_MIN_H = 360,
     SCREEN_MAX_W = 7680,
     SCREEN_MAX_H = 4320,
-    ACCRETION_RING_SEGMENTS = 72,
     GRAVITY_FILAMENT_COUNT = 6,
     GRAVITY_FILAMENT_SEGMENTS = 28,
     AMBIENT_NEBULA_RATIO = 0.42,
     LINK_PULSE_QUALITY_THRESHOLD = 0.92,
     GLOW_QUALITY_THRESHOLD = 0.82,
+    PARTICLE_GRADIENT_GLOW_MAX = 100,
+    NEON_QUALITY_THRESHOLD = 0.70,
+    NEON_VEIN_SEGMENTS = 20,
+    NEON_VEIN_COUNT = 5,
+    ENERGY_NODE_COUNT = 5,
+    CHROMATIC_RIM_QUALITY = 0.55,
+    CHROMATIC_RIM_SEGMENTS = 28,
+    SCREEN_CACHE_IDLE_FRAMES = 30,
     FLYING_ROCKET_MAX = 32,
     FLYING_ROCKET_SEGMENTS = 8,
     STANDARD_SNAP_WIDTH_TOLERANCE = 0.06,
@@ -121,8 +128,10 @@ local QUALITY_PRESETS = {
         hudEdges = true,
         parallax = true,
         starRays = true,
-        accretionRing = true,
         gravityFilaments = false,
+        neonVeins = true,
+        energyNodes = true,
+        chromaticRim = false,
     },
     {
         bgParticleCount = 350,
@@ -141,8 +150,10 @@ local QUALITY_PRESETS = {
         hudEdges = true,
         parallax = true,
         starRays = true,
-        accretionRing = true,
         gravityFilaments = true,
+        neonVeins = true,
+        energyNodes = true,
+        chromaticRim = true,
     },
     {
         bgParticleCount = 30,
@@ -164,8 +175,10 @@ local QUALITY_PRESETS = {
         cursorStardust = false,
         particleSoftCore = false,
         particleCursorInteraction = false,
-        accretionRing = false,
         gravityFilaments = false,
+        neonVeins = false,
+        energyNodes = false,
+        chromaticRim = false,
     },
 }
 
@@ -177,13 +190,15 @@ local PRESET_WIDGET_KEYS = {
     "ambientStreaks", "ambientStreakCount", "particleGlow", "vignette", "hudEdges",
     "parallax", "starRays", "colorWash", "openRipple", "horizonGrid", "multiLayerStars",
     "cursorStardust", "particleSoftCore", "particleCursorInteraction",
-    "accretionRing", "gravityFilaments", "flyingRockets", "flyingRocketCount",
+    "gravityFilaments", "neonVeins", "energyNodes", "chromaticRim",
+    "flyingRockets", "flyingRocketCount",
 }
 
 -- Switches muted while Flying Rockets solo mode is active (blur is kept as-is).
 local ROCKET_SOLO_SWITCH_KEYS = {
     "colorWash", "vignette", "hudEdges", "ambientStreaks", "parallax",
-    "openRipple", "horizonGrid", "accretionRing", "gravityFilaments",
+    "openRipple", "horizonGrid", "gravityFilaments", "neonVeins",
+    "energyNodes", "chromaticRim",
     "particleSoftCore", "particleGlow", "stars", "shootingStars", "starRays",
     "multiLayerStars", "particleConnections", "particleCursorInteraction", "cursorStardust",
 }
@@ -224,6 +239,9 @@ local State = {
     blockCustomPresetMarks = 0,
     cachedFullScreenSize = nil,
     lastRawScreenSize = nil,
+    screenCacheIdleFrames = 0,
+    lastLanguage = nil,
+    languageCallbackSet = false,
 }
 
 local openRippleTime = 0
@@ -273,12 +291,16 @@ local UpdateMenuControls = nil
 local GatherFrameSettings
 local IsCustomPresetMarkBlocked
 local ArmCustomPresetMarkBlock
+local LocaleEntries = {}
+local MenuGroups = {}
+local ApplyMenuLocalization
+local SetupLanguageCallback
 
 --#endregion
 
 --#region Helpers
 
-local function SafeCall(fn, ...)
+local function TryCall(fn, ...)
     if not fn then
         return false
     end
@@ -287,7 +309,7 @@ end
 
 local function WidgetSet(widget, value)
     if widget and widget.Set then
-        SafeCall(widget.Set, widget, value)
+        TryCall(widget.Set, widget, value)
     end
 end
 
@@ -329,7 +351,7 @@ local function ConfigWriteInt(key, value)
     if not Config or not Config.WriteInt then
         return
     end
-    SafeCall(Config.WriteInt, CONFIG_SECTION, key, value)
+    TryCall(Config.WriteInt, CONFIG_SECTION, key, value)
 end
 
 local function ConfigReadFloat(key, default)
@@ -347,7 +369,7 @@ local function ConfigWriteFloat(key, value)
     if not Config or not Config.WriteFloat then
         return
     end
-    SafeCall(Config.WriteFloat, CONFIG_SECTION, key, value)
+    TryCall(Config.WriteFloat, CONFIG_SECTION, key, value)
 end
 
 local function randomRangeSafe(minValue, maxValue)
@@ -644,21 +666,21 @@ local function collectRawScreenCandidates()
     end
 
     if Render and Render.ScreenSize then
-        local ok, size = SafeCall(Render.ScreenSize)
+        local ok, size = TryCall(Render.ScreenSize)
         if ok then
             pushCandidate(size)
         end
     end
 
     if Renderer and Renderer.GetScreenSize then
-        local ok, size = SafeCall(Renderer.GetScreenSize)
+        local ok, size = TryCall(Renderer.GetScreenSize)
         if ok then
             pushCandidate(size)
         end
     end
 
     if Engine and Engine.GetScreenSize then
-        local ok, a, b = SafeCall(Engine.GetScreenSize)
+        local ok, a, b = TryCall(Engine.GetScreenSize)
         if ok then
             pushCandidate(a, b)
         end
@@ -801,14 +823,14 @@ local function GetLiveRenderScreenSize()
     local raw = nil
 
     if Render and Render.ScreenSize then
-        local ok, size = SafeCall(Render.ScreenSize)
+        local ok, size = TryCall(Render.ScreenSize)
         if ok then
             raw = normalizeScreenSize(size)
         end
     end
 
     if not raw and Renderer and Renderer.GetScreenSize then
-        local ok, size = SafeCall(Renderer.GetScreenSize)
+        local ok, size = TryCall(Renderer.GetScreenSize)
         if ok then
             raw = normalizeScreenSize(size)
         end
@@ -1512,6 +1534,79 @@ local function L(en, ru)
     return en
 end
 
+local function RegisterLocale(widget, labelEn, labelRu, tipEn, tipRu)
+    if not widget then
+        return widget
+    end
+    LocaleEntries[#LocaleEntries + 1] = {
+        widget = widget,
+        labelEn = labelEn,
+        labelRu = labelRu,
+        tipEn = tipEn,
+        tipRu = tipRu,
+    }
+    return widget
+end
+
+local function ApplyWidgetLocale(entry)
+    local widget = entry.widget
+    if not widget then
+        return
+    end
+    if entry.labelEn and widget.ForceLocalization then
+        widget:ForceLocalization(L(entry.labelEn, entry.labelRu))
+    end
+    if entry.tipEn and widget.ToolTip then
+        widget:ToolTip(L(entry.tipEn, entry.tipRu))
+    end
+end
+
+ApplyMenuLocalization = function(force)
+    local lang = getUILanguage()
+    if not force and State.lastLanguage == lang then
+        return
+    end
+    State.lastLanguage = lang
+
+    for i = 1, #LocaleEntries do
+        ApplyWidgetLocale(LocaleEntries[i])
+    end
+
+    for _, group in pairs(MenuGroups) do
+        if group.widget and group.labelEn and group.widget.ForceLocalization then
+            group.widget:ForceLocalization(L(group.labelEn, group.labelRu))
+        end
+    end
+end
+
+SetupLanguageCallback = function()
+    if State.languageCallbackSet then
+        return
+    end
+    local langWidget = Menu and Menu.Find and Menu.Find("SettingsHidden", "", "", "", "Main", "Language")
+    if not langWidget or not langWidget.SetCallback then
+        return
+    end
+    State.languageCallbackSet = true
+    local previous = WidgetGet(langWidget, nil)
+    langWidget:SetCallback(function(ctrl)
+        local current = WidgetGet(ctrl or langWidget, previous)
+        if current == previous then
+            return
+        end
+        previous = current
+        State.lastLanguage = nil
+        ApplyMenuLocalization(true)
+    end, false)
+end
+
+local function WithTooltip(widget, en, ru)
+    if widget and en and widget.ToolTip then
+        widget:ToolTip(L(en, ru))
+    end
+    return widget
+end
+
 --#endregion
 
 --#region Theme
@@ -1742,7 +1837,7 @@ local function DrawWormholeOpen(width, height, primaryColor, secondaryColor, fad
     end
 end
 
-local function computeAccretionScene(width, height)
+local function ComputeSceneFocal(width, height)
     local minDim = math.min(width, height)
     local centerX = width * 0.5 + sceneParallaxX * 0.22
     local centerY = height * 0.46 + sceneParallaxY * 0.18
@@ -1785,123 +1880,6 @@ local function DrawHorizonGrid(width, height, primaryColor, secondaryColor, fade
     end
 end
 
-local function DrawDeepSpaceGlow(width, height, primaryColor, secondaryColor, fadeInAlpha)
-    local centerX = width * 0.5 + sceneParallaxX * 0.35
-    local centerY = height * 0.42 + sceneParallaxY * 0.25
-    local radius = math.max(width, height) * 0.55
-    local pulse = 0.9 + math.sin(time * 0.45) * 0.1
-    local alpha = math.floor(12 * fadeInAlpha * pulse)
-
-    if alpha <= 0 then
-        return
-    end
-
-    if Render and Render.CircleGradient then
-        local coreTint = mixColors(primaryColor, secondaryColor, 0.35)
-        Render.CircleGradient(
-            Vec2(centerX, centerY),
-            radius,
-            colorWithAlpha(coreTint, alpha),
-            colorWithAlpha(primaryColor, 0)
-        )
-
-        local lobeX = centerX + sceneParallaxX * 0.18 + math.sin(time * 0.22) * width * 0.04
-        local lobeY = centerY + sceneParallaxY * 0.12 + math.cos(time * 0.19) * height * 0.03
-        local lobeAlpha = math.floor(alpha * 0.72)
-        if lobeAlpha > 0 then
-            Render.CircleGradient(
-                Vec2(lobeX, lobeY),
-                radius * 0.42,
-                colorWithAlpha(mixColors(secondaryColor, makeColor(255, 255, 255, 255), 0.15), lobeAlpha),
-                colorWithAlpha(secondaryColor, 0)
-            )
-        end
-    end
-end
-
-local function DrawAccretionRing(width, height, primaryColor, secondaryColor, fadeInAlpha)
-    if qualityScale < 0.72 then
-        return
-    end
-
-    local scene = computeAccretionScene(width, height)
-    local centerX = scene.centerX
-    local centerY = scene.centerY
-    local hotspotX = scene.hotspotX
-    local hotspotY = scene.hotspotY
-    local hotspotAngle = scene.hotspotAngle
-    local minDim = scene.minDim
-    local segments = CONSTANTS.ACCRETION_RING_SEGMENTS
-
-    local innerShadowAlpha = math.floor(18 * fadeInAlpha * (0.85 + math.sin(time * 0.55) * 0.15))
-    if innerShadowAlpha > 0 and Render and Render.CircleGradient then
-        Render.CircleGradient(
-            Vec2(centerX, centerY),
-            minDim * 0.18,
-            colorWithAlpha(makeColor(0, 0, 0, 255), innerShadowAlpha),
-            colorWithAlpha(makeColor(0, 0, 0, 255), 0)
-        )
-    end
-
-    for ring = 1, 2 do
-        local radiusX = minDim * (0.26 + ring * 0.07)
-        local radiusY = radiusX * (0.34 + ring * 0.06)
-        local rotation = time * (0.11 + ring * 0.035) + ring * 1.35
-        local tilt = 0.48 + ring * 0.12
-        local prevX, prevY, prevAngle
-
-        for step = 0, segments do
-            local angle = (step / segments) * math.pi * 2
-            local ex = math.cos(angle) * radiusX
-            local ey = math.sin(angle) * radiusY
-            local cosR = math.cos(rotation)
-            local sinR = math.sin(rotation)
-            local x = centerX + ex * cosR - ey * sinR * tilt
-            local y = centerY + ex * sinR + ey * cosR
-
-            if prevX then
-                local segAngle = (prevAngle + angle) * 0.5
-                local doppler = 0.5 + 0.5 * math.cos(segAngle - hotspotAngle)
-                local edgePulse = 0.65 + math.sin(time * 1.25 + angle * 4 + ring * 0.8) * 0.35
-                local alpha = math.floor((20 - ring * 5) * fadeInAlpha * edgePulse * (0.55 + doppler * 0.65))
-                if alpha > 1 then
-                    local coolMix = 0.15 + doppler * 0.45
-                    local ringColor = mixColors(
-                        mixColors(primaryColor, makeColor(170, 210, 255, 255), coolMix),
-                        secondaryColor,
-                        0.2 + ring * 0.25
-                    )
-                    Render.Line(
-                        Vec2(prevX, prevY),
-                        Vec2(x, y),
-                        colorWithAlpha(ringColor, alpha),
-                        ring == 1 and 1.15 or 0.85
-                    )
-                end
-            end
-
-            prevX = x
-            prevY = y
-            prevAngle = angle
-        end
-    end
-
-    local hotspotPulse = 0.8 + math.sin(time * 2.4) * 0.2
-    local hotspotAlpha = math.floor(28 * fadeInAlpha * hotspotPulse)
-    if hotspotAlpha > 0 then
-        Render.FilledCircle(Vec2(hotspotX, hotspotY), 2.4, colorWithAlpha(makeColor(255, 255, 255, 255), hotspotAlpha), 10)
-        Render.FilledCircle(Vec2(hotspotX, hotspotY), 5.5, colorWithAlpha(primaryColor, math.floor(hotspotAlpha * 0.45)), 12)
-        if Render and Render.CircleGradient then
-            Render.CircleGradient(
-                Vec2(hotspotX, hotspotY),
-                minDim * 0.07,
-                colorWithAlpha(mixColors(primaryColor, makeColor(255, 240, 220, 255), 0.35), math.floor(hotspotAlpha * 0.38)),
-                colorWithAlpha(primaryColor, 0)
-            )
-        end
-    end
-end
-
 local GRAVITY_FILAMENT_DEFS = {
     {ax = 0.04, ay = 0.18, bx = 0.96, by = 0.62, bend = 0.22, phase = 0.0},
     {ax = 0.08, ay = 0.72, bx = 0.92, by = 0.28, bend = 0.18, phase = 1.7},
@@ -1916,7 +1894,7 @@ local function DrawGravityFilaments(width, height, primaryColor, secondaryColor,
         return
     end
 
-    local scene = computeAccretionScene(width, height)
+    local scene = ComputeSceneFocal(width, height)
     local focalX = scene.centerX
     local focalY = scene.centerY
     local hotspotX = scene.hotspotX
@@ -1964,6 +1942,204 @@ local function DrawGravityFilaments(width, height, primaryColor, secondaryColor,
             prevY = y
         end
     end
+end
+
+local NEON_VEIN_DEFS = {
+    {ax = 0.06, ay = 0.22, bx = 0.48, by = 0.58, cx = 0.92, by2 = 0.34, phase = 0.2},
+    {ax = 0.10, ay = 0.78, bx = 0.42, by = 0.48, cx = 0.88, by2 = 0.72, phase = 1.4},
+    {ax = 0.18, ay = 0.12, bx = 0.55, by = 0.28, cx = 0.84, by2 = 0.62, phase = 2.6},
+    {ax = 0.04, ay = 0.50, bx = 0.36, by = 0.70, cx = 0.74, by2 = 0.88, phase = 3.8},
+    {ax = 0.28, ay = 0.90, bx = 0.60, by = 0.66, cx = 0.96, by2 = 0.44, phase = 5.1},
+}
+
+local function DrawNeonVeins(width, height, primaryColor, secondaryColor, fadeInAlpha)
+    if qualityScale < CONSTANTS.NEON_QUALITY_THRESHOLD then
+        return
+    end
+
+    local segments = clamp(math.floor(CONSTANTS.NEON_VEIN_SEGMENTS * qualityScale), 12, CONSTANTS.NEON_VEIN_SEGMENTS)
+    local veinCount = math.min(CONSTANTS.NEON_VEIN_COUNT, #NEON_VEIN_DEFS)
+    local parallaxX = sceneParallaxX * 0.12
+    local parallaxY = sceneParallaxY * 0.10
+    local neonCore = mixColors(primaryColor, makeColor(255, 255, 255, 255), 0.42)
+    local neonOuter = mixColors(secondaryColor, primaryColor, 0.35)
+
+    for i = 1, veinCount do
+        local def = NEON_VEIN_DEFS[i]
+        local prevX, prevY
+        local pulse = 0.78 + math.sin(time * 1.35 + def.phase) * 0.22
+        local travel = (time * 0.55 + def.phase) % 1
+
+        for step = 0, segments do
+            local t = step / segments
+            local omt = 1 - t
+            local x = (omt * omt) * (def.ax * width) + 2 * omt * t * (def.bx * width) + (t * t) * (def.cx * width)
+            local y = (omt * omt) * (def.ay * height) + 2 * omt * t * (def.by * height) + (t * t) * (def.by2 * height)
+            x = x + parallaxX + math.sin(time * 0.7 + t * 6 + def.phase) * 4
+            y = y + parallaxY + math.cos(time * 0.55 + t * 5 + def.phase) * 3
+
+            if prevX then
+                local edgeFade = 1 - math.abs(t - 0.5) * 0.35
+                local spark = math.max(0, 1 - math.abs(t - travel) * 8)
+                local outerA = math.floor(22 * fadeInAlpha * edgeFade * pulse)
+                local coreA = math.floor((34 + spark * 70) * fadeInAlpha * edgeFade * pulse)
+                if outerA > 1 then
+                    Render.Line(Vec2(prevX, prevY), Vec2(x, y), colorWithAlpha(neonOuter, outerA), 2.4)
+                end
+                if coreA > 1 then
+                    Render.Line(Vec2(prevX, prevY), Vec2(x, y), colorWithAlpha(neonCore, coreA), 1.1)
+                end
+            end
+
+            prevX = x
+            prevY = y
+        end
+
+        local nodeT = travel
+        local omt = 1 - nodeT
+        local nodeX = (omt * omt) * (def.ax * width) + 2 * omt * nodeT * (def.bx * width) + (nodeT * nodeT) * (def.cx * width) + parallaxX
+        local nodeY = (omt * omt) * (def.ay * height) + 2 * omt * nodeT * (def.by * height) + (nodeT * nodeT) * (def.by2 * height) + parallaxY
+        local nodeA = math.floor(90 * fadeInAlpha * pulse)
+        if nodeA > 2 then
+            Render.FilledCircle(Vec2(nodeX, nodeY), 2.6, colorWithAlpha(neonCore, nodeA), 10)
+            Render.FilledCircle(Vec2(nodeX, nodeY), 5.2, colorWithAlpha(neonOuter, math.floor(nodeA * 0.35)), 12)
+        end
+    end
+end
+
+local function BezierPoint(def, width, height, t, parallaxX, parallaxY)
+    local omt = 1 - t
+    local x = (omt * omt) * (def.ax * width) + 2 * omt * t * (def.bx * width) + (t * t) * (def.cx * width)
+    local y = (omt * omt) * (def.ay * height) + 2 * omt * t * (def.by * height) + (t * t) * (def.by2 * height)
+    return x + (parallaxX or 0), y + (parallaxY or 0)
+end
+
+local function DrawEnergyNodes(width, height, primaryColor, secondaryColor, fadeInAlpha)
+    if qualityScale < CONSTANTS.NEON_QUALITY_THRESHOLD then
+        return
+    end
+
+    local veinCount = math.min(CONSTANTS.ENERGY_NODE_COUNT, #NEON_VEIN_DEFS)
+    local parallaxX = sceneParallaxX * 0.1
+    local parallaxY = sceneParallaxY * 0.08
+    local core = mixColors(primaryColor, makeColor(255, 255, 255, 255), 0.5)
+    local glow = mixColors(secondaryColor, primaryColor, 0.3)
+
+    for i = 1, veinCount do
+        local def = NEON_VEIN_DEFS[i]
+        local pulse = 0.8 + math.sin(time * 1.7 + def.phase) * 0.2
+        local travel = (time * 0.7 + def.phase * 0.2) % 1
+        local points = {0.12, 0.5, 0.88}
+        local coords = {}
+
+        for p = 1, #points do
+            local x, y = BezierPoint(def, width, height, points[p], parallaxX, parallaxY)
+            coords[p] = {x = x, y = y}
+            local nodeA = math.floor(70 * fadeInAlpha * pulse)
+            if nodeA > 2 then
+                Render.FilledCircle(Vec2(x, y), 3.2, colorWithAlpha(core, nodeA), 10)
+                Render.FilledCircle(Vec2(x, y), 6.5, colorWithAlpha(glow, math.floor(nodeA * 0.32)), 12)
+            end
+        end
+
+        for p = 1, #coords - 1 do
+            local a = coords[p]
+            local b = coords[p + 1]
+            local linkA = math.floor(26 * fadeInAlpha * pulse)
+            if linkA > 1 then
+                Render.Line(Vec2(a.x, a.y), Vec2(b.x, b.y), colorWithAlpha(glow, linkA), 1.15)
+            end
+        end
+
+        local packetT = 0.12 + travel * 0.76
+        local px, py = BezierPoint(def, width, height, packetT, parallaxX, parallaxY)
+        local packetA = math.floor(140 * fadeInAlpha * pulse)
+        if packetA > 2 then
+            Render.FilledCircle(Vec2(px, py), 2.0, colorWithAlpha(core, packetA), 8)
+            Render.FilledCircle(Vec2(px, py), 4.2, colorWithAlpha(primaryColor, math.floor(packetA * 0.35)), 10)
+        end
+    end
+end
+
+local function DrawChromaticRim(width, height, primaryColor, secondaryColor, fadeInAlpha)
+    if qualityScale < CONSTANTS.CHROMATIC_RIM_QUALITY then
+        return
+    end
+
+    local pulse = 0.88 + math.sin(time * 2.1) * 0.12
+    local baseA = math.floor(210 * fadeInAlpha * pulse)
+    if baseA <= 2 then
+        return
+    end
+
+    local thick = math.max(1.35, math.min(width, height) * 0.0016)
+    local shift = math.max(1.1, thick * 1.15)
+    local segments = math.max(16, math.floor(CONSTANTS.CHROMATIC_RIM_SEGMENTS * qualityScale))
+    local hueSpin = time * 2.15
+
+    local themeA = primaryColor
+    local themeB = secondaryColor
+    local themeMix = mixColors(primaryColor, secondaryColor, 0.5)
+    local themeHot = mixColors(primaryColor, makeColor(255, 255, 255, 255), 0.42)
+    local themeCore = mixColors(makeColor(255, 255, 255, 255), primaryColor, 0.18)
+
+    local function shimmer(t, phase)
+        return 0.62 + 0.38 * (0.5 + 0.5 * math.sin(hueSpin * 2.4 + t * math.pi * 2 + phase))
+    end
+
+    local function themePick(t, phase)
+        local w = (math.sin(hueSpin + t * math.pi * 2 + phase) + 1) * 0.5
+        if w < 0.34 then
+            return mixColors(themeA, themeMix, w / 0.34)
+        elseif w < 0.67 then
+            return mixColors(themeMix, themeB, (w - 0.34) / 0.33)
+        end
+        return mixColors(themeB, themeHot, (w - 0.67) / 0.33)
+    end
+
+    local function rimSeg(x1, y1, x2, y2, color, alpha, thickness)
+        if alpha > 1 then
+            Render.Line(Vec2(x1, y1), Vec2(x2, y2), colorWithAlpha(color, alpha), thickness)
+        end
+    end
+
+    local function drawEdge(horizontal, inwardPositive, edgePhase)
+        for i = 0, segments - 1 do
+            local t0 = i / segments
+            local t1 = (i + 1) / segments
+            local tm = (t0 + t1) * 0.5
+            local wave = shimmer(tm, edgePhase)
+            local color = themePick(tm, edgePhase)
+            local aFringe = math.floor(baseA * 0.55 * wave)
+            local aMain = math.floor(baseA * 0.9 * wave)
+            local aCore = math.floor(baseA * (0.7 + 0.3 * wave))
+
+            if horizontal then
+                local x1 = width * t0
+                local x2 = width * t1
+                local y = inwardPositive and 0 or height
+                local dir = inwardPositive and 1 or -1
+                rimSeg(x1, y + dir * shift, x2, y + dir * shift, themeB, aFringe, thick)
+                rimSeg(x1, y, x2, y, color, aMain, thick * 1.15)
+                rimSeg(x1, y + dir * (shift * 0.35), x2, y + dir * (shift * 0.35), themeCore, aCore, thick * 0.75)
+                rimSeg(x1 + shift * 0.35, y + dir * (shift * 0.7), x2 + shift * 0.35, y + dir * (shift * 0.7), themeA, math.floor(aFringe * 0.75), thick)
+            else
+                local y1 = height * t0
+                local y2 = height * t1
+                local x = inwardPositive and 0 or width
+                local dir = inwardPositive and 1 or -1
+                rimSeg(x + dir * shift, y1, x + dir * shift, y2, themeB, aFringe, thick)
+                rimSeg(x, y1, x, y2, color, aMain, thick * 1.15)
+                rimSeg(x + dir * (shift * 0.35), y1, x + dir * (shift * 0.35), y2, themeCore, aCore, thick * 0.75)
+                rimSeg(x + dir * (shift * 0.7), y1 + shift * 0.35, x + dir * (shift * 0.7), y2 + shift * 0.35, themeA, math.floor(aFringe * 0.75), thick)
+            end
+        end
+    end
+
+    drawEdge(true, true, 0.0)
+    drawEdge(true, false, 1.7)
+    drawEdge(false, true, 3.1)
+    drawEdge(false, false, 4.6)
 end
 
 local function DrawCursorStardust(primaryColor, secondaryColor, fadeInAlpha)
@@ -2707,18 +2883,13 @@ local Icons = {
     pause = "\u{f04c}",             -- pause
     themeAccent = "\u{f53f}",       -- palette
     themeMono = "\u{f042}",         -- adjust (contrast)
-    idle = "\u{f254}",              -- hourglass-half
-    accretionRing = "\u{f1db}",     -- circle-notch (orbit)
-    gravityFilaments = "\u{f0c1}",  -- link (filament)
-    flyingRockets = "\u{f135}",     -- rocket (joke parade)
+    idle = "\u{f254}",
+    gravityFilaments = "\u{f0c1}",
+    neonVeins = "\u{f0e7}",
+    energyNodes = "\u{f111}",
+    chromaticRim = "\u{f53f}",
+    flyingRockets = "\u{f135}",
 }
-
-local function WithTooltip(widget, en, ru)
-    if widget and en and widget.ToolTip then
-        widget:ToolTip(L(en, ru))
-    end
-    return widget
-end
 
 function Script.OnScriptsLoaded()
     CaptureScreenSizeForMenuSession()
@@ -2737,6 +2908,7 @@ function Script.OnScriptsLoaded()
         tab = Menu.Create("General", "Main", "CosmicMenu")
     end
     local main = tab:Create(L("Settings", "Настройки"))
+    MenuGroups.settings = {widget = main, labelEn = "Settings", labelRu = "Настройки"}
 
     if tab and tab.Icon then
         tab:Icon(Icons.tab)
@@ -2751,12 +2923,14 @@ function Script.OnScriptsLoaded()
     end
 
     local g_general = main:Create(L("General", "Общее"))
+    MenuGroups.general = {widget = g_general, labelEn = "General", labelRu = "Общее"}
 
     Script.enabled = WithTooltip(
         g_general:Switch(L("Enable", "Включить"), true, Icons.enable),
         "Master switch for CosmicMenu",
         "Главный переключатель CosmicMenu"
     )
+    RegisterLocale(Script.enabled, "Enable", "Включить", "Master switch for CosmicMenu", "Главный переключатель CosmicMenu")
 
     Script.qualityPreset = g_general:Slider(L("Quality Preset", "Пресет качества"), 1, CONSTANTS.CUSTOM_PRESET_INDEX, 3, function(value)
         local mode = roundToInt(value)
@@ -2774,28 +2948,53 @@ function Script.OnScriptsLoaded()
         "Applies recommended settings for performance or visuals",
         "Применяет рекомендуемые настройки производительности или визуала"
     )
+    RegisterLocale(
+        Script.qualityPreset,
+        "Quality Preset",
+        "Пресет качества",
+        "Applies recommended settings for performance or visuals",
+        "Применяет рекомендуемые настройки производительности или визуала"
+    )
 
     Script.fadeInEffect = g_general:Switch(L("Fade In", "Плавное появление"), true, Icons.fadeIn)
+    RegisterLocale(Script.fadeInEffect, "Fade In", "Плавное появление")
 
     local g_backdrop = main:Create(L("Backdrop", "Фон"))
+    MenuGroups.backdrop = {widget = g_backdrop, labelEn = "Backdrop", labelRu = "Фон"}
 
     Script.backgroundBlur = g_backdrop:Switch(L("Background Blur", "Размытие фона"), false, Icons.blur)
+    RegisterLocale(Script.backgroundBlur, "Background Blur", "Размытие фона")
     local blur_gear = Script.backgroundBlur:Gear(L("Blur", "Размытие"))
     Script.blurIntensity = blur_gear:Slider(L("Intensity", "Интенсивность"), 0.1, 1.0, 0.35, "%.1f")
     applyIcon(Script.blurIntensity, Icons.blurIntensity)
+    RegisterLocale(Script.blurIntensity, "Intensity", "Интенсивность")
 
     Script.colorWash = g_backdrop:Switch(L("Color Wash", "Цветовой градиент"), true, Icons.colorWash)
+    RegisterLocale(Script.colorWash, "Color Wash", "Цветовой градиент")
     Script.vignette = g_backdrop:Switch(L("Vignette", "Виньетка"), true, Icons.vignette)
+    RegisterLocale(Script.vignette, "Vignette", "Виньетка")
     Script.hudEdges = g_backdrop:Switch(L("HUD Corners", "HUD-углы"), true, Icons.hudCorners)
+    RegisterLocale(Script.hudEdges, "HUD Corners", "HUD-углы")
     Script.ambientStreaks = g_backdrop:Switch(L("Ambient Streaks", "Фоновые полосы"), true, Icons.streaks)
+    RegisterLocale(Script.ambientStreaks, "Ambient Streaks", "Фоновые полосы")
     Script.ambientStreakCount = g_backdrop:Slider(L("Streak Count", "Кол-во полос"), 0, 28, 16, "%d")
     applyIcon(Script.ambientStreakCount, Icons.streakCount)
+    RegisterLocale(Script.ambientStreakCount, "Streak Count", "Кол-во полос")
     Script.parallax = g_backdrop:Switch(L("Parallax", "Параллакс"), true, Icons.parallax)
+    RegisterLocale(Script.parallax, "Parallax", "Параллакс")
     Script.parallaxStrength = g_backdrop:Slider(L("Parallax Strength", "Сила параллакса"), 0, 100, 100, "%d%%")
     applyIcon(Script.parallaxStrength, Icons.parallaxStrength)
+    RegisterLocale(Script.parallaxStrength, "Parallax Strength", "Сила параллакса")
 
     Script.openRipple = WithTooltip(
         g_backdrop:Switch(L("Wormhole Open", "Червоточина при открытии"), true, Icons.ripple),
+        "Spiral wormhole rings when the menu opens; particles burst outward briefly",
+        "Спиральные кольца червоточины при открытии; частицы кратко разлетаются из центра"
+    )
+    RegisterLocale(
+        Script.openRipple,
+        "Wormhole Open",
+        "Червоточина при открытии",
         "Spiral wormhole rings when the menu opens; particles burst outward briefly",
         "Спиральные кольца червоточины при открытии; частицы кратко разлетаются из центра"
     )
@@ -2804,86 +3003,173 @@ function Script.OnScriptsLoaded()
         "Perspective grid at the bottom of the screen",
         "Перспективная сетка внизу экрана"
     )
-    Script.accretionRing = WithTooltip(
-        g_backdrop:Switch(L("Accretion Ring", "Кольцо аккреции"), false, Icons.accretionRing),
-        "Tilted orbital rings with a bright hotspot, like matter around a singularity",
-        "Наклонные орбитальные кольца с яркой точкой — как аккреционный диск"
+    RegisterLocale(
+        Script.horizonGrid,
+        "Horizon Grid",
+        "Синтвейв-сетка",
+        "Perspective grid at the bottom of the screen",
+        "Перспективная сетка внизу экрана"
     )
     Script.gravityFilaments = WithTooltip(
         g_backdrop:Switch(L("Gravity Filaments", "Гравитационные нити"), false, Icons.gravityFilaments),
         "Curved filaments bending toward the center, like warped spacetime",
         "Изогнутые нити, стягивающиеся к центру — как искривлённое пространство"
     )
+    RegisterLocale(
+        Script.gravityFilaments,
+        "Gravity Filaments",
+        "Гравитационные нити",
+        "Curved filaments bending toward the center, like warped spacetime",
+        "Изогнутые нити, стягивающиеся к центру — как искривлённое пространство"
+    )
+    Script.neonVeins = WithTooltip(
+        g_backdrop:Switch(L("Neon Veins", "Неоновые вены"), false, Icons.neonVeins),
+        "Theme-colored neon curves with traveling sparks. Cheap line-based glow.",
+        "Неоновые кривые цвета темы с бегущими искрами. Лёгкий эффект на линиях."
+    )
+    RegisterLocale(
+        Script.neonVeins,
+        "Neon Veins",
+        "Неоновые вены",
+        "Theme-colored neon curves with traveling sparks. Cheap line-based glow.",
+        "Неоновые кривые цвета темы с бегущими искрами. Лёгкий эффект на линиях."
+    )
+    Script.energyNodes = WithTooltip(
+        g_backdrop:Switch(L("Energy Nodes", "Энергоузлы"), false, Icons.energyNodes),
+        "Bright nodes with traveling energy packets along the neon paths",
+        "Яркие узлы с бегущими пакетами энергии вдоль неоновых путей"
+    )
+    RegisterLocale(
+        Script.energyNodes,
+        "Energy Nodes",
+        "Энергоузлы",
+        "Bright nodes with traveling energy packets along the neon paths",
+        "Яркие узлы с бегущими пакетами энергии вдоль неоновых путей"
+    )
+    Script.chromaticRim = WithTooltip(
+        g_backdrop:Switch(L("Chromatic Rim", "Хроматическая кайма"), false, Icons.chromaticRim),
+        "Thin neon edge fringe that shimmers between theme colors",
+        "Тонкая неоновая кайма по краю с переливом цветов темы"
+    )
+    RegisterLocale(
+        Script.chromaticRim,
+        "Chromatic Rim",
+        "Хроматическая кайма",
+        "Thin neon edge fringe that shimmers between theme colors",
+        "Тонкая неоновая кайма по краю с переливом цветов темы"
+    )
     Script.flyingRockets = WithTooltip(
         g_backdrop:Switch(L("Flying Rockets", "Летающие писюны"), false, Icons.flyingRockets),
         "Solo mode: turns off other FX except blur. Disabling restores your previous settings.",
         "Соло-режим: выключает остальные эффекты, кроме блюра. Выключение вернёт прежние настройки."
     )
+    RegisterLocale(
+        Script.flyingRockets,
+        "Flying Rockets",
+        "Летающие писюны",
+        "Solo mode: turns off other FX except blur. Disabling restores your previous settings.",
+        "Соло-режим: выключает остальные эффекты, кроме блюра. Выключение вернёт прежние настройки."
+    )
     Script.flyingRocketCount = g_backdrop:Slider(L("Rocket Count", "Кол-во ракет"), 1, CONSTANTS.FLYING_ROCKET_MAX, 14, "%d")
     applyIcon(Script.flyingRocketCount, Icons.streakCount)
+    RegisterLocale(Script.flyingRocketCount, "Rocket Count", "Кол-во ракет")
 
     local g_particles = main:Create(L("Particles", "Частицы"))
+    MenuGroups.particles = {widget = g_particles, labelEn = "Particles", labelRu = "Частицы"}
 
     Script.bgParticleCount = g_particles:Slider(L("Count", "Количество"), 20, 500, 100, "%d")
     applyIcon(Script.bgParticleCount, Icons.particleCount)
+    RegisterLocale(Script.bgParticleCount, "Count", "Количество")
 
     Script.shieldRadius = g_particles:Slider(L("Size", "Размер"), 1, 8, 2, "%d")
     applyIcon(Script.shieldRadius, Icons.particleSize)
+    RegisterLocale(Script.shieldRadius, "Size", "Размер")
 
     Script.particleBaseAlpha = g_particles:Slider(L("Opacity", "Прозрачность"), 10, 255, 150, "%d")
     applyIcon(Script.particleBaseAlpha, Icons.opacity)
+    RegisterLocale(Script.particleBaseAlpha, "Opacity", "Прозрачность")
 
     Script.particleSoftCore = g_particles:Switch(L("Soft Core", "Мягкое ядро"), true, Icons.softCore)
+    RegisterLocale(Script.particleSoftCore, "Soft Core", "Мягкое ядро")
     Script.particleGlow = g_particles:Switch(L("Glow", "Свечение"), true, Icons.glow)
+    RegisterLocale(Script.particleGlow, "Glow", "Свечение")
     local glow_gear = Script.particleGlow:Gear(L("Glow", "Свечение"))
     Script.particleGlowScale = glow_gear:Slider(L("Size", "Размер"), 1, 8, 3, "%d")
     applyIcon(Script.particleGlowScale, Icons.glowSize)
+    RegisterLocale(Script.particleGlowScale, "Size", "Размер")
     Script.particleGlowAlpha = glow_gear:Slider(L("Opacity", "Прозрачность"), 0, 100, 30, "%d%%")
     applyIcon(Script.particleGlowAlpha, Icons.glowOpacity)
+    RegisterLocale(Script.particleGlowAlpha, "Opacity", "Прозрачность")
 
     Script.particleSpeedScale = g_particles:Slider(L("Speed", "Скорость"), 10, 400, 100, "%d%%")
     applyIcon(Script.particleSpeedScale, Icons.speed)
+    RegisterLocale(Script.particleSpeedScale, "Speed", "Скорость")
     Script.particleDrift = g_particles:Slider(L("Drift", "Дрейф"), 0, 200, 35, "%d%%")
     applyIcon(Script.particleDrift, Icons.drift)
+    RegisterLocale(Script.particleDrift, "Drift", "Дрейф")
     Script.particleTwinkleSpeedScale = g_particles:Slider(L("Twinkle Speed", "Скорость мерцания"), 0, 300, 100, "%d%%")
     applyIcon(Script.particleTwinkleSpeedScale, Icons.twinkleSpeed)
+    RegisterLocale(Script.particleTwinkleSpeedScale, "Twinkle Speed", "Скорость мерцания")
     Script.particleTwinkleAmount = g_particles:Slider(L("Twinkle Amount", "Сила мерцания"), 0, 100, 30, "%d%%")
     applyIcon(Script.particleTwinkleAmount, Icons.twinkleAmount)
+    RegisterLocale(Script.particleTwinkleAmount, "Twinkle Amount", "Сила мерцания")
 
     local g_stars = main:Create(L("Stars", "Звёзды"))
+    MenuGroups.stars = {widget = g_stars, labelEn = "Stars", labelRu = "Звёзды"}
 
     Script.stars = g_stars:Switch(L("Twinkling Stars", "Мерцающие звезды"), true, Icons.stars)
+    RegisterLocale(Script.stars, "Twinkling Stars", "Мерцающие звезды")
     local stars_gear = Script.stars:Gear(L("Stars", "Звезды"))
     Script.starCount = stars_gear:Slider(L("Count", "Количество"), 100, 500, 200, "%d")
     applyIcon(Script.starCount, Icons.starCount)
+    RegisterLocale(Script.starCount, "Count", "Количество")
 
     Script.shootingStars = g_stars:Switch(L("Shooting Stars", "Падающие звезды"), true, Icons.shootingStars)
+    RegisterLocale(Script.shootingStars, "Shooting Stars", "Падающие звезды")
     local shooting_gear = Script.shootingStars:Gear(L("Shooting", "Падающие"))
     Script.shootingStarFreq = shooting_gear:Slider(L("Frequency", "Частота"), 1, 10, 5, "%d")
     applyIcon(Script.shootingStarFreq, Icons.frequency)
+    RegisterLocale(Script.shootingStarFreq, "Frequency", "Частота")
 
     Script.starRays = g_stars:Switch(L("Star Rays", "Лучи звёзд"), true, Icons.starRays)
+    RegisterLocale(Script.starRays, "Star Rays", "Лучи звёзд")
     Script.multiLayerStars = WithTooltip(
         g_stars:Switch(L("Multi-Layer Depth", "Многослойность"), true, Icons.multiLayerStars),
         "3 depth layers: dim small back / bright large front. Move mouse to see parallax.",
         "3 слоя глубины: тусклые мелкие сзади / яркие крупные спереди. Двигай мышь — виден параллакс."
     )
+    RegisterLocale(
+        Script.multiLayerStars,
+        "Multi-Layer Depth",
+        "Многослойность",
+        "3 depth layers: dim small back / bright large front. Move mouse to see parallax.",
+        "3 слоя глубины: тусклые мелкие сзади / яркие крупные спереди. Двигай мышь — виден параллакс."
+    )
 
     local g_links = main:Create(L("Links", "Связи"))
+    MenuGroups.links = {widget = g_links, labelEn = "Links", labelRu = "Связи"}
     Script.particleConnections = g_links:Switch(L("Enable Links", "Включить связи"), true, Icons.links)
+    RegisterLocale(Script.particleConnections, "Enable Links", "Включить связи")
     local links_gear = Script.particleConnections:Gear(L("Links", "Связи"))
     Script.particleConnectionDist = links_gear:Slider(L("Distance", "Дистанция"), 40, 400, 150, "%d")
     applyIcon(Script.particleConnectionDist, Icons.distance)
+    RegisterLocale(Script.particleConnectionDist, "Distance", "Дистанция")
     Script.particleConnectionAlpha = links_gear:Slider(L("Opacity", "Прозрачность"), 0, 150, 50, "%d")
     applyIcon(Script.particleConnectionAlpha, Icons.linkOpacity)
+    RegisterLocale(Script.particleConnectionAlpha, "Opacity", "Прозрачность")
     Script.particleConnectionWidth = links_gear:Slider(L("Width", "Толщина"), 1, 3, 1, "%d")
     applyIcon(Script.particleConnectionWidth, Icons.linkWidth)
+    RegisterLocale(Script.particleConnectionWidth, "Width", "Толщина")
     Script.particleMaxConnections = links_gear:Slider(L("Per Particle", "На частицу"), 0, 8, 3, "%d")
     applyIcon(Script.particleMaxConnections, Icons.perParticle)
+    RegisterLocale(Script.particleMaxConnections, "Per Particle", "На частицу")
     Script.particleColoredLinks = links_gear:Switch(L("Colored Links", "Цветные линии"), true, Icons.coloredLinks)
+    RegisterLocale(Script.particleColoredLinks, "Colored Links", "Цветные линии")
 
     local g_cursor = main:Create(L("Cursor", "Курсор"))
+    MenuGroups.cursor = {widget = g_cursor, labelEn = "Cursor", labelRu = "Курсор"}
     Script.particleCursorInteraction = g_cursor:Switch(L("Enable Cursor", "Реакция на курсор"), true, Icons.cursor)
+    RegisterLocale(Script.particleCursorInteraction, "Enable Cursor", "Реакция на курсор")
     local cursor_gear = Script.particleCursorInteraction:Gear(L("Cursor", "Курсор"))
     Script.particleCursorMode = cursor_gear:Slider(L("Mode", "Режим"), 1, 3, 1, function(value)
         local mode = roundToInt(value)
@@ -2893,32 +3179,56 @@ function Script.OnScriptsLoaded()
         return tostring(mode)
     end)
     applyIcon(Script.particleCursorMode, Icons.cursorMode)
+    RegisterLocale(Script.particleCursorMode, "Mode", "Режим")
     Script.particleCursorRadius = cursor_gear:Slider(L("Radius", "Радиус"), 40, 600, 180, "%d")
     applyIcon(Script.particleCursorRadius, Icons.radius)
+    RegisterLocale(Script.particleCursorRadius, "Radius", "Радиус")
     Script.particleCursorForce = cursor_gear:Slider(L("Force", "Сила"), 100, 12000, 3200, "%d")
     applyIcon(Script.particleCursorForce, Icons.force)
+    RegisterLocale(Script.particleCursorForce, "Force", "Сила")
     Script.particleCursorFalloff = cursor_gear:Slider(L("Falloff", "Спад"), 25, 300, 120, "%d%%")
     applyIcon(Script.particleCursorFalloff, Icons.falloff)
+    RegisterLocale(Script.particleCursorFalloff, "Falloff", "Спад")
     Script.particleCursorMotionBoost = cursor_gear:Slider(L("Motion Boost", "Усиление"), 0, 300, 120, "%d%%")
     applyIcon(Script.particleCursorMotionBoost, Icons.motionBoost)
+    RegisterLocale(Script.particleCursorMotionBoost, "Motion Boost", "Усиление")
     Script.particleCursorMoveThreshold = cursor_gear:Slider(L("Move Threshold", "Порог"), 0, 40, 1, "%d")
     applyIcon(Script.particleCursorMoveThreshold, Icons.threshold)
+    RegisterLocale(Script.particleCursorMoveThreshold, "Move Threshold", "Порог")
     Script.particleCursorOnlyMoving = cursor_gear:Switch(L("Only While Moving", "Только при движении"), true, Icons.onlyMoving)
+    RegisterLocale(Script.particleCursorOnlyMoving, "Only While Moving", "Только при движении")
     Script.particleCursorImpulseDamping = cursor_gear:Slider(L("Damping", "Затухание"), 0, 300, 90, "%d%%")
     applyIcon(Script.particleCursorImpulseDamping, Icons.damping)
+    RegisterLocale(Script.particleCursorImpulseDamping, "Damping", "Затухание")
     Script.particleCursorSwirl = cursor_gear:Slider(L("Swirl", "Вихрь"), -100, 100, 60, "%d%%")
     applyIcon(Script.particleCursorSwirl, Icons.swirl)
+    RegisterLocale(Script.particleCursorSwirl, "Swirl", "Вихрь")
 
     Script.cursorStardust = WithTooltip(
         g_cursor:Switch(L("Cursor Stardust", "Звёздная пыль"), true, Icons.stardust),
         "Light dot trail following the cursor",
         "Лёгкий след из точек за курсором"
     )
+    RegisterLocale(
+        Script.cursorStardust,
+        "Cursor Stardust",
+        "Звёздная пыль",
+        "Light dot trail following the cursor",
+        "Лёгкий след из точек за курсором"
+    )
 
     local g_theme = main:Create(L("Theme", "Тема"))
+    MenuGroups.theme = {widget = g_theme, labelEn = "Theme", labelRu = "Тема"}
 
     Script.themeUseAccentOnly = WithTooltip(
         g_theme:Switch(L("Accent Only", "Только акцент"), false, Icons.themeAccent),
+        "Derive secondary color from accent only",
+        "Вторичный цвет только из акцента"
+    )
+    RegisterLocale(
+        Script.themeUseAccentOnly,
+        "Accent Only",
+        "Только акцент",
         "Derive secondary color from accent only",
         "Вторичный цвет только из акцента"
     )
@@ -2927,16 +3237,38 @@ function Script.OnScriptsLoaded()
         "Muted grayscale secondary tone",
         "Приглушённый серый вторичный тон"
     )
+    RegisterLocale(
+        Script.themeMonochrome,
+        "Monochrome",
+        "Монохром",
+        "Muted grayscale secondary tone",
+        "Приглушённый серый вторичный тон"
+    )
 
     local g_perf = main:Create(L("Performance", "Производительность"))
+    MenuGroups.perf = {widget = g_perf, labelEn = "Performance", labelRu = "Производительность"}
 
     Script.backgroundOnly = WithTooltip(
         g_perf:Switch(L("Background Only", "Только фон"), false, Icons.background),
         "Gradient, vignette and stars without particles or cursor FX",
         "Градиент, виньетка и звёзды без частиц и эффектов курсора"
     )
+    RegisterLocale(
+        Script.backgroundOnly,
+        "Background Only",
+        "Только фон",
+        "Gradient, vignette and stars without particles or cursor FX",
+        "Градиент, виньетка и звёзды без частиц и эффектов курсора"
+    )
     Script.pauseWhenIdle = WithTooltip(
         g_perf:Switch(L("Pause When Idle", "Пауза без движения"), false, Icons.pause),
+        "Freeze simulation when the cursor is still",
+        "Останавливать симуляцию при неподвижном курсоре"
+    )
+    RegisterLocale(
+        Script.pauseWhenIdle,
+        "Pause When Idle",
+        "Пауза без движения",
         "Freeze simulation when the cursor is still",
         "Останавливать симуляцию при неподвижном курсоре"
     )
@@ -2948,9 +3280,17 @@ function Script.OnScriptsLoaded()
         "%.0fs"
     )
     applyIcon(Script.idleThreshold, Icons.idle)
+    RegisterLocale(Script.idleThreshold, "Idle Delay", "Задержка паузы")
 
     Script.debugOverlay = WithTooltip(
         g_perf:Switch(L("Debug Overlay", "Отладка"), false, Icons.debug),
+        "Show quality, counts and screen info on screen",
+        "Показывать качество, счётчики и экран на оверлее"
+    )
+    RegisterLocale(
+        Script.debugOverlay,
+        "Debug Overlay",
+        "Отладка",
         "Show quality, counts and screen info on screen",
         "Показывать качество, счётчики и экран на оверлее"
     )
@@ -2992,7 +3332,8 @@ function Script.OnScriptsLoaded()
         Script.fadeInEffect, Script.backgroundBlur, Script.blurIntensity, Script.colorWash,
         Script.vignette, Script.hudEdges, Script.ambientStreaks, Script.ambientStreakCount,
         Script.parallax, Script.parallaxStrength, Script.openRipple, Script.horizonGrid,
-        Script.accretionRing, Script.gravityFilaments, Script.flyingRocketCount,
+        Script.gravityFilaments, Script.neonVeins, Script.energyNodes, Script.chromaticRim,
+        Script.flyingRocketCount,
         Script.bgParticleCount, Script.shieldRadius, Script.particleBaseAlpha, Script.particleSoftCore,
         Script.particleGlow, Script.particleGlowScale, Script.particleGlowAlpha,
         Script.particleSpeedScale, Script.particleDrift, Script.particleTwinkleSpeedScale,
@@ -3108,8 +3449,10 @@ function Script.OnScriptsLoaded()
         setDisabled(Script.parallaxStrength, not masterEnabled or not parallaxEnabled or rocketsEnabled)
         setDisabled(Script.openRipple, not masterEnabled or rocketsEnabled)
         setDisabled(Script.horizonGrid, not masterEnabled or rocketsEnabled)
-        setDisabled(Script.accretionRing, not masterEnabled or rocketsEnabled)
         setDisabled(Script.gravityFilaments, not masterEnabled or rocketsEnabled)
+        setDisabled(Script.neonVeins, not masterEnabled or rocketsEnabled)
+        setDisabled(Script.energyNodes, not masterEnabled or rocketsEnabled)
+        setDisabled(Script.chromaticRim, not masterEnabled or rocketsEnabled)
         setDisabled(Script.flyingRockets, not masterEnabled or backgroundOnly)
         setDisabled(Script.flyingRocketCount, not masterEnabled or backgroundOnly or not rocketsEnabled)
         setDisabled(Script.bgParticleCount, not masterEnabled or backgroundOnly or rocketsEnabled)
@@ -3167,6 +3510,8 @@ function Script.OnScriptsLoaded()
     ArmCustomPresetMarkBlock()
     UpdateMenuControls()
     RefreshThemeCache()
+    ApplyMenuLocalization(true)
+    SetupLanguageCallback()
 end
 
 --#endregion
@@ -3189,8 +3534,10 @@ GatherFrameSettings = function()
         parallaxStrength = WidgetGet(Script.parallaxStrength, 100),
         openRipple = WidgetGet(Script.openRipple, true),
         horizonGrid = WidgetGet(Script.horizonGrid, false),
-        accretionRing = WidgetGet(Script.accretionRing, false),
         gravityFilaments = WidgetGet(Script.gravityFilaments, false),
+        neonVeins = WidgetGet(Script.neonVeins, false),
+        energyNodes = WidgetGet(Script.energyNodes, false),
+        chromaticRim = WidgetGet(Script.chromaticRim, false),
         flyingRockets = WidgetGet(Script.flyingRockets, false),
         flyingRocketCount = WidgetGet(Script.flyingRocketCount, 14),
         bgParticleCount = WidgetGet(Script.bgParticleCount, 100),
@@ -3253,8 +3600,10 @@ GatherFrameSettings = function()
         settings.parallax = false
         settings.openRipple = false
         settings.horizonGrid = false
-        settings.accretionRing = false
         settings.gravityFilaments = false
+        settings.neonVeins = false
+        settings.energyNodes = false
+        settings.chromaticRim = false
         settings.stars = false
         settings.shootingStars = false
         settings.starRays = false
@@ -3428,7 +3777,6 @@ local function UpdateCosmicSimulation(dt)
         menuClosedAccumulated = 0
         menuWasOpen = true
     else
-        RefreshCachedFullScreenSize()
         menuClosedFrames = menuClosedFrames + 1
         menuClosedAccumulated = menuClosedAccumulated + 1
 
@@ -3436,12 +3784,9 @@ local function UpdateCosmicSimulation(dt)
             menuWasOpen = false
             State.fadeInAlpha = 0
             State.frameSettings = nil
-            return
         end
-
-        if not menuWasOpen then
-            return
-        end
+        -- No draw while closed; skip sim during close debounce and after.
+        return
     end
 
     fadeInTime = math.min(fadeInTime + dt, CONSTANTS.FADE_IN_DURATION)
@@ -3824,16 +4169,18 @@ local function DrawBackgroundEffects(fadeInAlpha)
             Color(0, 0, 0, 0),
             false
         )
-
-        DrawDeepSpaceGlow(width, height, primaryColor, secondaryColor, fadeInAlpha)
     end
 
     if settings.gravityFilaments and not settings.backgroundOnly then
         DrawGravityFilaments(width, height, primaryColor, secondaryColor, fadeInAlpha)
     end
 
-    if settings.accretionRing then
-        DrawAccretionRing(width, height, primaryColor, secondaryColor, fadeInAlpha)
+    if settings.neonVeins and not settings.backgroundOnly then
+        DrawNeonVeins(width, height, primaryColor, secondaryColor, fadeInAlpha)
+    end
+
+    if settings.energyNodes and not settings.backgroundOnly then
+        DrawEnergyNodes(width, height, primaryColor, secondaryColor, fadeInAlpha)
     end
 
     if settings.openRipple then
@@ -3923,6 +4270,10 @@ local function DrawBackgroundEffects(fadeInAlpha)
         end
     end
 
+    if settings.chromaticRim and not settings.backgroundOnly then
+        DrawChromaticRim(width, height, primaryColor, secondaryColor, fadeInAlpha)
+    end
+
     if cursorHaloX and cursorHaloY and settings.particleCursorInteraction then
         local haloPulse = 0.88 + math.sin(time * 2.2) * 0.12
         local haloRadius = 66 + haloPulse * 14
@@ -3931,10 +4282,15 @@ local function DrawBackgroundEffects(fadeInAlpha)
         local trailPos = Vec2(cursorHaloX - cursorHaloOffsetX, cursorHaloY - cursorHaloOffsetY)
 
         if Render and Render.CircleGradient then
-            Render.CircleGradient(basePos, haloRadius * 2.05, colorWithAlpha(primaryColor, math.floor(haloAlpha * 0.14)), colorWithAlpha(primaryColor, 0))
-            Render.CircleGradient(trailPos, haloRadius * 1.35, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.20)), colorWithAlpha(secondaryColor, 0))
-            Render.CircleGradient(basePos, haloRadius * 1.0, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.38)), colorWithAlpha(primaryColor, 0))
-            Render.CircleGradient(basePos, haloRadius * 0.48, colorWithAlpha(makeColor(255, 255, 255, 255), math.floor(haloAlpha * 0.36)), colorWithAlpha(primaryColor, 0))
+            if qualityScale >= 0.92 then
+                Render.CircleGradient(basePos, haloRadius * 2.05, colorWithAlpha(primaryColor, math.floor(haloAlpha * 0.14)), colorWithAlpha(primaryColor, 0))
+                Render.CircleGradient(trailPos, haloRadius * 1.35, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.20)), colorWithAlpha(secondaryColor, 0))
+                Render.CircleGradient(basePos, haloRadius * 1.0, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.38)), colorWithAlpha(primaryColor, 0))
+                Render.CircleGradient(basePos, haloRadius * 0.48, colorWithAlpha(makeColor(255, 255, 255, 255), math.floor(haloAlpha * 0.36)), colorWithAlpha(primaryColor, 0))
+            else
+                Render.CircleGradient(basePos, haloRadius * 1.35, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.28)), colorWithAlpha(primaryColor, 0))
+                Render.CircleGradient(basePos, haloRadius * 0.55, colorWithAlpha(makeColor(255, 255, 255, 255), math.floor(haloAlpha * 0.32)), colorWithAlpha(primaryColor, 0))
+            end
         else
             Render.FilledCircle(basePos, haloRadius * 1.55, colorWithAlpha(primaryColor, math.floor(haloAlpha * 0.18)), 20)
             Render.FilledCircle(trailPos, haloRadius * 1.1, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.20)), 18)
@@ -4050,7 +4406,8 @@ local function DrawBackgroundEffects(fadeInAlpha)
             local glowSize = math.min(radius * particleGlowScale, 42)
             local glowAlpha = math.floor(alpha * particleGlowAlphaScale * glowPulse * 1.1)
             if glowAlpha > 0 then
-                local useGradientGlow = qualityScale >= CONSTANTS.GLOW_QUALITY_THRESHOLD and #bgParticleActive <= 180
+                local useGradientGlow = qualityScale >= CONSTANTS.GLOW_QUALITY_THRESHOLD
+                    and #bgParticleActive <= CONSTANTS.PARTICLE_GRADIENT_GLOW_MAX
                 if useGradientGlow and Render and Render.CircleGradient then
                     local warm = mixColors(pColor, makeColor(255, 255, 255, 255), 0.28)
                     Render.CircleGradient(
@@ -4115,6 +4472,17 @@ function Script.OnUpdateEx()
         return
     end
 
+    local menuOpen = IsMenuOpen()
+    if not menuOpen and not menuWasOpen then
+        State.screenCacheIdleFrames = (State.screenCacheIdleFrames or 0) + 1
+        if State.screenCacheIdleFrames >= CONSTANTS.SCREEN_CACHE_IDLE_FRAMES then
+            State.screenCacheIdleFrames = 0
+            RefreshCachedFullScreenSize()
+        end
+        return
+    end
+
+    State.screenCacheIdleFrames = 0
     UpdateCosmicSimulation(GetAnimationDt())
 end
 

@@ -14,6 +14,7 @@ local NAME = "AbuseInvis"
 local CONFIG_SECTION = "abuse_invis"
 local HERO_NAME = "npc_dota_hero_templar_assassin"
 local HERO_TAB = "Templar Assassin"
+local HERO_ICON = "panorama/images/heroes/icons/npc_dota_hero_templar_assassin_png.vtex_c"
 local MENU_FIRST = "Heroes"
 local MENU_SECTION = "Hero List"
 local MENU_THIRD = "Abuse Invis"
@@ -69,19 +70,23 @@ local C = {
     -- Warp should finish this much before the projectile would hit.
     POKE_PRE_WARP = 0.10,
     SETUP_REENTER = 0.40,
-    HUD_TITLE_SIZE = 15,
-    HUD_LINE_SIZE = 13,
-    HUD_HINT_SIZE = 12,
-    HUD_PAD_X = 12,
-    HUD_PAD_Y = 10,
-    HUD_GAP = 3,
-    HUD_RADIUS = 6,
-    HUD_ACCENT_W = 3,
-    HUD_X = 22,
-    HUD_Y = 112,
-    HUD_MIN_W = 220,
-    HUD_MAX_W = 420,
 }
+
+local PANEL_TITLE = "Abuse Invis"
+local PANEL_BLUR_BASE_STRENGTH = 2.5
+local PANEL_HEADER_HEIGHT = 32
+local PANEL_HEADER_PAD_X = 10
+local PANEL_HEADER_TEXT_SIZE = 14
+local PANEL_BODY_TEXT_SIZE = 12
+local PANEL_HINT_TEXT_SIZE = 11
+local PANEL_HEADER_ICON_SIZE = 15
+local PANEL_HEADER_ICON_GAP = 7
+local PANEL_HEADER_RADIUS = 5
+local PANEL_BODY_PAD = 8
+local PANEL_ROW_GAP = 3
+local PANEL_MIN_W = 200
+local SPELL_ICON_MELD = "panorama/images/spellicons/templar_assassin_meld_png.vtex_c"
+local PANEL_HEADER_FONT_CANDIDATES = { "Segoe UI", "Tahoma", "Arial" }
 
 local STAGE_LABEL = {
     [STAGE.IDLE] = "Idle",
@@ -91,11 +96,14 @@ local STAGE_LABEL = {
     [STAGE.CHANNEL] = "Channeling",
 }
 
-local STATE_INVISIBLE = Enum.modifierState and Enum.modifierState.MODIFIER_STATE_INVISIBLE or 7
-local STATE_DOMINATED = Enum.modifierState and Enum.modifierState.MODIFIER_STATE_DOMINATED or 31
+-- Runtime may not bind Enum.modifierState at script load (host quirk); stub values: INVISIBLE=7, DOMINATED=31.
+local MODIFIER_STATE = Enum.modifierState
+local STATE_INVISIBLE = (MODIFIER_STATE and MODIFIER_STATE.MODIFIER_STATE_INVISIBLE) or 7
+local STATE_DOMINATED = (MODIFIER_STATE and MODIFIER_STATE.MODIFIER_STATE_DOMINATED) or 31
 local ORDER_ISSUER = Enum.PlayerOrderIssuer.DOTA_ORDER_ISSUER_PASSED_UNIT_ONLY
 local ORDER_MOVE_TARGET = Enum.UnitOrder.DOTA_UNIT_ORDER_MOVE_TO_TARGET
 local ORDER_CAST_TARGET = Enum.UnitOrder.DOTA_UNIT_ORDER_CAST_TARGET
+local DRAW_FLAGS_NONE = (Enum.DrawFlags and Enum.DrawFlags.None) or 0
 
 local Icons = {
     enable = "\u{f00c}",
@@ -138,11 +146,51 @@ local UI = {
     callbacksAttached = false,
 }
 
+local MenuNodes = {
+    ---@type CSecondTab|nil
+    hero = nil,
+    ---@type CThirdTab|nil
+    tab = nil,
+    ---@type CMenuGroup|nil
+    group = nil,
+}
+
 local Persistent = {
     ---@type Logger|nil
     logger = nil,
     ---@type integer|userdata|nil
     font = nil,
+    ---@type integer|nil
+    spellIcon = nil,
+    ---@type any
+    blurFactorWidget = nil,
+    ---@type number|nil
+    blurStrength = PANEL_BLUR_BASE_STRENGTH,
+    wasMousePressed = false,
+}
+
+local PanelConfig = {
+    X = -1,
+    Y = 112,
+}
+
+local PanelDrag = {
+    IsDragging = false,
+    OffsetX = 0,
+    OffsetY = 0,
+}
+
+local Colors = {
+    HeaderBg = Color(18, 18, 22, 255),
+    TextHeader = Color(245, 247, 250, 255),
+    TextStatus = Color(120, 200, 255, 255),
+    TextOk = Color(110, 210, 140, 255),
+    TextBad = Color(230, 110, 110, 255),
+    TextWarn = Color(240, 195, 90, 255),
+    TextMuted = Color(165, 175, 190, 230),
+    TextBody = Color(225, 232, 245, 245),
+    TextHint = Color(130, 185, 255, 245),
+    CellBg = Color(12, 12, 16, 230),
 }
 
 local Runtime = {
@@ -268,8 +316,8 @@ local function UnitIndex(unit)
     if unit == nil then
         return nil
     end
-    local idx = SafeValue(Entity.GetIndex, unit)
-    if type(idx) == "number" then
+    local ok, idx = TryCall(Entity.GetIndex, unit)
+    if ok and type(idx) == "number" then
         return idx
     end
     return nil
@@ -297,9 +345,7 @@ local function FmtUnit(unit)
     if not unit then
         return "nil"
     end
-    local name = SafeValue(Entity.GetUnitDesignerName, unit)
-        or SafeValue(Entity.GetUnitName, unit)
-        or "?"
+    local name = Entity.GetUnitDesignerName(unit) or Entity.GetUnitName(unit) or "?"
     local idx = UnitIndex(unit)
     if type(idx) == "number" then
         return string.format("%s#%d", name, idx)
@@ -446,30 +492,50 @@ local function IsValidUnit(unit)
     if unit == nil then
         return false
     end
-    if SafeValue(Entity.IsAlive, unit) ~= true then
-        return false
+    -- Stale handles can throw; fail closed unless IsAlive confirms true.
+    local ok, alive = TryCall(Entity.IsAlive, unit)
+    return ok and alive == true
+end
+
+---@param unit userdata|nil
+---@return Vector|nil
+local function AbsOrigin(unit)
+    if unit == nil then
+        return nil
     end
-    return true
+    local ok, pos = TryCall(Entity.GetAbsOrigin, unit)
+    -- TryCall's error channel is a string; only return a real Vector.
+    if not ok or type(pos) == "string" or pos == nil then
+        return nil
+    end
+    ---@cast pos Vector
+    return pos
 end
 
 local function UnitName(unit)
-    local name = SafeValue(Entity.GetUnitDesignerName, unit)
+    if unit == nil then
+        return nil
+    end
+    local name = Entity.GetUnitDesignerName(unit)
     if type(name) == "string" and name ~= "" then
         return name
     end
-    name = SafeValue(Entity.GetUnitName, unit)
+    name = Entity.GetUnitName(unit)
     if type(name) == "string" and name ~= "" then
         return name
     end
     return nil
 end
 
-local function Dist2D(a, b)
+---@param a Vector|nil
+---@param b Vector|nil
+---@return number|nil
+local function DistSqr2D(a, b)
     if not a or not b then
         return nil
     end
     local ok, dist = TryCall(function()
-        return a:Distance2D(b)
+        return a:DistanceSqr2D(b)
     end)
     if ok and type(dist) == "number" then
         return dist
@@ -481,14 +547,25 @@ local function Dist2D(a, b)
     end
     local dx = ax - bx
     local dy = ay - by
-    return math.sqrt(dx * dx + dy * dy)
+    return dx * dx + dy * dy
+end
+
+---@param a Vector|nil
+---@param b Vector|nil
+---@return number|nil
+local function Dist2D(a, b)
+    local sqr = DistSqr2D(a, b)
+    if type(sqr) ~= "number" then
+        return nil
+    end
+    return math.sqrt(sqr)
 end
 
 local function HasInvis(hero)
-    if SafeValue(NPC.HasState, hero, STATE_INVISIBLE) == true then
+    if NPC.HasState(hero, STATE_INVISIBLE) == true then
         return true
     end
-    if SafeValue(NPC.HasModifier, hero, MOD_MELD) == true then
+    if NPC.HasModifier(hero, MOD_MELD) == true then
         return true
     end
     return false
@@ -497,12 +574,11 @@ end
 ---@return integer|nil
 ---@return userdata|nil
 local function GetLocalPlayerId()
-    local player = SafeValue(Players.GetLocal)
+    local player = Players.GetLocal()
     if not player then
         return nil, nil
     end
-    ---@cast player userdata
-    local pid = SafeValue(Player.GetPlayerID, player)
+    local pid = Player.GetPlayerID(player)
     if type(pid) ~= "number" or pid < 0 then
         return nil, player
     end
@@ -517,22 +593,22 @@ local function IsCreepCandidate(unit, playerId, hero)
     if not IsValidUnit(unit) or unit == hero then
         return false
     end
-    if SafeValue(NPC.IsHero, unit) == true then
+    ---@cast unit userdata
+    if NPC.IsHero(unit) == true then
         return false
     end
-    if SafeValue(Entity.IsControllableByPlayer, unit, playerId) ~= true then
-        local alt = SafeValue(NPC.IsControllableByPlayer, unit, playerId)
-        if alt ~= true then
-            return false
-        end
+    local controllable = Entity.IsControllableByPlayer(unit, playerId) == true
+        or NPC.IsControllableByPlayer(unit, playerId) == true
+    if not controllable then
+        return false
     end
-    if SafeValue(NPC.HasState, unit, STATE_DOMINATED) == true then
+    if NPC.HasState(unit, STATE_DOMINATED) == true then
         return true
     end
-    if SafeValue(Entity.OwnedBy, unit, hero) == true then
+    if Entity.OwnedBy(unit, hero) == true then
         return true
     end
-    if SafeValue(Entity.RecursiveOwnedBy, unit, hero) == true then
+    if Entity.RecursiveOwnedBy(unit, hero) == true then
         return true
     end
     return false
@@ -543,7 +619,7 @@ end
 ---@param hero userdata
 ---@return userdata|nil
 local function FindCreep(player, playerId, hero)
-    local selected = SafeValue(Player.GetSelectedUnits, player)
+    local selected = Player.GetSelectedUnits(player)
     if type(selected) == "table" then
         for i = 1, #selected do
             local unit = selected[i]
@@ -553,7 +629,12 @@ local function FindCreep(player, playerId, hero)
         end
     end
 
-    local all = SafeValue(NPCs.GetAll)
+    -- Bitmask of creep-like unit types (LuaLS enum can't express OR; cast at call).
+    local creepFlags = Enum.UnitTypeFlags.TYPE_CREEP
+        | Enum.UnitTypeFlags.TYPE_LANE_CREEP
+        | Enum.UnitTypeFlags.TYPE_ANCIENT
+    ---@cast creepFlags Enum.UnitTypeFlags
+    local all = NPCs.GetAll(creepFlags)
     if type(all) ~= "table" then
         return nil
     end
@@ -644,10 +725,20 @@ local function IsHudOn()
     return UI.drawHud ~= nil and UI.drawHud:Get() == true
 end
 
+---@param hero userdata|nil
+---@return boolean
+local function IsTemplarAssassin(hero)
+    if not IsValidUnit(hero) then
+        return false
+    end
+    ---@cast hero userdata
+    local name = NPC.GetUnitName(hero) or Entity.GetUnitName(hero)
+    return name == HERO_NAME
+end
+
 ---@return boolean
 local function IsLocalTemplarAssassin()
-    local hero = SafeValue(Heroes.GetLocal)
-    return IsValidUnit(hero) and UnitName(hero) == HERO_NAME
+    return IsTemplarAssassin(Heroes.GetLocal())
 end
 
 local function IsFeatureActive()
@@ -709,7 +800,7 @@ local function GuardCreepSelection(player, hero, creep, now)
     end
     Runtime.lastSelectGuardAt = now
 
-    local selected = SafeValue(Player.GetSelectedUnits, player)
+    local selected = Player.GetSelectedUnits(player)
     if type(selected) ~= "table" or #selected == 0 then
         return
     end
@@ -735,22 +826,22 @@ local function GuardCreepSelection(player, hero, creep, now)
         #selected,
         FmtUnit(creep)
     )
-    TryCall(Player.ClearSelectedUnits, player)
+    Player.ClearSelectedUnits(player)
     if #keep == 0 then
         if hero then
-            TryCall(Player.AddSelectedUnit, player, hero)
+            Player.AddSelectedUnit(player, hero)
             Dbg("SELECT restore hero only %s", FmtUnit(hero))
         end
         return
     end
     for i = 1, #keep do
-        TryCall(Player.AddSelectedUnit, player, keep[i])
+        Player.AddSelectedUnit(player, keep[i])
     end
 end
 
 ---@param hint string|nil
 local function UpdateHudSnapshot(hint)
-    local hero = SafeValue(Heroes.GetLocal)
+    local hero = Heroes.GetLocal()
     local playerId = select(1, GetLocalPlayerId())
     local invis = hero ~= nil and HasInvis(hero) == true
     local creep = Runtime.creep
@@ -835,7 +926,11 @@ local function BuildSetupHint()
 end
 
 ---Edge-detect Sustain Bind. Menu IsToggled does not flip on key alone.
+---Only while local hero is Templar Assassin (bind is hero-scoped).
 local function PollSustainBind()
+    if not IsLocalTemplarAssassin() then
+        return
+    end
     if not IsEnabled() or not UI.bind or not BindHasKey(UI.bind) then
         return
     end
@@ -845,9 +940,7 @@ local function PollSustainBind()
 
     local nextOn = not Runtime.sustainOn
     Runtime.sustainOn = nextOn
-    if UI.bind.SetToggled then
-        UI.bind:SetToggled(nextOn)
-    end
+    UI.bind:SetToggled(nextOn)
     WriteBool("bind_toggled", nextOn)
 
     if nextOn then
@@ -869,7 +962,8 @@ local function RefreshGates(now)
     end
 
     local found = {}
-    local all = SafeValue(NPCs.GetAll)
+    -- Twin gates are not reliably typed as creeps; full list + TTL is intentional.
+    local all = NPCs.GetAll()
     if type(all) == "table" then
         for i = 1, #all do
             local npc = all[i]
@@ -892,28 +986,24 @@ local function ResolveWarpAbility(creep)
     Runtime.usedFallbackTwin = false
     local gateType = GetGateType()
     if gateType == GATE_HIDDEN then
-        local hidden = SafeValue(NPC.GetAbility, creep, ABILITY_HIDDEN)
+        local hidden = NPC.GetAbility(creep, ABILITY_HIDDEN)
         if hidden then
-            ---@cast hidden userdata
             return hidden, C.CHANNEL_HIDDEN, false
         end
-        local twin = SafeValue(NPC.GetAbility, creep, ABILITY_TWIN)
+        local twin = NPC.GetAbility(creep, ABILITY_TWIN)
         if twin then
-            ---@cast twin userdata
             Runtime.usedFallbackTwin = true
             return twin, C.CHANNEL_TWIN, true
         end
         return nil, C.CHANNEL_HIDDEN, false
     end
 
-    local twin = SafeValue(NPC.GetAbility, creep, ABILITY_TWIN)
+    local twin = NPC.GetAbility(creep, ABILITY_TWIN)
     if twin then
-        ---@cast twin userdata
         return twin, C.CHANNEL_TWIN, false
     end
-    local hidden = SafeValue(NPC.GetAbility, creep, ABILITY_HIDDEN)
+    local hidden = NPC.GetAbility(creep, ABILITY_HIDDEN)
     if hidden then
-        ---@cast hidden userdata
         return hidden, C.CHANNEL_HIDDEN, false
     end
     return nil, C.CHANNEL_TWIN, false
@@ -934,14 +1024,14 @@ local function PickNearestGate(creep, prefer, why)
     end
 
     if prefer and IsValidUnit(prefer) then
-        local creepPos = SafeValue(Entity.GetAbsOrigin, creep)
-        local gatePos = SafeValue(Entity.GetAbsOrigin, prefer)
+        local creepPos = AbsOrigin(creep)
+        local gatePos = AbsOrigin(prefer)
         local dist = Dist2D(creepPos, gatePos) or -1
         Dbg("PICK gate prefer %s dist=%.0f | %s", FmtUnit(prefer), dist, why or "")
         return prefer, dist
     end
 
-    local creepPos = SafeValue(Entity.GetAbsOrigin, creep)
+    local creepPos = AbsOrigin(creep)
     if not creepPos then
         Dbg("PICK gate fallback gates[1] (no creep pos) | %s", why or "")
         return gates[1], math.huge
@@ -949,16 +1039,19 @@ local function PickNearestGate(creep, prefer, why)
 
     ---@type userdata|nil
     local bestNear = nil
+    local bestNearSqr = math.huge
     local bestNearDist = math.huge
     local parts = {}
 
     for i = 1, #gates do
         local gate = gates[i]
         if IsValidUnit(gate) then
-            local gatePos = SafeValue(Entity.GetAbsOrigin, gate)
-            local dist = Dist2D(creepPos, gatePos) or math.huge
+            local gatePos = AbsOrigin(gate)
+            local sqr = DistSqr2D(creepPos, gatePos) or math.huge
+            local dist = (sqr < math.huge) and math.sqrt(sqr) or math.huge
             parts[#parts + 1] = string.format("%s=%.0f", FmtUnit(gate), dist)
-            if dist < bestNearDist then
+            if sqr < bestNearSqr then
+                bestNearSqr = sqr
                 bestNearDist = dist
                 bestNear = gate
             end
@@ -990,12 +1083,14 @@ end
 ---@param identifier string
 ---@param why string|nil
 ---@return boolean
+---Issue a creep order. Returns true after the host call (throttle advanced).
+---Game acceptance is confirmed later via channel / warp jump / projectile latch.
 local function IssueCreepOrder(player, creep, orderType, target, ability, identifier, why)
-    local creepPos = SafeValue(Entity.GetAbsOrigin, creep)
+    local creepPos = AbsOrigin(creep)
     local pos = creepPos or Vector(0, 0, 0)
     local targetDist = -1
     if target then
-        local tpos = SafeValue(Entity.GetAbsOrigin, target)
+        local tpos = AbsOrigin(target)
         if tpos then
             pos = tpos
             targetDist = Dist2D(creepPos, tpos) or -1
@@ -1012,8 +1107,8 @@ local function IssueCreepOrder(player, creep, orderType, target, ability, identi
         why or ""
     )
 
-    local ok = TryCall(
-        Player.PrepareUnitOrders,
+    -- callback=true so OnPrepareUnitOrders sees our identifier; execute_fast keeps gate ping-pong latency low.
+    Player.PrepareUnitOrders(
         player,
         orderType,
         target,
@@ -1023,18 +1118,14 @@ local function IssueCreepOrder(player, creep, orderType, target, ability, identi
         creep,
         false,
         false,
-        false,
+        true,
         true,
         identifier,
         true
     )
-    if ok then
-        Runtime.lastOrderAt = GameRules.GetGameTime()
-        Dbg("ORDER ok %s", tostring(identifier))
-    else
-        Dbg("ORDER FAIL %s", tostring(identifier))
-    end
-    return ok == true
+    Runtime.lastOrderAt = GameRules.GetGameTime()
+    Dbg("ORDER issued %s", tostring(identifier))
+    return true
 end
 
 ---Stop leftover move orders so the creep stays by the arrival gate during delay.
@@ -1048,23 +1139,11 @@ local function HoldCreep(player, creep, now, why)
         Dbg("HOLD skip throttle | %s", why or "")
         return false
     end
-    Dbg("HOLD try HoldPosition creep=%s | %s", FmtPos(SafeValue(Entity.GetAbsOrigin, creep)), why or "")
-    local ok = TryCall(Player.HoldPosition, player, creep, false, true, true, ORDER_HOLD)
-    if ok then
-        Runtime.lastOrderAt = now
-        Dbg("HOLD ok via HoldPosition")
-        return true
-    end
-    Dbg("HOLD fallback PrepareUnitOrders HOLD")
-    return IssueCreepOrder(
-        player,
-        creep,
-        Enum.UnitOrder.DOTA_UNIT_ORDER_HOLD_POSITION,
-        nil,
-        nil,
-        ORDER_HOLD,
-        why or "hold fallback"
-    )
+    Dbg("HOLD HoldPosition creep=%s | %s", FmtPos(AbsOrigin(creep)), why or "")
+    Player.HoldPosition(player, creep, false, true, true, ORDER_HOLD)
+    Runtime.lastOrderAt = now
+    Dbg("HOLD issued via HoldPosition")
+    return true
 end
 
 ---@param proj table
@@ -1094,14 +1173,14 @@ end
 ---@return number|nil eta
 ---@return userdata|nil matchedCreep
 local function FindAttackProjectile(hero, creep, playerId)
-    local list = SafeValue(TargetProjectiles.GetAll)
+    local list = TargetProjectiles.GetAll()
     if type(list) ~= "table" then
         return nil, nil, nil
     end
 
-    local now = SafeValue(GameRules.GetGameTime) or 0
-    local fallbackSpeed = SafeValue(NPC.GetAttackProjectileSpeed, hero)
-    local creepPos = creep and SafeValue(Entity.GetAbsOrigin, creep) or nil
+    local now = GameRules.GetGameTime() or 0
+    local fallbackSpeed = NPC.GetAttackProjectileSpeed(hero)
+    local creepPos = creep and AbsOrigin(creep) or nil
 
     ---@type table|nil
     local bestExact = nil
@@ -1132,7 +1211,7 @@ local function FindAttackProjectile(hero, creep, playerId)
                     bestExact = proj
                 end
             elseif playerId ~= nil and proj.target ~= nil and IsCreepCandidate(proj.target, playerId, hero) then
-                local tpos = SafeValue(Entity.GetAbsOrigin, proj.target)
+                local tpos = AbsOrigin(proj.target)
                 eta = EstimateProjEta(proj, hero, tpos, fallbackSpeed, now)
                 if eta < bestAnyEta then
                     bestAnyEta = eta
@@ -1183,7 +1262,7 @@ local function FindAttackProjectile(hero, creep, playerId)
 end
 
 local function GetCastRange(ability)
-    local range = SafeValue(Ability.GetCastRange, ability)
+    local range = Ability.GetCastRange(ability)
     if type(range) == "number" and range > 0 then
         return range
     end
@@ -1196,7 +1275,7 @@ end
 ---@return number
 local function EstimateApproachSeconds(creep, ability)
     local gates = Runtime.gates or {}
-    local creepPos = SafeValue(Entity.GetAbsOrigin, creep)
+    local creepPos = AbsOrigin(creep)
     if not creepPos or #gates == 0 then
         return 0
     end
@@ -1205,7 +1284,7 @@ local function EstimateApproachSeconds(creep, ability)
     for i = 1, #gates do
         local gate = gates[i]
         if IsValidUnit(gate) then
-            local gatePos = SafeValue(Entity.GetAbsOrigin, gate)
+            local gatePos = AbsOrigin(gate)
             local dist = Dist2D(creepPos, gatePos)
             if type(dist) == "number" and dist < bestDist then
                 bestDist = dist
@@ -1222,7 +1301,7 @@ local function EstimateApproachSeconds(creep, ability)
         return 0
     end
 
-    local speed = SafeValue(NPC.GetMoveSpeed, creep) or SafeValue(NPC.GetBaseSpeed, creep)
+    local speed = NPC.GetMoveSpeed(creep) or NPC.GetBaseSpeed(creep)
     speed = tonumber(speed) or C.APPROACH_SPEED_FALLBACK
     if speed < 1 then
         speed = C.APPROACH_SPEED_FALLBACK
@@ -1270,7 +1349,7 @@ local function Abort(reason)
         return
     end
 
-    local now = SafeValue(GameRules.GetGameTime) or 0
+    local now = GameRules.GetGameTime() or 0
     if msg ~= Runtime.lastAbortMsg or (now - Runtime.lastAbortLogAt) >= 1.5 then
         Dbg("ABORT %s (stage was %s)", msg, tostring(Runtime.stage))
         Runtime.lastAbortLogAt = now
@@ -1343,9 +1422,9 @@ end
 ---@param creep userdata
 ---@return number
 local function EstimateAttackHitEta(hero, creep)
-    local speed = SafeValue(NPC.GetAttackProjectileSpeed, hero)
-    local heroPos = SafeValue(Entity.GetAbsOrigin, hero)
-    local creepPos = SafeValue(Entity.GetAbsOrigin, creep)
+    local speed = NPC.GetAttackProjectileSpeed(hero)
+    local heroPos = AbsOrigin(hero)
+    local creepPos = AbsOrigin(creep)
     local dist = Dist2D(heroPos, creepPos)
     local flight = 0.20
     if type(dist) == "number" and type(speed) == "number" and speed > 1 then
@@ -1354,7 +1433,7 @@ local function EstimateAttackHitEta(hero, creep)
         flight = 0.12 -- melee / no projectile speed
     end
 
-    local spa = SafeValue(NPC.GetSecondsPerAttack, hero, false)
+    local spa = NPC.GetSecondsPerAttack(hero, false)
     local pointPad = 0.18
     if type(spa) == "number" and spa > 0 then
         pointPad = Clamp(spa * 0.35, 0.10, 0.40)
@@ -1398,7 +1477,7 @@ local function TryAutoPoke(player, hero, creep, ability, now)
 
     local elapsed
     if ability then
-        local start = SafeValue(Ability.GetChannelStartTime, ability)
+        local start = Ability.GetChannelStartTime(ability)
         if type(start) == "number" and start > 0 then
             elapsed = now - start
         end
@@ -1425,27 +1504,14 @@ local function TryAutoPoke(player, hero, creep, ability, now)
         Runtime.channelExpect,
         FmtUnit(creep)
     )
-    local ok = TryCall(
-        Player.AttackTarget,
-        player,
-        hero,
-        creep,
-        false,
-        true,
-        false,
-        ORDER_ATTACK,
-        false
-    )
+    -- Issued here; acceptance is confirmed by OnProjectile / TargetProjectiles latch.
+    Player.AttackTarget(player, hero, creep, false, true, false, ORDER_ATTACK, false)
     Runtime.channelPokeIssued = true
     Runtime.setupPokeIssued = true
     Runtime.lastHeroOrderAt = now
-    if ok then
-        SetStatus(string.format("auto poke (%.2fs left, hit~%.2fs)", math.max(0, remaining), hitEta))
-        Dbg("POKE ok via AttackTarget")
-    else
-        Dbg("POKE AttackTarget failed")
-    end
-    return ok == true
+    SetStatus(string.format("auto poke (%.2fs left, hit~%.2fs)", math.max(0, remaining), hitEta))
+    Dbg("POKE issued via AttackTarget")
+    return true
 end
 
 ---@param handle any
@@ -1457,25 +1523,349 @@ local function IsValidHandle(handle)
     return type(handle) == "userdata"
 end
 
+---@param size any
+---@return boolean
+local function IsValidTextSize(size)
+    return (type(size) == "table" or type(size) == "userdata")
+        and type(size.x) == "number"
+        and type(size.y) == "number"
+end
+
+---@param handle any
+---@param sampleText string|nil
+---@param fontSize number|nil
+---@return boolean
+local function CanMeasureWithFont(handle, sampleText, fontSize)
+    if not IsValidHandle(handle) or not Render or not Render.TextSize then
+        return false
+    end
+    return IsValidTextSize(
+        SafeValue(Render.TextSize, handle, fontSize or PANEL_HEADER_TEXT_SIZE, sampleText or PANEL_TITLE)
+    )
+end
+
+---@param fontName string
+---@param sampleText string|nil
 ---@return integer|userdata|nil
-local function EnsureFont()
+local function TryLoadPanelFont(fontName, sampleText)
+    if not Render or not Render.LoadFont then
+        return nil
+    end
+    local fontFlag = Enum.FontCreate and Enum.FontCreate.FONTFLAG_ANTIALIAS or 0
+    local weights = {
+        Enum.FontWeight and Enum.FontWeight.SEMIBOLD or 600,
+        Enum.FontWeight and Enum.FontWeight.MEDIUM or 500,
+        400,
+    }
+    for i = 1, #weights do
+        local handle = SafeValue(Render.LoadFont, fontName, fontFlag, weights[i])
+        if CanMeasureWithFont(handle, sampleText) then
+            return handle
+        end
+    end
+    local plain = SafeValue(Render.LoadFont, fontName)
+    if CanMeasureWithFont(plain, sampleText) then
+        return plain
+    end
+    return nil
+end
+
+---@param sampleText string|nil
+---@return integer|userdata|nil
+local function ResolvePanelFont(sampleText)
+    for i = 1, #PANEL_HEADER_FONT_CANDIDATES do
+        local handle = TryLoadPanelFont(PANEL_HEADER_FONT_CANDIDATES[i], sampleText)
+        if handle then
+            return handle
+        end
+    end
+    return nil
+end
+
+---@return integer|userdata|nil
+local function GetPanelFont()
     if IsValidHandle(Persistent.font) then
         return Persistent.font
     end
-    -- Name-only LoadFont is the proven-safe path for this script.
-    Persistent.font = SafeValue(Render.LoadFont, "Arial")
+    Persistent.font = ResolvePanelFont(PANEL_TITLE)
     return Persistent.font
+end
+
+local function EnsureSpellIcon()
+    if type(Persistent.spellIcon) == "number" then
+        return
+    end
+    local handle = Render.LoadImage(SPELL_ICON_MELD)
+    if type(handle) == "number" and handle ~= 0 then
+        Persistent.spellIcon = handle
+    end
+end
+
+---@param col any
+---@return number|nil
+---@return number|nil
+---@return number|nil
+---@return number|nil
+local function ColorChannels(col)
+    if col == nil then
+        return nil
+    end
+    local r, g, b = col.r, col.g, col.b
+    if type(r) ~= "number" or type(g) ~= "number" or type(b) ~= "number" then
+        return nil
+    end
+    local a = col.a
+    if type(a) ~= "number" then
+        a = 255
+    end
+    -- Some Menu.Style entries are normalized 0..1.
+    if r <= 1.0 and g <= 1.0 and b <= 1.0 and a <= 1.0 then
+        r, g, b, a = r * 255, g * 255, b * 255, a * 255
+    elseif r <= 1.0 and g <= 1.0 and b <= 1.0 then
+        r, g, b = r * 255, g * 255, b * 255
+    end
+    return r, g, b, a
+end
+
+---@param r number
+---@param g number
+---@param b number
+---@return boolean
+local function IsReadableOnDark(r, g, b)
+    return (0.299 * r + 0.587 * g + 0.114 * b) >= 110
+end
+
+---@param col any
+---@return Color|nil
+local function ColorFromChannels(col)
+    local r, g, b, a = ColorChannels(col)
+    if type(r) ~= "number" or type(g) ~= "number" or type(b) ~= "number" then
+        return nil
+    end
+    if type(a) ~= "number" then
+        a = 255
+    end
+    return Color(math.floor(r), math.floor(g), math.floor(b), math.floor(a))
+end
+
+---@param name string
+---@param defaultColor Color
+---@return Color
+local function GetThemeColor(name, defaultColor)
+    if not Menu or not Menu.Style then
+        return defaultColor
+    end
+    local fromStyle = ColorFromChannels(Menu.Style(name))
+    if fromStyle then
+        return fromStyle
+    end
+    return defaultColor
+end
+
+---Theme keys meant for light menu widgets are often too dark for HUD body text.
+---@param name string
+---@param defaultColor Color
+---@return Color
+local function GetReadableThemeColor(name, defaultColor)
+    local col = GetThemeColor(name, defaultColor)
+    local r, g, b = ColorChannels(col)
+    if type(r) ~= "number" or type(g) ~= "number" or type(b) ~= "number" then
+        return defaultColor
+    end
+    if not IsReadableOnDark(r, g, b) then
+        return defaultColor
+    end
+    return col
+end
+
+local function SyncColors()
+    -- Chrome only. Checklist ok/bad/muted stay fixed so theme never paints them black.
+    Colors.HeaderBg = GetThemeColor("additional_background", Colors.HeaderBg)
+    Colors.TextHeader = GetReadableThemeColor("primary_widgets_text", Colors.TextHeader)
+    Colors.TextStatus = GetReadableThemeColor("primary", Colors.TextStatus)
+    Colors.TextHint = GetReadableThemeColor("primary", Colors.TextHint)
+    Colors.TextWarn = GetReadableThemeColor("indication_error", Colors.TextWarn)
+end
+
+local function RefreshBlurStrength()
+    local widget = Persistent.blurFactorWidget
+    if not widget then
+        widget = Menu.Find("SettingsHidden", "", "", "", "Visual", "Menu Blur Factor")
+        Persistent.blurFactorWidget = widget
+    end
+    if not widget then
+        Persistent.blurStrength = PANEL_BLUR_BASE_STRENGTH
+        return
+    end
+    local factor = widget:Get()
+    if type(factor) ~= "number" or factor <= 0 then
+        Persistent.blurStrength = nil
+        return
+    end
+    if factor > 1 then
+        factor = factor / 100
+    end
+    Persistent.blurStrength = math.max(0.1, factor * PANEL_BLUR_BASE_STRENGTH)
+end
+
+local function LoadPanelPosition()
+    local x = ReadInt("panel_x", -1)
+    local y = ReadInt("panel_y", 112)
+    if type(x) == "number" then
+        PanelConfig.X = x
+    end
+    if type(y) == "number" then
+        PanelConfig.Y = y
+    end
+end
+
+local function SavePanelPosition()
+    WriteInt("panel_x", math.floor(PanelConfig.X + 0.5))
+    WriteInt("panel_y", math.floor(PanelConfig.Y + 0.5))
+end
+
+---@return number|nil
+---@return number|nil
+local function GetMousePos()
+    -- Preserve both returns from Input.GetCursorPos.
+    local ok, x, y = TryCall(Input.GetCursorPos)
+    if not ok then
+        return nil, nil
+    end
+    if type(x) == "number" and type(y) == "number" then
+        return x, y
+    end
+    if (type(x) == "table" or type(x) == "userdata") and type(x.x) == "number" and type(x.y) == "number" then
+        return x.x, x.y
+    end
+    return nil, nil
+end
+
+---@return boolean
+local function IsLmbDown()
+    return Input.IsKeyDown(Enum.ButtonCode.KEY_MOUSE1) == true
 end
 --#endregion
 
 --#region Menu
+---@param node CSecondTab|CThirdTab|CMenuGroup|nil
+local function EnsureMenuVisible(node)
+    if node and node.Visible then
+        node:Visible(true)
+    end
+end
+
+---@param heroTab CSecondTab|nil
+local function ApplyHeroTabIcon(heroTab)
+    if not heroTab then
+        return
+    end
+    heroTab:Image(HERO_ICON)
+    local heroId = Engine.GetHeroIDByName(HERO_NAME)
+    if heroId then
+        heroTab:LinkHero(heroId, Enum.Attributes.DOTA_ATTRIBUTE_AGILITY)
+    end
+end
+
+---Heroes → Hero List → Templar Assassin
+---@return CSecondTab|nil
+local function FindOrCreateHeroTab()
+    if MenuNodes.hero then
+        return MenuNodes.hero
+    end
+
+    local heroList = Menu.Find(MENU_FIRST, MENU_SECTION)
+    if not heroList then
+        return nil
+    end
+
+    ---@type CSecondTab|nil
+    local heroTab = Menu.Find(MENU_FIRST, MENU_SECTION, HERO_TAB)
+    if not heroTab and heroList.Find then
+        heroTab = heroList:Find(HERO_TAB)
+    end
+    if not heroTab and heroList.Create then
+        heroTab = heroList:Create(HERO_TAB)
+    end
+    if not heroTab then
+        heroTab = Menu.Create(MENU_FIRST, MENU_SECTION, HERO_TAB)
+    end
+    if not heroTab then
+        return nil
+    end
+
+    ApplyHeroTabIcon(heroTab)
+    MenuNodes.hero = heroTab
+    return heroTab
+end
+
+---Heroes → Hero List → Templar Assassin → Abuse Invis
+---@return CThirdTab|nil
+local function FindOrCreateThirdTab()
+    if MenuNodes.tab then
+        EnsureMenuVisible(MenuNodes.tab)
+        return MenuNodes.tab
+    end
+
+    local heroTab = FindOrCreateHeroTab()
+    if not heroTab then
+        return nil
+    end
+
+    ---@type CThirdTab|nil
+    local tab = Menu.Find(MENU_FIRST, MENU_SECTION, HERO_TAB, MENU_THIRD)
+    if not tab and heroTab.Find then
+        tab = heroTab:Find(MENU_THIRD)
+    end
+    if not tab and heroTab.Create then
+        tab = heroTab:Create(MENU_THIRD)
+    end
+    if not tab then
+        tab = Menu.Create(MENU_FIRST, MENU_SECTION, HERO_TAB, MENU_THIRD)
+    end
+    if not tab then
+        return nil
+    end
+
+    EnsureMenuVisible(tab)
+    MenuNodes.tab = tab
+    return tab
+end
+
 ---@return CMenuGroup|nil
 local function FindOrCreateGroup()
+    if MenuNodes.group then
+        EnsureMenuVisible(MenuNodes.group)
+        return MenuNodes.group
+    end
+
+    local tab = FindOrCreateThirdTab()
+    if not tab then
+        return nil
+    end
+
+    ---@type CMenuGroup|nil
     local group = Menu.Find(MENU_FIRST, MENU_SECTION, HERO_TAB, MENU_THIRD, MENU_GROUP)
+    if not group and tab.Find then
+        group = tab:Find(MENU_GROUP)
+    end
     if group then
+        EnsureMenuVisible(group)
+        MenuNodes.group = group
         return group
     end
-    return Menu.Create(MENU_FIRST, MENU_SECTION, HERO_TAB, MENU_THIRD, MENU_GROUP)
+
+    ---@type CMenuGroup|nil
+    local created = nil
+    if tab.Create then
+        created = tab:Create(MENU_GROUP, Enum.GroupSide.Left)
+    end
+    if not created then
+        created = Menu.Create(MENU_FIRST, MENU_SECTION, HERO_TAB, MENU_THIRD, MENU_GROUP)
+    end
+    EnsureMenuVisible(created)
+    MenuNodes.group = created
+    return created
 end
 
 local function EnsureMenu()
@@ -1491,6 +1881,12 @@ local function EnsureMenu()
         and UI.drawHud
         and UI.callbacksAttached
     then
+        -- Keep hero tab linked even after widgets already exist (menu can load before Engine is ready).
+        if not MenuNodes.hero then
+            FindOrCreateHeroTab()
+        else
+            ApplyHeroTabIcon(MenuNodes.hero)
+        end
         SyncColdTimingUi()
         return
     end
@@ -1523,7 +1919,7 @@ local function EnsureMenu()
         end
         if UI.bind and UI.bind.ToolTip then
             UI.bind:ToolTip(
-                "Toggle sustain on/off. Requires Enable.\n"
+                "Toggle sustain on/off while playing Templar Assassin. Requires Enable.\n"
                     .. "With no key assigned, Enable alone runs sustain."
             )
         end
@@ -1668,7 +2064,8 @@ local function EnsureMenu()
         UI.drawHud = existing or group:Switch("Draw HUD", ReadBool("debug", true), Icons.hud)
         if UI.drawHud and UI.drawHud.ToolTip then
             UI.drawHud:ToolTip(
-                "Status panel while playing Templar Assassin.\n"
+                "Native-style status panel while playing Templar Assassin.\n"
+                    .. "Drag the header to move; position is saved.\n"
                     .. "Shows even if Enable is off (setup checklist).\n"
                     .. "Disable creep control in the cheat; keep dominated creep on low HP."
             )
@@ -1799,7 +2196,7 @@ local function TickSustain(now, player, hero, creep)
 
     if now - Runtime.lastHeartbeatAt >= 1.0 then
         Runtime.lastHeartbeatAt = now
-        local cpos = SafeValue(Entity.GetAbsOrigin, creep)
+        local cpos = AbsOrigin(creep)
         local nearest, nearestDist = PickNearestGate(creep, nil, "heartbeat")
         local waitLeft = Runtime.stage == STAGE.WAITING and math.max(0, Runtime.waitUntil - now) or -1
         Dbg(
@@ -1926,14 +2323,14 @@ local function TickSustain(now, player, hero, creep)
             return
         end
 
-        local creepPos = SafeValue(Entity.GetAbsOrigin, creep)
-        local gatePos = SafeValue(Entity.GetAbsOrigin, gate)
+        local creepPos = AbsOrigin(creep)
+        local gatePos = AbsOrigin(gate)
         local dist = Dist2D(creepPos, gatePos) or math.huge
         local castRange = ability and GetCastRange(ability) or C.CAST_RANGE_FALLBACK
 
         if ability and dist <= (castRange + C.CAST_RANGE_PAD) then
-            local alreadyChannelling = SafeValue(Ability.IsChannelling, ability) == true
-                or SafeValue(NPC.IsChannellingAbility, creep) == true
+            local alreadyChannelling = Ability.IsChannelling(ability) == true
+                or NPC.IsChannellingAbility(creep) == true
             if alreadyChannelling then
                 SetStage(STAGE.CHANNEL, "already channeling")
                 Runtime.channelStartedAt = now
@@ -2016,19 +2413,22 @@ local function TickSustain(now, player, hero, creep)
 
     if Runtime.stage == STAGE.CHANNEL then
         local gate = Runtime.targetGate
-        local channeling = ability and SafeValue(Ability.IsChannelling, ability) == true
-        if not channeling and SafeValue(NPC.IsChannellingAbility, creep) == true then
+        local channeling = ability and Ability.IsChannelling(ability) == true
+        if not channeling and NPC.IsChannellingAbility(creep) == true then
             channeling = true
         end
         if channeling then
             Runtime.channelConfirmed = true
         end
-        local creepPos = SafeValue(Entity.GetAbsOrigin, creep)
+        local creepPos = AbsOrigin(creep)
         local jumped = false
         local jumpDist = -1
         if Runtime.creepPosAtChannel and creepPos then
-            jumpDist = Dist2D(Runtime.creepPosAtChannel, creepPos) or -1
-            jumped = type(jumpDist) == "number" and jumpDist >= C.WARP_JUMP_DIST
+            local jumpSqr = DistSqr2D(Runtime.creepPosAtChannel, creepPos)
+            if type(jumpSqr) == "number" then
+                jumpDist = math.sqrt(jumpSqr)
+                jumped = jumpSqr >= (C.WARP_JUMP_DIST * C.WARP_JUMP_DIST)
+            end
         end
 
         -- Only lock re-cast after the gate channel actually started (or poke mid-channel).
@@ -2045,7 +2445,7 @@ local function TickSustain(now, player, hero, creep)
                 return
             end
             if AwaitingSetupPoke() then
-                local start = ability and SafeValue(Ability.GetChannelStartTime, ability)
+                local start = ability and Ability.GetChannelStartTime(ability)
                 local elapsed = (type(start) == "number" and start > 0) and (now - start)
                     or (now - Runtime.channelStartedAt)
                 local left = Runtime.channelExpect - elapsed
@@ -2120,14 +2520,13 @@ local function TickSustain(now, player, hero, creep)
 end
 
 local function UpdateFeature(now)
-    local hero = SafeValue(Heroes.GetLocal)
+    local hero = Heroes.GetLocal()
     if not IsValidUnit(hero) then
         Abort("no hero")
         return
     end
     ---@cast hero userdata
-    if UnitName(hero) ~= HERO_NAME then
-        Abort("not TA")
+    if not IsTemplarAssassin(hero) then
         return
     end
 
@@ -2247,7 +2646,7 @@ local function UpdateFeature(now)
             cold and "cold armed - delay loop"
                 or (setupPoke and "auto poke: send creep to gate" or "armed - creep loop starting")
         )
-        Dbg("ARMED pinned creep=%s at %s mode=%s", FmtUnit(creep), FmtPos(SafeValue(Entity.GetAbsOrigin, creep)), armWhy)
+        Dbg("ARMED pinned creep=%s at %s mode=%s", FmtUnit(creep), FmtPos(AbsOrigin(creep)), armWhy)
     end
 
     if ShouldQuarantineCreep() then
@@ -2263,7 +2662,18 @@ end
 function Script.OnScriptsLoaded()
     Persistent.logger = Logger(NAME)
     EnsureMenu()
+    LoadPanelPosition()
+    SyncColors()
+    RefreshBlurStrength()
+    Persistent.font = ResolvePanelFont(PANEL_TITLE)
+    EnsureSpellIcon()
     LogInfo("loaded")
+end
+
+function Script.OnThemeUpdate()
+    SyncColors()
+    RefreshBlurStrength()
+    Persistent.font = ResolvePanelFont(PANEL_TITLE)
 end
 
 function Script.OnUpdate()
@@ -2345,7 +2755,7 @@ function Script.OnProjectile(
         return
     end
 
-    local hero = SafeValue(Heroes.GetLocal)
+    local hero = Heroes.GetLocal()
     if not hero or not SameUnit(source, hero) then
         return
     end
@@ -2360,13 +2770,13 @@ function Script.OnProjectile(
         Runtime.projMissingSince = -math.huge
     end
 
-    local now = SafeValue(GameRules.GetGameTime) or 0
+    local now = GameRules.GetGameTime() or 0
     if type(maxImpactTime) == "number" then
         Runtime.lastEta = math.max(0, maxImpactTime - now)
         Runtime.lastEtaAt = now
     elseif type(moveSpeed) == "number" and moveSpeed > 1 and target then
-        local heroPos = SafeValue(Entity.GetAbsOrigin, hero)
-        local targetPos = SafeValue(Entity.GetAbsOrigin, target)
+        local heroPos = AbsOrigin(hero)
+        local targetPos = AbsOrigin(target)
         local dist = Dist2D(heroPos, targetPos)
         if dist then
             Runtime.lastEta = dist / moveSpeed
@@ -2391,7 +2801,7 @@ function Script.OnPrepareUnitOrders(data, _player, order, _target, _position, _a
 
     -- Deliberate veto: foreign orders on the pinned gate creep break Meld sustain.
     if ShouldQuarantineCreep() and OrderNpcIsPinnedCreep(npc) then
-        local now = SafeValue(GameRules.GetGameTime) or 0
+        local now = GameRules.GetGameTime() or 0
         if now - Runtime.lastVetoLogAt >= 0.35 then
             Runtime.lastVetoLogAt = now
             Dbg(
@@ -2410,55 +2820,92 @@ end
 
 function Script.OnGameEnd()
     ResetRuntime()
+    PanelDrag.IsDragging = false
+    Persistent.wasMousePressed = false
 end
 --#endregion
 
 --#region Draw
--- Careful render path only:
---   FilledRect(start, end, color, rounding)  -- 4 args, no flags
---   Text / TextSize / LoadFont("Arial")
--- Avoid: Rect, Circle, Line, WorldToScreen, DrawFlags
+---@param font any
+---@param size number
+---@param text string
+---@return number
+---@return number
+local function MeasurePanelText(font, size, text)
+    local fallbackW = #text * size * 0.55
+    if not IsValidHandle(font) or not Render or not Render.TextSize then
+        return fallbackW, size
+    end
+    local measured = SafeValue(Render.TextSize, font, size, text)
+    local mw = measured and measured.x or nil
+    local mh = measured and measured.y or nil
+    if type(mw) == "number" and type(mh) == "number" then
+        return mw, mh
+    end
+    return fallbackW, size
+end
 
----@param ok boolean
+---@param font any
+---@param size number
+---@param text string
+---@param pos Vec2
+---@param color Color
+local function DrawPanelText(font, size, text, pos, color)
+    if not IsValidHandle(font) then
+        return
+    end
+    Render.Text(font, size, text, Vec2(pos.x + 1, pos.y + 1), Color(0, 0, 0, 140))
+    Render.Text(font, size, text, pos, color)
+end
+
+---@return boolean
+local function IsPanelHeaderTransparent()
+    local alpha = Colors.HeaderBg.a
+    if alpha == nil then
+        alpha = 255
+    end
+    return alpha < 255
+end
+
+---@param layout { x: number, y: number, width: number, titleH: number }
+---@param scale number
+local function DrawPanelBlur(layout, scale)
+    if not IsPanelHeaderTransparent() then
+        return
+    end
+    local strength = Persistent.blurStrength
+    if type(strength) ~= "number" then
+        return
+    end
+    Render.Blur(
+        Vec2(layout.x, layout.y),
+        Vec2(layout.x + layout.width, layout.y + layout.titleH),
+        strength,
+        1.0,
+        PANEL_HEADER_RADIUS * scale,
+        DRAW_FLAGS_NONE
+    )
+end
+
+---@param ok boolean|nil
 ---@return string
 local function CheckMark(ok)
-    return ok and "+" or "-"
-end
-
----@param font integer|userdata
----@param size number
----@param text string
----@return number w
----@return number h
-local function MeasureText(font, size, text)
-    local sz = SafeValue(Render.TextSize, font, size, text)
-    local w = (sz and type(sz.x) == "number" and sz.x == sz.x) and sz.x or (#text * size * 0.52)
-    local h = (sz and type(sz.y) == "number" and sz.y == sz.y) and sz.y or size
-    if w < 1 then
-        w = 80
+    if ok == true then
+        return "+"
     end
-    if h < 1 then
-        h = size
+    if ok == false then
+        return "-"
     end
-    return w, h
+    return "~"
 end
 
----@param font integer|userdata
----@param size number
----@param text string
----@param x number
----@param y number
----@param color Color
-local function DrawLabel(font, size, text, x, y, color)
-    TryCall(Render.Text, font, size, text, Vec2(x + 1, y + 1), Color(0, 0, 0, 200))
-    TryCall(Render.Text, font, size, text, Vec2(x, y), color)
-end
-
----@param font integer|userdata
-local function DrawHudPanel(font)
+---@param scale number
+---@param screenSize { x: number, y: number }
+---@param font any
+---@return table
+local function GetPanelLayout(scale, screenSize, font)
     local h = Runtime.hud
     local active = h.sustain == true
-    local ready = active and h.invis and h.creepOk and (h.cold or h.projOk)
     local stageLabel = STAGE_LABEL[Runtime.stage] or Runtime.stage
     local etaText = type(Runtime.lastEta) == "number" and string.format("%.2fs", Runtime.lastEta) or "--"
     local waitText = "--"
@@ -2469,20 +2916,12 @@ local function DrawHudPanel(font)
         end
     end
 
-    local colOk = Color(110, 210, 140, 245)
-    local colBad = Color(230, 110, 110, 245)
-    local colWarn = Color(240, 195, 90, 245)
-    local colMuted = Color(165, 175, 190, 230)
-    local colText = Color(225, 232, 245, 245)
-    local colHint = Color(130, 185, 255, 245)
-    local colTitle = ready and colOk or (active and colWarn or colMuted)
-
-    local title = string.format(
-        "Abuse Invis  %s   %s   %s",
-        active and "ON" or "OFF",
-        stageLabel,
-        h.cold and "Cold" or h.gateMode
-    )
+    local statusRight = active and stageLabel or "OFF"
+    if active and Runtime.stage == STAGE.WAITING then
+        statusRight = waitText
+    elseif active and type(Runtime.lastEta) == "number" and not h.cold then
+        statusRight = etaText
+    end
 
     local checkRows = {
         { text = string.format("[%s]  Sustain", CheckMark(active)), ok = active },
@@ -2506,12 +2945,7 @@ local function DrawHudPanel(font)
         timing = string.format("Re-enter in %s", waitText)
     elseif Runtime.waitByEta and Runtime.stage == STAGE.WAITING and type(Runtime.lastEta) == "number" then
         local startEta = GetTargetWarpEta() + (tonumber(Runtime.channelExpect) or C.CHANNEL_TWIN)
-        timing = string.format(
-            "ETA %s → go@%.1fs (warp@%.1fs)",
-            etaText,
-            startEta,
-            GetTargetWarpEta()
-        )
+        timing = string.format("ETA %s → go@%.1fs (warp@%.1fs)", etaText, startEta, GetTargetWarpEta())
     else
         timing = string.format("Target warp ETA %.1fs   now %s", GetTargetWarpEta(), etaText)
     end
@@ -2519,93 +2953,229 @@ local function DrawHudPanel(font)
     local dbgLine = nil
     if IsDebugLogsOn() and Runtime.lastDebug ~= "" then
         dbgLine = Runtime.lastDebug
-        if #dbgLine > 72 then
-            dbgLine = dbgLine:sub(1, 72) .. "..."
+        if #dbgLine > 64 then
+            dbgLine = dbgLine:sub(1, 64) .. "..."
         end
         dbgLine = "dbg: " .. dbgLine
     end
 
-    local titleW, titleH = MeasureText(font, C.HUD_TITLE_SIZE, title)
-    local maxW = titleW
-    local totalH = titleH + C.HUD_GAP + 2
+    local titleH = PANEL_HEADER_HEIGHT * scale
+    local padX = PANEL_HEADER_PAD_X * scale
+    local bodyPad = PANEL_BODY_PAD * scale
+    local rowGap = PANEL_ROW_GAP * scale
+    local titleFontSize = PANEL_HEADER_TEXT_SIZE * scale
+    local bodyFontSize = PANEL_BODY_TEXT_SIZE * scale
+    local hintFontSize = PANEL_HINT_TEXT_SIZE * scale
+    local iconSize = PANEL_HEADER_ICON_SIZE * scale
+    local iconGap = PANEL_HEADER_ICON_GAP * scale
+    local hasIcon = type(Persistent.spellIcon) == "number"
 
+    local titleW, titleTextH = MeasurePanelText(font, titleFontSize, PANEL_TITLE)
+    local statusW, statusH = MeasurePanelText(font, titleFontSize, statusRight)
+    local headerContentW = (hasIcon and (iconSize + iconGap) or 0) + titleW + iconGap + statusW
+    local headerW = padX + headerContentW + padX
+
+    local maxBodyW = 0
+    local bodyH = bodyPad
     for i = 1, #checkRows do
-        local w, hh = MeasureText(font, C.HUD_LINE_SIZE, checkRows[i].text)
-        if w > maxW then
-            maxW = w
-        end
-        totalH = totalH + hh + C.HUD_GAP
+        local w, hh = MeasurePanelText(font, bodyFontSize, checkRows[i].text)
         checkRows[i].h = hh
+        if w > maxBodyW then
+            maxBodyW = w
+        end
+        bodyH = bodyH + hh + rowGap
     end
+    local timingW, timingH = MeasurePanelText(font, bodyFontSize, timing)
+    if timingW > maxBodyW then
+        maxBodyW = timingW
+    end
+    bodyH = bodyH + timingH + rowGap
 
-    local timingW, timingH = MeasureText(font, C.HUD_LINE_SIZE, timing)
-    if timingW > maxW then
-        maxW = timingW
+    local hintW, hintH = MeasurePanelText(font, hintFontSize, hint)
+    if hintW > maxBodyW then
+        maxBodyW = hintW
     end
-    totalH = totalH + timingH + C.HUD_GAP
-
-    local hintW, hintH = MeasureText(font, C.HUD_HINT_SIZE, hint)
-    if hintW > maxW then
-        maxW = hintW
-    end
-    totalH = totalH + hintH
+    bodyH = bodyH + hintH
 
     local dbgH = 0
     if dbgLine then
         local dbgW
-        dbgW, dbgH = MeasureText(font, C.HUD_HINT_SIZE, dbgLine)
-        if dbgW > maxW then
-            maxW = dbgW
+        dbgW, dbgH = MeasurePanelText(font, hintFontSize, dbgLine)
+        if dbgW > maxBodyW then
+            maxBodyW = dbgW
         end
-        totalH = totalH + C.HUD_GAP + dbgH
+        bodyH = bodyH + rowGap + dbgH
+    end
+    bodyH = bodyH + bodyPad
+
+    local width = math.max(headerW, maxBodyW + bodyPad * 2, PANEL_MIN_W * scale)
+    local height = titleH + bodyH
+
+    local x = PanelConfig.X
+    if type(x) ~= "number" or x < 0 then
+        x = math.floor((screenSize.x - width) * 0.5 + 0.5)
+    else
+        x = Clamp(x, 0, math.max(0, screenSize.x - width))
+    end
+    local y = Clamp(PanelConfig.Y or 112, 0, math.max(0, screenSize.y - height))
+
+    return {
+        x = x,
+        y = y,
+        width = width,
+        height = height,
+        titleH = titleH,
+        padX = padX,
+        bodyPad = bodyPad,
+        rowGap = rowGap,
+        titleFontSize = titleFontSize,
+        bodyFontSize = bodyFontSize,
+        hintFontSize = hintFontSize,
+        iconSize = iconSize,
+        iconGap = iconGap,
+        hasIcon = hasIcon,
+        titleW = titleW,
+        titleTextH = titleTextH,
+        statusRight = statusRight,
+        statusW = statusW,
+        statusH = statusH,
+        checkRows = checkRows,
+        timing = timing,
+        timingH = timingH,
+        hint = hint,
+        hintH = hintH,
+        dbgLine = dbgLine,
+        dbgH = dbgH,
+        active = active,
+        ready = active and h.invis and h.creepOk and (h.cold or h.projOk),
+    }
+end
+
+---@param layout table
+---@param font any
+---@param scale number
+local function DrawHudPanel(layout, font, scale)
+    local radius = PANEL_HEADER_RADIUS * scale
+
+    DrawPanelBlur(layout, scale)
+
+    Render.FilledRect(
+        Vec2(layout.x, layout.y),
+        Vec2(layout.x + layout.width, layout.y + layout.titleH),
+        Colors.HeaderBg,
+        radius,
+        DRAW_FLAGS_NONE
+    )
+
+    local contentH = math.max(
+        layout.titleTextH,
+        layout.hasIcon and layout.iconSize or 0,
+        layout.statusH
+    )
+    local contentY = layout.y + math.floor((layout.titleH - contentH) * 0.5 + 0.5)
+    local textX = layout.x + layout.padX
+
+    local spellIcon = Persistent.spellIcon
+    if layout.hasIcon and type(spellIcon) == "number" then
+        local iconY = contentY + math.floor((contentH - layout.iconSize) * 0.5 + 0.5)
+        Render.Image(
+            spellIcon,
+            Vec2(textX, iconY),
+            Vec2(layout.iconSize, layout.iconSize),
+            Color(255, 255, 255, 255),
+            4 * scale,
+            DRAW_FLAGS_NONE
+        )
+        textX = textX + layout.iconSize + layout.iconGap
     end
 
-    maxW = Clamp(maxW, C.HUD_MIN_W, C.HUD_MAX_W)
-    totalH = Clamp(totalH, 40, 320)
+    local titleY = contentY + math.floor((contentH - layout.titleTextH) * 0.5 + 0.5)
+    local titleColor = layout.ready and Colors.TextOk
+        or (layout.active and Colors.TextWarn or Colors.TextHeader)
+    DrawPanelText(font, layout.titleFontSize, PANEL_TITLE, Vec2(textX, titleY), titleColor)
 
-    local x = C.HUD_X
-    local y = C.HUD_Y
-    local left = Vec2(x, y)
-    local right = Vec2(x + maxW + C.HUD_PAD_X * 2 + C.HUD_ACCENT_W, y + totalH + C.HUD_PAD_Y * 2)
+    local statusX = layout.x + layout.width - layout.padX - layout.statusW
+    local statusY = contentY + math.floor((contentH - layout.statusH) * 0.5 + 0.5)
+    local statusColor = layout.active and Colors.TextStatus or Colors.TextMuted
+    DrawPanelText(font, layout.titleFontSize, layout.statusRight, Vec2(statusX, statusY), statusColor)
 
-    -- Background only (4-arg FilledRect — proven safe in other scripts).
-    if Render.FilledRect then
-        TryCall(Render.FilledRect, left, right, Color(12, 14, 20, 215), C.HUD_RADIUS)
-        local accent = ready and colOk or (active and colWarn or Color(90, 110, 140, 220))
-        TryCall(
-            Render.FilledRect,
-            Vec2(x, y),
-            Vec2(x + C.HUD_ACCENT_W, y + totalH + C.HUD_PAD_Y * 2),
-            accent,
-            2
+    local bodyTop = layout.y + layout.titleH
+    Render.FilledRect(
+        Vec2(layout.x, bodyTop),
+        Vec2(layout.x + layout.width, layout.y + layout.height),
+        Colors.CellBg,
+        0,
+        DRAW_FLAGS_NONE
+    )
+
+    local cursorY = bodyTop + layout.bodyPad
+    local bodyX = layout.x + layout.bodyPad
+    for i = 1, #layout.checkRows do
+        local row = layout.checkRows[i]
+        local color = Colors.TextMuted
+        if row.ok == true then
+            color = Colors.TextOk
+        elseif row.ok == false then
+            color = Colors.TextBad
+        else
+            color = Colors.TextWarn
+        end
+        DrawPanelText(font, layout.bodyFontSize, row.text, Vec2(bodyX, cursorY), color)
+        cursorY = cursorY + (row.h or layout.bodyFontSize) + layout.rowGap
+    end
+
+    DrawPanelText(font, layout.bodyFontSize, layout.timing, Vec2(bodyX, cursorY), Colors.TextBody)
+    cursorY = cursorY + layout.timingH + layout.rowGap
+    DrawPanelText(font, layout.hintFontSize, layout.hint, Vec2(bodyX, cursorY), Colors.TextHint)
+    if layout.dbgLine then
+        cursorY = cursorY + layout.hintH + layout.rowGap
+        DrawPanelText(
+            font,
+            layout.hintFontSize,
+            layout.dbgLine,
+            Vec2(bodyX, cursorY),
+            Color(200, 170, 255, 230)
         )
     end
+end
 
-    local textX = x + C.HUD_PAD_X + C.HUD_ACCENT_W
-    local cursorY = y + C.HUD_PAD_Y
+---@param layout table
+---@param screenSize { x: number, y: number }
+---@param scale number
+---@param font any
+---@return table
+local function UpdatePanelDrag(layout, screenSize, scale, font)
+    local mx, my = GetMousePos()
+    local isDown = IsLmbDown()
+    local isClicked = isDown and not Persistent.wasMousePressed
+    local captured = Input.IsInputCaptured() == true
 
-    DrawLabel(font, C.HUD_TITLE_SIZE, title, textX, cursorY, colTitle)
-    cursorY = cursorY + titleH + C.HUD_GAP + 2
+    local isOverHeader = mx ~= nil
+        and my ~= nil
+        and mx >= layout.x
+        and mx <= layout.x + layout.width
+        and my >= layout.y
+        and my <= layout.y + layout.titleH
 
-    for i = 1, #checkRows do
-        local row = checkRows[i]
-        local color = colMuted
-        if row.ok == true then
-            color = colOk
-        elseif row.ok == false then
-            color = colBad
+    if isClicked and isOverHeader and not captured then
+        PanelDrag.IsDragging = true
+        PanelDrag.OffsetX = mx - layout.x
+        PanelDrag.OffsetY = my - layout.y
+    elseif not isDown then
+        if PanelDrag.IsDragging then
+            SavePanelPosition()
         end
-        DrawLabel(font, C.HUD_LINE_SIZE, row.text, textX, cursorY, color)
-        cursorY = cursorY + (row.h or C.HUD_LINE_SIZE) + C.HUD_GAP
+        PanelDrag.IsDragging = false
     end
 
-    DrawLabel(font, C.HUD_LINE_SIZE, timing, textX, cursorY, colText)
-    cursorY = cursorY + timingH + C.HUD_GAP
-    DrawLabel(font, C.HUD_HINT_SIZE, hint, textX, cursorY, colHint)
-    if dbgLine then
-        cursorY = cursorY + hintH + C.HUD_GAP
-        DrawLabel(font, C.HUD_HINT_SIZE, dbgLine, textX, cursorY, Color(200, 170, 255, 230))
+    if PanelDrag.IsDragging and mx and my then
+        PanelConfig.X = math.max(0, math.min(screenSize.x - layout.width, mx - PanelDrag.OffsetX))
+        PanelConfig.Y = math.max(0, math.min(screenSize.y - layout.height, my - PanelDrag.OffsetY))
+        layout = GetPanelLayout(scale, screenSize, font)
     end
+
+    Persistent.wasMousePressed = isDown
+    return layout
 end
 
 function Script.OnDraw()
@@ -2613,22 +3183,32 @@ function Script.OnDraw()
         return
     end
     if not IsHudOn() then
+        PanelDrag.IsDragging = false
         return
     end
-    -- Panel is for TA only — show whenever you play her (Enable not required).
     if not IsLocalTemplarAssassin() then
+        PanelDrag.IsDragging = false
         return
     end
-    if not Render or not Render.Text or not Render.LoadFont then
-        return
-    end
-
-    local font = EnsureFont()
-    if font == nil or not IsValidHandle(font) then
+    if Menu.VisualsIsEnabled() == false then
         return
     end
 
-    DrawHudPanel(font)
+    local font = GetPanelFont()
+    if not IsValidHandle(font) then
+        return
+    end
+
+    local scale = (Menu.Scale() or 100) / 100
+    local screenSize = Render.ScreenSize()
+    if not screenSize or type(screenSize.x) ~= "number" or screenSize.x <= 1 or screenSize.y <= 1 then
+        return
+    end
+
+    EnsureSpellIcon()
+    local layout = GetPanelLayout(scale, screenSize, font)
+    layout = UpdatePanelDrag(layout, screenSize, scale, font)
+    DrawHudPanel(layout, font, scale)
 end
 --#endregion
 

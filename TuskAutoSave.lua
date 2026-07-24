@@ -43,6 +43,15 @@ local PANEL_HEADER_TEXT_SIZE = 14
 local PANEL_HEADER_ICON_SIZE = 14
 local PANEL_HEADER_ICON_GAP = 6
 local PANEL_HEADER_RADIUS = 5
+local PANEL_BODY_PAD_Y = 6
+local PANEL_CELL_W = 44
+local PANEL_CELL_H = 26
+local PANEL_CELL_SPACING = 6
+local PANEL_CELL_RADIUS = 3
+local PANEL_CHIP_ENABLED_ALPHA = 255
+local PANEL_CHIP_DISABLED_ALPHA = 105
+local PANEL_CHIP_MIN_BORDER_LUMA = 90
+local PANEL_MIN_WIDTH = 110
 local PANEL_BLUR_BASE_STRENGTH = 2.5
 local PANEL_TITLE_TEXT = "Auto Save"
 
@@ -255,8 +264,9 @@ local PanelDrag = {
 local Colors = {
     HeaderBg = Color(18, 18, 22, 255),
     TextHeader = Color(245, 247, 250, 255),
-    BorderEnabled = Color(191, 140, 255, 255),
+    BorderEnabled = Color(180, 180, 190, 255),
     CellBg = Color(12, 12, 16, 255),
+    Quiet = Color(40, 40, 50, 200),
 }
 
 local LangState = {
@@ -2462,22 +2472,30 @@ local function PickAccentBorderColor()
     local comboItemActive = TryGetThemeColor("combo_item_active")
     local primary = TryGetThemeColor("primary")
     local indicationActive = TryGetThemeColor("indication_active")
+    local multiselectSelected = TryGetThemeColor("multiselect_item_selected")
+    local buttonActive = TryGetThemeColor("button_active_background")
 
-    local borderSource = enabledSwitchBg or comboItemActive or primary or indicationActive
+    local borderSource = enabledSwitchBg
+        or comboItemActive
+        or primary
+        or indicationActive
+        or multiselectSelected
+        or buttonActive
     if not borderSource then
         return nil
     end
 
     local candidates = {borderSource}
-    if comboItemActive and comboItemActive ~= borderSource then
-        candidates[#candidates + 1] = comboItemActive
+    local function AddCandidate(candidate)
+        if candidate and candidate ~= borderSource then
+            candidates[#candidates + 1] = candidate
+        end
     end
-    if primary and primary ~= borderSource then
-        candidates[#candidates + 1] = primary
-    end
-    if indicationActive and indicationActive ~= borderSource then
-        candidates[#candidates + 1] = indicationActive
-    end
+    AddCandidate(comboItemActive)
+    AddCandidate(primary)
+    AddCandidate(indicationActive)
+    AddCandidate(multiselectSelected)
+    AddCandidate(buttonActive)
 
     local best = borderSource
     local bestScore = (best.r or 0) + (best.g or 0) + (best.b or 0)
@@ -2513,13 +2531,18 @@ local function SyncColors()
     local headerBg = TryGetThemeColorAny({
         "additional_background",
         "popup_background",
+        "main_background",
         "background",
+        "group_background",
     })
     if headerBg then
         Colors.HeaderBg = headerBg
     end
 
-    local textHeader = TryGetThemeColor("primary_widgets_text")
+    local textHeader = TryGetThemeColorAny({
+        "primary_widgets_text",
+        "active_widgets_text",
+    })
     if textHeader then
         Colors.TextHeader = textHeader
     end
@@ -2528,6 +2551,43 @@ local function SyncColors()
     if borderSource then
         Colors.BorderEnabled = borderSource
     end
+
+    local cellBg = TryGetThemeColorAny({
+        "group_background",
+        "button_background",
+        "combo_frame",
+        "input_text_bg",
+    })
+    if cellBg then
+        -- Keep chips opaque so hero icons stay readable on glass themes.
+        Colors.CellBg = Color(cellBg.r, cellBg.g, cellBg.b, 255)
+    end
+
+    local quiet = TryGetThemeColorAny({
+        "indication_inactive",
+        "disabled_switch_background",
+        "multiselect_item",
+    })
+    if quiet then
+        Colors.Quiet = quiet
+    end
+end
+
+local function ColorLuminance(color)
+    if not color then
+        return 0
+    end
+    return 0.299 * (color.r or 0) + 0.587 * (color.g or 0) + 0.114 * (color.b or 0)
+end
+
+local function GetChipBorderColor()
+    local accent = Colors.BorderEnabled
+    if ColorLuminance(accent) >= PANEL_CHIP_MIN_BORDER_LUMA then
+        return Color(accent.r, accent.g, accent.b, 255)
+    end
+
+    local text = Colors.TextHeader
+    return Color(text.r, text.g, text.b, 255)
 end
 
 SyncColors()
@@ -2788,12 +2848,12 @@ local function DrawPanelText(size, text, pos, color)
 end
 
 local function GetPanelLayout(scale, numAllies, screenSize)
-    local cellW = 44 * scale
-    local cellH = 26 * scale
-    local cellSpacing = 6 * scale
+    local cellW = PANEL_CELL_W * scale
+    local cellH = PANEL_CELL_H * scale
+    local cellSpacing = PANEL_CELL_SPACING * scale
     local titleH = PANEL_HEADER_HEIGHT * scale
     local padX = PANEL_HEADER_PAD_X * scale
-    local padY = 6 * scale
+    local padY = PANEL_BODY_PAD_Y * scale
     local titleText = PANEL_TITLE_TEXT
     local titleFontSize = PANEL_HEADER_TEXT_SIZE * scale
     local hasTitleIcon = IsPanelHeaderFaIconAvailable()
@@ -2807,7 +2867,7 @@ local function GetPanelLayout(scale, numAllies, screenSize)
     local cellsTotalW = numAllies * cellW + math.max(0, numAllies - 1) * cellSpacing
     local headerW = padX + titleContentW + padX
     local heroesW = padX + cellsTotalW + padX
-    local width = math.max(headerW, heroesW, 110 * scale)
+    local width = math.max(headerW, heroesW, PANEL_MIN_WIDTH * scale)
     local height = titleH + padY + cellH + padY
 
     local x = math.max(0, math.min(screenSize.x - width, PanelConfig.X))
@@ -2830,7 +2890,7 @@ local function GetPanelLayout(scale, numAllies, screenSize)
         x = x,
         y = y,
         rowY = y + titleH + padY,
-        cellsStartX = x + padX,
+        cellsStartX = x + math.floor((width - cellsTotalW) * 0.5 + 0.5),
     }
 end
 
@@ -2873,7 +2933,6 @@ function Script.OnDraw()
     if not Engine.IsInGame() or not UI.Enabled:Get() or not UI.DrawPanel:Get() then
         return
     end
-    SyncColors()
     if Menu and Menu.VisualsIsEnabled and not SafeCall(Menu.VisualsIsEnabled) then
         return
     end
@@ -2940,6 +2999,7 @@ function Script.OnDraw()
     local titleContentY = layout.y + math.floor((layout.titleH - titleContentH) * 0.5 + 0.5)
     local textX = layout.x + layout.padX
     local textY = titleContentY + math.floor((titleContentH - titleSizeY) * 0.5 + 0.5)
+    local cellRadius = PANEL_CELL_RADIUS * scale
 
     DrawPanelBlur(layout, scale)
 
@@ -2966,16 +3026,16 @@ function Script.OnDraw()
         Vec2(textX, textY),
         Colors.TextHeader)
 
+    local borderColor = GetChipBorderColor()
+
     for i, cleanName in ipairs(State.matchAllyNames) do
         local cellX = layout.cellsStartX + (i - 1) * (layout.cellW + layout.cellSpacing)
         local allyHero = State.cachedAllyEntities[cleanName]
         local enabled = IsAllySaveEnabled(cleanName)
 
-        local imgAlpha = enabled and 255 or 110
+        -- Keep icon alphas theme-independent so translucent accents cannot wash out the toggle.
+        local imgAlpha = enabled and PANEL_CHIP_ENABLED_ALPHA or PANEL_CHIP_DISABLED_ALPHA
         local grayscale = enabled and 0.0 or 1.0
-        local borderColor = enabled
-            and Color(Colors.BorderEnabled.r, Colors.BorderEnabled.g, Colors.BorderEnabled.b, 255)
-            or Color(Colors.BorderEnabled.r, Colors.BorderEnabled.g, Colors.BorderEnabled.b, 110)
 
         local isCellHovered = isCursorValid
             and mx >= cellX and mx <= cellX + layout.cellW
@@ -2990,7 +3050,7 @@ function Script.OnDraw()
             Vec2(cellX, layout.rowY),
             Vec2(cellX + layout.cellW, layout.rowY + layout.cellH),
             Colors.CellBg,
-            5 * scale)
+            cellRadius)
 
         if imgHandle then
             Render.Image(
@@ -2998,7 +3058,7 @@ function Script.OnDraw()
                 Vec2(cellX, layout.rowY),
                 Vec2(layout.cellW, layout.cellH),
                 Color(255, 255, 255, imgAlpha),
-                5 * scale,
+                cellRadius,
                 Enum.DrawFlags.None,
                 Vec2(0, 0),
                 Vec2(1, 1),
@@ -3010,9 +3070,9 @@ function Script.OnDraw()
                 Vec2(cellX, layout.rowY),
                 Vec2(cellX + layout.cellW, layout.rowY + layout.cellH),
                 borderColor,
-                5 * scale,
+                cellRadius,
                 Enum.DrawFlags.None,
-                1.0)
+                1.3)
         end
 
         if isCellHovered and clickTriggered and not PanelDrag.IsDragging then
@@ -3355,8 +3415,6 @@ function Script.OnThemeUpdate()
 end
 
 function Script.OnUpdate()
-    SyncColors()
-
     if not Engine.IsInGame() then
         return
     end

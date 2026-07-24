@@ -55,13 +55,11 @@ local DEBUG_LOG_INTERVAL = 0.45
 local KICK_UNAVAILABLE_LOG_INTERVAL = 1.50
 local ABILITY_SCAN_MAX_INDEX = 24
 local TARGET_VISUAL_UPDATE_INTERVAL = 0.04
-local TARGET_VISUAL_LANDING_RADIUS = 175
-local TARGET_VISUAL_ALLY_RADIUS = 130
-
-local PARTICLE_TARGET_RING = "particles/units/heroes/hero_tusk/tusk_snowball_target.vpcf"
-local PARTICLE_KICK_PATH = "particles/units/heroes/hero_hoodwink/hoodwink_sharpshooter_range_finder.vpcf"
-local PARTICLE_LANDING_RING = "particles/units/heroes/hero_snapfire/hero_snapfire_ultimate_calldown.vpcf"
-local PARTICLE_ALLY_RING = "particles/ui_mouseactions/range_display.vpcf"
+local PREVIEW_LANDING_RADIUS = 140
+local PREVIEW_ALLY_RADIUS = 70
+local PREVIEW_RING_SEGMENTS = 28
+local PREVIEW_ARROW_LEN = 18
+local PREVIEW_ARROW_WIDTH = 10
 
 local BLINK_ITEMS = {
     "item_blink",
@@ -83,6 +81,15 @@ local PANEL_HEADER_TEXT_SIZE = 14
 local PANEL_HEADER_ICON_SIZE = 14
 local PANEL_HEADER_ICON_GAP = 6
 local PANEL_HEADER_RADIUS = 5
+local PANEL_BODY_PAD_Y = 6
+local PANEL_CELL_W = 44
+local PANEL_CELL_H = 26
+local PANEL_CELL_SPACING = 6
+local PANEL_CELL_RADIUS = 3
+local PANEL_CHIP_ENABLED_ALPHA = 255
+local PANEL_CHIP_DISABLED_ALPHA = 105
+local PANEL_CHIP_MIN_BORDER_LUMA = 90
+local PANEL_MIN_WIDTH = 110
 local PANEL_TITLE_SAMPLE = "Kick To Team"
 local PANEL_BLUR_BASE_STRENGTH = 2.5
 
@@ -92,6 +99,7 @@ local Icons = {
     gear = "\u{f013}",
     bind = "\u{e1c1}",
     bug = "\u{f188}",
+    draw = "\u{f2d0}",
 }
 
 --#endregion
@@ -116,11 +124,10 @@ local State = {
     lastDebugMessage = "",
     lastKickUnavailableLogTime = -100,
     lastKickUnavailableReason = "",
-    targetVisualEnemyIndex = nil,
-    targetVisualParticles = {},
     lastTargetVisualTime = -100,
-    targetVisualPathSignature = "",
-    cachedAllyNames = {},
+    kickPreview = nil,
+    matchAllyNames = {},
+    matchAllySet = {},
     cachedAllyEntities = {},
     cachedAllyUnitNames = {},
     allyEnabled = {},
@@ -145,6 +152,7 @@ local Colors = {
     TextHeader = Color(245, 247, 250, 255),
     BorderEnabled = Color(191, 140, 255, 255),
     CellBg = Color(12, 12, 16, 255),
+    Quiet = Color(90, 90, 100, 180),
 }
 
 local LangState = {
@@ -751,13 +759,18 @@ local function SyncColors()
     local headerBg = TryGetThemeColorAny({
         "additional_background",
         "popup_background",
+        "main_background",
         "background",
+        "group_background",
     })
     if headerBg then
         Colors.HeaderBg = headerBg
     end
 
-    local textHeader = TryGetThemeColor("primary_widgets_text")
+    local textHeader = TryGetThemeColorAny({
+        "primary_widgets_text",
+        "active_widgets_text",
+    })
     if textHeader then
         Colors.TextHeader = textHeader
     end
@@ -766,6 +779,49 @@ local function SyncColors()
     if borderSource then
         Colors.BorderEnabled = borderSource
     end
+
+    local cellBg = TryGetThemeColorAny({
+        "group_background",
+        "button_background",
+        "combo_frame",
+        "input_text_bg",
+    })
+    if cellBg then
+        Colors.CellBg = Color(cellBg.r, cellBg.g, cellBg.b, 255)
+    end
+
+    local quiet = TryGetThemeColorAny({
+        "indication_inactive",
+        "disabled_switch_background",
+        "multiselect_item",
+    })
+    if quiet then
+        Colors.Quiet = quiet
+    end
+end
+
+local function ColorLuminance(color)
+    if not color then
+        return 0
+    end
+    return 0.299 * (color.r or 0) + 0.587 * (color.g or 0) + 0.114 * (color.b or 0)
+end
+
+local function GetChipBorderColor()
+    local accent = Colors.BorderEnabled
+    if ColorLuminance(accent) >= PANEL_CHIP_MIN_BORDER_LUMA then
+        return Color(accent.r, accent.g, accent.b, 255)
+    end
+
+    local text = Colors.TextHeader
+    return Color(text.r, text.g, text.b, 255)
+end
+
+local function ColorWithAlpha(color, alpha)
+    if not color then
+        return Color(255, 255, 255, alpha or 255)
+    end
+    return Color(color.r or 255, color.g or 255, color.b or 255, alpha or 255)
 end
 
 SyncColors()
@@ -844,6 +900,10 @@ local function InitializeUI()
     WithTooltip(ui.DrawPanel, L(
         "HUD panel to choose allies and drag the header to reposition.",
         "HUD-панель выбора союзников. Перетаскивайте заголовок для перемещения."))
+    ui.DrawPreview = gear:Switch(L("Draw Preview", "Показывать превью пинка"), true, Icons.draw)
+    WithTooltip(ui.DrawPreview, L(
+        "Minimal kick direction overlay toward selected allies.",
+        "Минималистичный оверлей направления пинка к выбранным союзникам."))
     ui.Debug = gear:Switch(L("Debug Log", "Debug логи"), false)
     MenuIcon(ui.Debug, Icons.bug)
     ui.PanelX = gear:Slider("HUD X", 0, maxX, math.min(200, maxX))
@@ -855,6 +915,7 @@ local function InitializeUI()
         ui.Mode,
         ui.CastKey,
         ui.DrawPanel,
+        ui.DrawPreview,
         ui.Debug,
     }
 
@@ -1039,12 +1100,12 @@ local function MeasurePanelSpellIconSize(scale, titleSizeY)
 end
 
 local function GetPanelLayout(scale, numAllies, screenSize)
-    local cellW = 44 * scale
-    local cellH = 26 * scale
-    local cellSpacing = 6 * scale
+    local cellW = PANEL_CELL_W * scale
+    local cellH = PANEL_CELL_H * scale
+    local cellSpacing = PANEL_CELL_SPACING * scale
     local titleH = PANEL_HEADER_HEIGHT * scale
     local padX = PANEL_HEADER_PAD_X * scale
-    local padY = 6 * scale
+    local padY = PANEL_BODY_PAD_Y * scale
     local titleText = GetPanelTitleText()
     local titleFontSize = PANEL_HEADER_TEXT_SIZE * scale
     EnsureSpellIcon()
@@ -1059,7 +1120,7 @@ local function GetPanelLayout(scale, numAllies, screenSize)
     local cellsTotalW = numAllies * cellW + math.max(0, numAllies - 1) * cellSpacing
     local headerW = padX + titleContentW + padX
     local heroesW = padX + cellsTotalW + padX
-    local width = math.max(headerW, heroesW, 110 * scale)
+    local width = math.max(headerW, heroesW, PANEL_MIN_WIDTH * scale)
     local height = titleH + padY + cellH + padY
 
     local x = math.max(0, math.min(screenSize.x - width, PanelConfig.X))
@@ -1082,7 +1143,7 @@ local function GetPanelLayout(scale, numAllies, screenSize)
         x = x,
         y = y,
         rowY = y + titleH + padY,
-        cellsStartX = x + padX,
+        cellsStartX = x + math.floor((width - cellsTotalW) * 0.5 + 0.5),
     }
 end
 
@@ -1212,9 +1273,7 @@ local function SyncAllyTargets(myHero, now)
     end
     State.lastAllySyncTime = now
 
-    local names = {}
     local entities = {}
-    local unitNames = {}
     local allHeroes = Heroes.GetAll()
 
     for i = 1, #allHeroes do
@@ -1223,9 +1282,14 @@ local function SyncAllyTargets(myHero, now)
             local unitName = NPC.GetUnitName(other)
             local cleanName = CleanHeroName(unitName)
             if cleanName ~= "" then
-                names[#names + 1] = cleanName
+                if not State.matchAllySet[cleanName] then
+                    State.matchAllySet[cleanName] = true
+                    State.matchAllyNames[#State.matchAllyNames + 1] = cleanName
+                end
+                if unitName and unitName ~= "" then
+                    State.cachedAllyUnitNames[cleanName] = unitName
+                end
                 entities[cleanName] = other
-                unitNames[cleanName] = unitName
                 if State.allyEnabled[cleanName] == nil then
                     IsAllyKickEnabled(cleanName)
                 end
@@ -1233,10 +1297,8 @@ local function SyncAllyTargets(myHero, now)
         end
     end
 
-    table.sort(names)
-    State.cachedAllyNames = names
+    table.sort(State.matchAllyNames)
     State.cachedAllyEntities = entities
-    State.cachedAllyUnitNames = unitNames
 end
 
 local function GetEntityIndexSafe(unit)
@@ -3057,162 +3119,98 @@ local function LogKickUnavailable(reason)
     LogDebug("Bind blocked | Walrus Kick unavailable: " .. reason, true)
 end
 
---#region Target Visuals
+--#region Kick Preview
 
-local function GetParticleAttachType(name, fallback)
-    if Enum and Enum.ParticleAttachment and Enum.ParticleAttachment[name] ~= nil then
-        return Enum.ParticleAttachment[name]
+local function ClearKickPreview()
+    State.kickPreview = nil
+end
+
+local function WorldToScreenPos(worldPos)
+    if not worldPos or not Render or not Render.WorldToScreen then
+        return nil, false
     end
 
-    return fallback
+    local ok, screenPos, visible = pcall(Render.WorldToScreen, worldPos)
+    if not ok or not screenPos then
+        return nil, false
+    end
+
+    if type(screenPos.x) ~= 'number' or type(screenPos.y) ~= 'number' then
+        return nil, false
+    end
+
+    return screenPos, visible ~= false
 end
 
-local PARTICLE_ATTACH_WORLD = GetParticleAttachType("PATTACH_WORLDORIGIN", 8)
-local PARTICLE_ATTACH_FOLLOW = GetParticleAttachType("PATTACH_ABSORIGIN_FOLLOW", 1)
-
-local function CanUseTargetParticles()
-    return Particle and Particle.Create and Particle.Destroy and Particle.SetControlPoint
-end
-
-local function ClearTargetSelectionVisuals()
-    State.targetVisualPathSignature = ""
-
-    if not CanUseTargetParticles() then
-        State.targetVisualEnemyIndex = nil
-        State.targetVisualParticles = {}
+local function DrawPreviewLine(from, to, coreColor, glowColor, coreWidth, glowWidth)
+    if not from or not to or not Render or not Render.Line then
         return
     end
 
-    for _, particleIndex in pairs(State.targetVisualParticles) do
-        if particleIndex then
-            SafeCall(Particle.Destroy, particleIndex)
-        end
+    if glowWidth and glowWidth > 0 and glowColor then
+        Render.Line(from, to, glowColor, glowWidth)
     end
-
-    State.targetVisualEnemyIndex = nil
-    State.targetVisualParticles = {}
-    State.targetVisualPathSignature = ""
+    Render.Line(from, to, coreColor, coreWidth or 1.5)
 end
 
-local function DestroyTargetVisualSlot(slotName)
-    local particleIndex = State.targetVisualParticles[slotName]
-    if particleIndex and CanUseTargetParticles() then
-        SafeCall(Particle.Destroy, particleIndex)
-    end
-
-    State.targetVisualParticles[slotName] = nil
-end
-
-local function CreateOwnedWorldParticle(hero, particlePath)
-    if not CanUseTargetParticles() or not hero or not particlePath then
-        return nil
-    end
-
-    local particleIndex = SafeCall(Particle.Create, particlePath, PARTICLE_ATTACH_WORLD, hero)
-    if not particleIndex or particleIndex <= 0 then
-        return nil
-    end
-
-    return particleIndex
-end
-
-local function CreateEntityFollowParticle(entity, particlePath)
-    if not CanUseTargetParticles() or not entity or not particlePath then
-        return nil
-    end
-
-    local particleIndex = SafeCall(Particle.Create, particlePath, PARTICLE_ATTACH_FOLLOW, entity)
-    if not particleIndex or particleIndex <= 0 then
-        return nil
-    end
-
-    return particleIndex
-end
-
-local function EnsureTargetVisualParticle(slotName, hero, particlePath)
-    local particleIndex = State.targetVisualParticles[slotName]
-    if particleIndex then
-        return particleIndex
-    end
-
-    particleIndex = CreateOwnedWorldParticle(hero, particlePath)
-    if particleIndex then
-        State.targetVisualParticles[slotName] = particleIndex
-    end
-
-    return particleIndex
-end
-
-local function UpdateTargetEnemyRing(enemy)
-    local enemyIndex = GetEntityIndexSafe(enemy)
-    if State.targetVisualEnemyIndex ~= enemyIndex then
-        DestroyTargetVisualSlot("enemyRing")
-        State.targetVisualEnemyIndex = enemyIndex
-
-        local particleIndex = CreateEntityFollowParticle(enemy, PARTICLE_TARGET_RING)
-        if particleIndex then
-            State.targetVisualParticles.enemyRing = particleIndex
-        end
-    end
-end
-
-local function BuildTargetPathSignature(startPos, endPos)
-    return string.format(
-        "%.0f:%.0f:%.0f:%.0f",
-        startPos.x,
-        startPos.y,
-        endPos.x,
-        endPos.y
-    )
-end
-
-local function UpdateTargetPathParticle(hero, startPos, endPos)
-    local signature = BuildTargetPathSignature(startPos, endPos)
-    if State.targetVisualPathSignature == signature then
+local function DrawWorldRing(worldPos, radius, color, segments)
+    if not worldPos or not color or not Render then
         return
     end
 
-    State.targetVisualPathSignature = signature
+    segments = segments or PREVIEW_RING_SEGMENTS
+    local prevScreen, prevVisible = nil, false
+    local ground = MakeGroundPosition(worldPos) or worldPos
 
-    local particleIndex = EnsureTargetVisualParticle("kickPath", hero, PARTICLE_KICK_PATH)
-    if not particleIndex then
-        return
-    end
-
-    local groundStart = MakeGroundPosition(startPos)
-    local groundEnd = MakeGroundPosition(endPos)
-    if not groundStart or not groundEnd then
-        return
-    end
-
-    local direction = MakeDirection2D(groundStart, groundEnd)
-    local length = groundStart:Distance2D(groundEnd)
-
-    SafeCall(Particle.SetControlPoint, particleIndex, 0, groundStart)
-    SafeCall(Particle.SetControlPoint, particleIndex, 1, groundEnd)
-
-    if direction then
-        SafeCall(
-            Particle.SetControlPoint,
-            particleIndex,
-            2,
-            Vector(direction.x * length, direction.y * length, 0)
+    for i = 0, segments do
+        local angle = (i / segments) * math.pi * 2
+        local point = Vector(
+            ground.x + math.cos(angle) * radius,
+            ground.y + math.sin(angle) * radius,
+            ground.z
         )
+        local screen, visible = WorldToScreenPos(point)
+        if visible and prevVisible then
+            DrawPreviewLine(prevScreen, screen, color, ColorWithAlpha(color, 40), 1.6, 4.0)
+        end
+        prevScreen = screen
+        prevVisible = visible
     end
 end
 
-local function UpdateTargetLandingParticle(hero, pos, radius, slotName, particlePath, colorVariant)
-    local particleIndex = EnsureTargetVisualParticle(slotName, hero, particlePath)
-    if not particleIndex then
+local function DrawPreviewArrow(fromScreen, toScreen, color)
+    if not fromScreen or not toScreen or not Render or not Render.FilledTriangle then
         return
     end
 
-    local groundPos = MakeGroundPosition(pos)
-    SafeCall(Particle.SetControlPoint, particleIndex, 0, groundPos)
-    SafeCall(Particle.SetControlPoint, particleIndex, 1, Vector(radius, 0, 0))
+    local dx = toScreen.x - fromScreen.x
+    local dy = toScreen.y - fromScreen.y
+    local len = math.sqrt(dx * dx + dy * dy)
+    if len < 8 then
+        return
+    end
 
-    if colorVariant then
-        SafeCall(Particle.SetControlPoint, particleIndex, 6, colorVariant)
+    local ux, uy = dx / len, dy / len
+    local px, py = -uy, ux
+    local tip = toScreen
+    local base = Vec2(toScreen.x - ux * PREVIEW_ARROW_LEN, toScreen.y - uy * PREVIEW_ARROW_LEN)
+    local left = Vec2(base.x + px * (PREVIEW_ARROW_WIDTH * 0.5), base.y + py * (PREVIEW_ARROW_WIDTH * 0.5))
+    local right = Vec2(base.x - px * (PREVIEW_ARROW_WIDTH * 0.5), base.y - py * (PREVIEW_ARROW_WIDTH * 0.5))
+
+    Render.FilledTriangle({ tip, left, right }, color)
+end
+
+local function DrawKickPreviewMarker(screen, color, radius)
+    if not screen or not color or not Render then
+        return
+    end
+
+    if Render.Circle then
+        Render.Circle(screen, radius + 4, ColorWithAlpha(color, 45), 1.5)
+        Render.Circle(screen, radius, ColorWithAlpha(color, 210), 1.6)
+    end
+    if Render.FilledCircle then
+        Render.FilledCircle(screen, math.max(2.5, radius * 0.35), ColorWithAlpha(color, 230))
     end
 end
 
@@ -3236,15 +3234,20 @@ local function GetTargetPreviewScanDistance(hero, kick)
     )
 end
 
-local function RefreshTargetSelectionVisuals(force)
-    if not CanUseTargetParticles() or not UI.Enabled:Get() or not Engine.IsInGame() then
-        ClearTargetSelectionVisuals()
+local function RefreshKickPreview(force)
+    if not UI.Enabled:Get() or not Engine.IsInGame() then
+        ClearKickPreview()
+        return
+    end
+
+    if UI.DrawPreview and UI.DrawPreview.Get and UI.DrawPreview:Get() ~= true then
+        ClearKickPreview()
         return
     end
 
     local hero = Heroes.GetLocal()
     if not IsTusk(hero) then
-        ClearTargetSelectionVisuals()
+        ClearKickPreview()
         return
     end
 
@@ -3257,27 +3260,67 @@ local function RefreshTargetSelectionVisuals(force)
     local kick = NPC.GetAbility(hero, ABILITY_NAME)
     local canEval = CanEvaluateKick(hero, kick)
     if not canEval then
-        ClearTargetSelectionVisuals()
+        ClearKickPreview()
         return
     end
 
     local plan = FindBestPlan(hero, kick, GetTargetPreviewScanDistance(hero, kick))
-    if not plan or not IsValidHeroUnit(plan.enemy) then
-        ClearTargetSelectionVisuals()
+    if not plan or not IsValidHeroUnit(plan.enemy) or not plan.enemyPos or not plan.endPos then
+        ClearKickPreview()
         return
     end
 
-    UpdateTargetEnemyRing(plan.enemy)
-    UpdateTargetPathParticle(hero, plan.enemyPos, plan.endPos)
-    UpdateTargetLandingParticle(hero, plan.endPos, TARGET_VISUAL_LANDING_RADIUS, "landingRing", PARTICLE_LANDING_RING)
-    UpdateTargetLandingParticle(
-        hero,
-        plan.desiredPos,
-        TARGET_VISUAL_ALLY_RADIUS,
-        "allyMarker",
-        PARTICLE_ALLY_RING,
-        Vector(1, 0, 0)
-    )
+    State.kickPreview = {
+        enemyPos = plan.enemyPos,
+        endPos = plan.endPos,
+        desiredPos = plan.desiredPos,
+    }
+end
+
+local function DrawKickPreviewOverlay()
+    local preview = State.kickPreview
+    if not preview or not preview.enemyPos or not preview.endPos then
+        return
+    end
+
+    if Menu and Menu.VisualsIsEnabled and not SafeCall(Menu.VisualsIsEnabled) then
+        return
+    end
+
+    local accent = Colors.BorderEnabled or Colors.TextHeader
+    local quiet = Colors.Quiet or ColorWithAlpha(accent, 140)
+    local enemyScreen, enemyVisible = WorldToScreenPos(preview.enemyPos)
+    local endScreen, endVisible = WorldToScreenPos(preview.endPos)
+
+    if enemyVisible and endVisible then
+        DrawPreviewLine(
+            enemyScreen,
+            endScreen,
+            ColorWithAlpha(accent, 220),
+            ColorWithAlpha(accent, 55),
+            1.8,
+            5.0
+        )
+        DrawPreviewArrow(enemyScreen, endScreen, ColorWithAlpha(accent, 235))
+    end
+
+    if enemyVisible then
+        DrawKickPreviewMarker(enemyScreen, accent, 7)
+    end
+
+    DrawWorldRing(preview.endPos, PREVIEW_LANDING_RADIUS, ColorWithAlpha(accent, 170), PREVIEW_RING_SEGMENTS)
+
+    if preview.desiredPos then
+        DrawWorldRing(preview.desiredPos, PREVIEW_ALLY_RADIUS, ColorWithAlpha(quiet, 150), 20)
+        local allyScreen, allyVisible = WorldToScreenPos(preview.desiredPos)
+        if allyVisible then
+            DrawKickPreviewMarker(allyScreen, quiet, 5)
+        end
+    end
+
+    if endVisible then
+        DrawKickPreviewMarker(endScreen, accent, 5)
+    end
 end
 
 --#endregion
@@ -3285,10 +3328,9 @@ end
 --#region Panel
 
 function Script.OnDraw()
-    if not Engine.IsInGame() or not UI.Enabled:Get() or not UI.DrawPanel:Get() then
+    if not Engine.IsInGame() or not UI.Enabled:Get() then
         return
     end
-    SyncColors()
     if Menu and Menu.VisualsIsEnabled and not SafeCall(Menu.VisualsIsEnabled) then
         return
     end
@@ -3298,7 +3340,13 @@ function Script.OnDraw()
         return
     end
 
-    local numAllies = #State.cachedAllyNames
+    DrawKickPreviewOverlay()
+
+    if not UI.DrawPanel:Get() then
+        return
+    end
+
+    local numAllies = #State.matchAllyNames
     if numAllies == 0 then
         return
     end
@@ -3337,6 +3385,9 @@ function Script.OnDraw()
     end
 
     local clickTriggered = isClicked
+    if clickTriggered and Input.IsInputCaptured and SafeCall(Input.IsInputCaptured) then
+        clickTriggered = false
+    end
     State.wasMousePressed = isDown
 
     local titleText = layout.titleText or GetPanelTitleText()
@@ -3352,6 +3403,7 @@ function Script.OnDraw()
     local titleContentY = layout.y + math.floor((layout.titleH - titleContentH) * 0.5 + 0.5)
     local textX = layout.x + layout.padX
     local textY = titleContentY + math.floor((titleContentH - titleSizeY) * 0.5 + 0.5)
+    local cellRadius = PANEL_CELL_RADIUS * scale
 
     DrawPanelBlur(layout, scale)
 
@@ -3380,29 +3432,29 @@ function Script.OnDraw()
         Vec2(textX, textY),
         Colors.TextHeader)
 
-    for i, cleanName in ipairs(State.cachedAllyNames) do
+    local borderColor = GetChipBorderColor()
+
+    for i, cleanName in ipairs(State.matchAllyNames) do
         local cellX = layout.cellsStartX + (i - 1) * (layout.cellW + layout.cellSpacing)
         local allyHero = State.cachedAllyEntities[cleanName]
         local enabled = IsAllyKickEnabled(cleanName)
-
-        local imgAlpha = enabled and 255 or 110
+        local imgAlpha = enabled and PANEL_CHIP_ENABLED_ALPHA or PANEL_CHIP_DISABLED_ALPHA
         local grayscale = enabled and 0.0 or 1.0
-        local borderColor = enabled
-            and Color(Colors.BorderEnabled.r, Colors.BorderEnabled.g, Colors.BorderEnabled.b, 255)
-            or Color(Colors.BorderEnabled.r, Colors.BorderEnabled.g, Colors.BorderEnabled.b, 110)
 
         local isCellHovered = isCursorValid
             and mx >= cellX and mx <= cellX + layout.cellW
             and my >= layout.rowY and my <= layout.rowY + layout.cellH
 
-        local heroNameRaw = allyHero and SafeCall(NPC.GetUnitName, allyHero) or ""
+        local heroNameRaw = State.cachedAllyUnitNames[cleanName]
+            or (allyHero and SafeCall(NPC.GetUnitName, allyHero))
+            or ""
         local imgHandle = GetHeroIcon(heroNameRaw)
 
         Render.FilledRect(
             Vec2(cellX, layout.rowY),
             Vec2(cellX + layout.cellW, layout.rowY + layout.cellH),
             Colors.CellBg,
-            5 * scale)
+            cellRadius)
 
         if imgHandle then
             Render.Image(
@@ -3410,7 +3462,7 @@ function Script.OnDraw()
                 Vec2(cellX, layout.rowY),
                 Vec2(layout.cellW, layout.cellH),
                 Color(255, 255, 255, imgAlpha),
-                5 * scale,
+                cellRadius,
                 Enum.DrawFlags.None,
                 Vec2(0, 0),
                 Vec2(1, 1),
@@ -3422,9 +3474,9 @@ function Script.OnDraw()
                 Vec2(cellX, layout.rowY),
                 Vec2(cellX + layout.cellW, layout.rowY + layout.cellH),
                 borderColor,
-                5 * scale,
+                cellRadius,
                 Enum.DrawFlags.None,
-                1.0)
+                1.3)
         end
 
         if isCellHovered and clickTriggered and not PanelDrag.IsDragging then
@@ -3446,7 +3498,7 @@ function Script.OnKeyEvent(_data, key, _event)
         return
     end
 
-    if #State.cachedAllyNames == 0 then
+    if #State.matchAllyNames == 0 then
         return
     end
 
@@ -3456,7 +3508,7 @@ function Script.OnKeyEvent(_data, key, _event)
         return
     end
 
-    local layout = GetPanelLayout(scale, #State.cachedAllyNames, screenSize)
+    local layout = GetPanelLayout(scale, #State.matchAllyNames, screenSize)
     local mx, my = GetMousePos()
     local isCursorOverPanel = mx and my
         and mx >= layout.x and mx <= layout.x + layout.width
@@ -3503,7 +3555,7 @@ function Script.OnUpdate()
             ClearVectorFollowup()
             ClearBlinkKickCombo()
             ClearSnowballCombo()
-            ClearTargetSelectionVisuals()
+            ClearKickPreview()
             return
         end
 
@@ -3512,7 +3564,7 @@ function Script.OnUpdate()
         ClearVectorFollowup()
         ClearBlinkKickCombo()
         ClearSnowballCombo()
-        ClearTargetSelectionVisuals()
+        ClearKickPreview()
         LogDebug("Bind blocked | local hero missing")
         return
     end
@@ -3521,7 +3573,7 @@ function Script.OnUpdate()
         ClearVectorFollowup()
         ClearBlinkKickCombo()
         ClearSnowballCombo()
-        ClearTargetSelectionVisuals()
+        ClearKickPreview()
         LogDebug("Bind blocked | local hero is not Tusk: " .. tostring(SafeCall(NPC and NPC.GetUnitName, hero)))
         return
     end
@@ -3533,11 +3585,11 @@ function Script.OnUpdate()
         ClearVectorFollowup()
         ClearBlinkKickCombo()
         ClearSnowballCombo()
-        ClearTargetSelectionVisuals()
+        ClearKickPreview()
         return
     end
 
-    RefreshTargetSelectionVisuals()
+    RefreshKickPreview()
 
         if TryProcessSnowballCombo(hero, now) then
             return
@@ -3703,7 +3755,7 @@ function Script.OnThemeUpdate()
 end
 
 function Script.OnGameEnd()
-    ClearTargetSelectionVisuals()
+    ClearKickPreview()
     State.lastCastTime = 0
     State.lastAllySyncTime = -100
     State.wasMousePressed = false
@@ -3712,6 +3764,10 @@ function Script.OnGameEnd()
     State.panelHeaderFaAvailable = nil
     State.imgCache = nil
     State.spellIcon = nil
+    State.matchAllyNames = {}
+    State.matchAllySet = {}
+    State.cachedAllyEntities = {}
+    State.cachedAllyUnitNames = {}
     State.bestPlan = nil
     State.pendingOrderUntil = 0
     State.postOrderLockUntil = 0
@@ -3723,8 +3779,7 @@ function Script.OnGameEnd()
     State.lastKickUnavailableLogTime = -100
     State.lastKickUnavailableReason = ""
     State.lastTargetVisualTime = -100
-    State.targetVisualPathSignature = ""
-end
+    end
 
 end)()
 
