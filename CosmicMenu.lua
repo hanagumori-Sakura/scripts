@@ -64,16 +64,9 @@ local CONSTANTS = {
     ENERGY_NODE_COUNT = 5,
     CHROMATIC_RIM_QUALITY = 0.55,
     CHROMATIC_RIM_SEGMENTS = 28,
-    SCREEN_CACHE_IDLE_FRAMES = 30,
+    SCREEN_CACHE_IDLE_FRAMES = 8,
     FLYING_ROCKET_MAX = 32,
     FLYING_ROCKET_SEGMENTS = 8,
-    STANDARD_SNAP_WIDTH_TOLERANCE = 0.06,
-}
-
-local STANDARD_RESOLUTIONS = {
-    {1920, 1080}, {2560, 1440}, {3840, 2160}, {1600, 900}, {1366, 768},
-    {1280, 720}, {1280, 1024}, {1440, 900}, {2560, 1080}, {3440, 1440},
-    {1536, 864}, {2048, 1152}, {1680, 1050},
 }
 
 local DEFAULT_SCREEN_SIZE = Vec2(1920, 1080)
@@ -252,7 +245,6 @@ local fadeInTime = 0
 local menuWasOpen = false
 local menuClosedFrames = 0
 local menuClosedAccumulated = 0
-local lastRealTime = nil
 local lastCursorX = nil
 local lastCursorY = nil
 local lastCursorModeApplied = nil
@@ -286,7 +278,7 @@ local flyingRocketPool = {}
 local flyingRocketActive = {}
 local linkSpatialGrid = {}
 
-local LoggerInstance = Logger and Logger("CosmicMenu") or nil
+local LoggerInstance = Logger("CosmicMenu")
 local UpdateMenuControls = nil
 local GatherFrameSettings
 local IsCustomPresetMarkBlocked
@@ -300,36 +292,36 @@ local SetupLanguageCallback
 
 --#region Helpers
 
-local function TryCall(fn, ...)
-    if not fn then
-        return false
-    end
-    return pcall(fn, ...)
-end
-
 local function WidgetSet(widget, value)
-    if widget and widget.Set then
-        TryCall(widget.Set, widget, value)
+    if widget then
+        widget:Set(value)
     end
 end
 
 local function WidgetGet(widget, default)
-    if not widget or not widget.Get then
+    if not widget then
         return default
     end
-    local ok, value = pcall(widget.Get, widget)
-    if ok and value ~= nil then
-        return value
+    local value = widget:Get()
+    if value == nil then
+        return default
     end
-    return default
+    return value
 end
 
 local function Log(level, message)
     message = tostring(message)
-    if LoggerInstance and LoggerInstance[level] then
-        if pcall(LoggerInstance[level], LoggerInstance, message) then
-            return
+    if LoggerInstance then
+        if level == "warn" then
+            LoggerInstance:warning(message)
+        elseif level == "error" then
+            LoggerInstance:error(message)
+        elseif level == "debug" then
+            LoggerInstance:debug(message)
+        else
+            LoggerInstance:info(message)
         end
+        return
     end
     if level == "error" or level == "warn" then
         print(LOG_PREFIX .. message)
@@ -337,39 +329,19 @@ local function Log(level, message)
 end
 
 local function ConfigReadInt(key, default)
-    if not Config or not Config.ReadInt then
-        return default
-    end
-    local ok, value = pcall(Config.ReadInt, CONFIG_SECTION, key, default)
-    if ok and type(value) == "number" then
-        return value
-    end
-    return default
+    return Config.ReadInt(CONFIG_SECTION, key, default)
 end
 
 local function ConfigWriteInt(key, value)
-    if not Config or not Config.WriteInt then
-        return
-    end
-    TryCall(Config.WriteInt, CONFIG_SECTION, key, value)
+    Config.WriteInt(CONFIG_SECTION, key, value)
 end
 
 local function ConfigReadFloat(key, default)
-    if not Config or not Config.ReadFloat then
-        return default
-    end
-    local ok, value = pcall(Config.ReadFloat, CONFIG_SECTION, key, default)
-    if ok and type(value) == "number" then
-        return value
-    end
-    return default
+    return Config.ReadFloat(CONFIG_SECTION, key, default)
 end
 
 local function ConfigWriteFloat(key, value)
-    if not Config or not Config.WriteFloat then
-        return
-    end
-    TryCall(Config.WriteFloat, CONFIG_SECTION, key, value)
+    Config.WriteFloat(CONFIG_SECTION, key, value)
 end
 
 local function randomRangeSafe(minValue, maxValue)
@@ -382,10 +354,8 @@ end
 local function GetSafeScreenDimensions()
     local w = math.floor((screenSize and screenSize.x) or 1)
     local h = math.floor((screenSize and screenSize.y) or 1)
-
     if w < 1 then w = 1 end
     if h < 1 then h = 1 end
-
     return w, h
 end
 
@@ -459,17 +429,58 @@ local function remapPoolPositionsForScreenChange(oldSize, newSize)
     end
 end
 
+local function readVec2XY(value)
+    if value == nil then
+        return nil, nil
+    end
+
+    local valueType = type(value)
+    if valueType ~= "table" and valueType ~= "userdata" then
+        return nil, nil
+    end
+
+    local x = value.x or value.X
+    local y = value.y or value.Y
+
+    if type(x) ~= "number" and value.GetX then
+        x = value:GetX()
+    end
+    if type(y) ~= "number" and value.GetY then
+        y = value:GetY()
+    end
+
+    if (type(x) ~= "number" or type(y) ~= "number") and value.Get then
+        local gx, gy = value:Get()
+        if type(gx) == "number" then
+            x = gx
+        end
+        if type(gy) == "number" then
+            y = gy
+        end
+    end
+
+    if type(x) ~= "number" then
+        x = value[1]
+    end
+    if type(y) ~= "number" then
+        y = value[2]
+    end
+
+    if type(x) == "number" and type(y) == "number" then
+        return x, y
+    end
+
+    return nil, nil
+end
+
 local function normalizeCursorPos(v1, v2)
     if type(v1) == "number" and type(v2) == "number" then
         return Vec2(v1, v2)
     end
 
-    if v1 and type(v1) == "table" then
-        local x = v1.x or v1.X
-        local y = v1.y or v1.Y
-        if type(x) == "number" and type(y) == "number" then
-            return Vec2(x, y)
-        end
+    local x, y = readVec2XY(v1)
+    if x and y then
+        return Vec2(x, y)
     end
 
     return nil
@@ -480,49 +491,35 @@ local function normalizeScreenSize(v1, v2)
         return Vec2(v1, v2)
     end
 
-    if v1 and type(v1) == "table" then
-        local x = v1.x or v1.X or v1[1]
-        local y = v1.y or v1.Y or v1[2]
-        if type(x) == "number" and type(y) == "number" and x > 1 and y > 1 then
-            return Vec2(x, y)
-        end
+    local x, y = readVec2XY(v1)
+    if x and y and x > 1 and y > 1 then
+        return Vec2(x, y)
     end
 
     return nil
 end
 
 local function normalizeColor(value)
-    local t = type(value)
-    if t ~= "table" and t ~= "userdata" then
+    if value == nil then
         return nil
     end
 
-    local function readChannel(keys, fallback)
-        for _, key in ipairs(keys) do
-            local raw = value[key]
-            if type(raw) == "number" then
-                return raw
-            end
-            if type(raw) == "function" then
-                local ok, result = pcall(raw, value)
-                if ok and type(result) == "number" then
-                    return result
-                end
-            end
+    local r = value.r
+    local g = value.g
+    local b = value.b
+    local a = value.a
+    if type(r) ~= "number" or type(g) ~= "number" or type(b) ~= "number" then
+        return nil
+    end
+
+    if r <= 1 and g <= 1 and b <= 1 then
+        r, g, b = r * 255, g * 255, b * 255
+        if type(a) == "number" and a <= 1 then
+            a = a * 255
         end
-        return fallback
     end
 
-    local r = readChannel({"r", "R", "red", "Red", "GetR", "GetRed", 1}, nil)
-    local g = readChannel({"g", "G", "green", "Green", "GetG", "GetGreen", 2}, nil)
-    local b = readChannel({"b", "B", "blue", "Blue", "GetB", "GetBlue", 3}, nil)
-    local a = readChannel({"a", "A", "alpha", "Alpha", "GetA", "GetAlpha", 4}, 255)
-
-    if type(r) == "number" and type(g) == "number" and type(b) == "number" then
-        return Color(r, g, b, a)
-    end
-
-    return nil
+    return Color(r, g, b, type(a) == "number" and a or 255)
 end
 
 local function updateScreenBaselines(size)
@@ -542,261 +539,100 @@ local function updateScreenBaselines(size)
     end
 end
 
-local function isLikelyPartialViewport(size)
+-- Menu often reports a short/cropped viewport. Real ultrawide (~21:9) is still tall enough.
+local function isPartialViewport(size)
     if not size or not size.x or not size.y then
-        return false
-    end
-
-    local w = size.x
-    local h = math.max(size.y, 1)
-    local aspect = w / h
-
-    -- Menu / overlay viewport while Umbrella menu is open (e.g. 1856x687).
-    if aspect > 2.05 then
         return true
     end
 
-    if w >= 1100 and h < w * 0.55 then
+    local w = size.x
+    local h = size.y
+    if w < 2 or h < 2 then
+        return true
+    end
+
+    if (h / w) < 0.38 then
+        return true
+    end
+
+    if h < 700 and w >= 1100 then
         return true
     end
 
     return false
 end
 
-local function snapFromPartialWidth(w)
-    local bestEntry = nil
-    local bestDiff = math.huge
-
-    for i = 1, #STANDARD_RESOLUTIONS do
-        local entry = STANDARD_RESOLUTIONS[i]
-        local rw = entry[1]
-        local rh = entry[2]
-        local aspect = rw / math.max(rh, 1)
-
-        if math.abs(aspect - (16 / 9)) < 0.02 then
-            local diff = math.abs(rw - w)
-            if diff < bestDiff then
-                bestDiff = diff
-                bestEntry = entry
-            end
-        end
-    end
-
-    if bestEntry and bestDiff <= bestEntry[1] * 0.08 then
-        return Vec2(bestEntry[1], bestEntry[2])
-    end
-
-    return nil
-end
-
-local function snapToStandardResolution(w, h)
-    local bestEntry = nil
-    local bestScore = math.huge
-
-    for i = 1, #STANDARD_RESOLUTIONS do
-        local entry = STANDARD_RESOLUTIONS[i]
-        local rw = entry[1]
-        local rh = entry[2]
-        local widthDiff = math.abs(rw - w) / rw
-
-        if widthDiff <= CONSTANTS.STANDARD_SNAP_WIDTH_TOLERANCE then
-            local heightDiff = math.abs(rh - h) / rh
-            local score = widthDiff * 2 + heightDiff
-            if score < bestScore then
-                bestScore = score
-                bestEntry = entry
-            end
-        end
-    end
-
-    if bestEntry then
-        return Vec2(bestEntry[1], bestEntry[2])
-    end
-
-    return nil
-end
-
-local function normalizeFullScreenSize(size)
+local function sanitizeScreenSize(size)
     if not size or not size.x or not size.y then
-        return Vec2(DEFAULT_SCREEN_SIZE.x, DEFAULT_SCREEN_SIZE.y)
+        return nil
     end
 
     local w = math.floor(size.x + 0.5)
     local h = math.floor(size.y + 0.5)
-
-    if w < 1 or h < 1 then
-        return Vec2(DEFAULT_SCREEN_SIZE.x, DEFAULT_SCREEN_SIZE.y)
+    if w < CONSTANTS.SCREEN_MIN_W or h < CONSTANTS.SCREEN_MIN_H then
+        return nil
+    end
+    if w > CONSTANTS.SCREEN_MAX_W or h > CONSTANTS.SCREEN_MAX_H then
+        return nil
     end
 
-    if isLikelyPartialViewport(size) then
-        local fromWidth = snapFromPartialWidth(w)
-        if fromWidth then
-            return fromWidth
-        end
-        return Vec2(w, math.floor(w * 9 / 16 + 0.5))
+    local aspect = w / h
+    if aspect < 0.85 or aspect > 3.8 then
+        return nil
     end
 
-    local snapped = snapToStandardResolution(w, h)
-    if snapped then
-        return snapped
-    end
-
-    if w < CONSTANTS.SCREEN_MIN_W then w = CONSTANTS.SCREEN_MIN_W end
-    if w > CONSTANTS.SCREEN_MAX_W then w = CONSTANTS.SCREEN_MAX_W end
-    if h < CONSTANTS.SCREEN_MIN_H then h = CONSTANTS.SCREEN_MIN_H end
-    if h > CONSTANTS.SCREEN_MAX_H then h = CONSTANTS.SCREEN_MAX_H end
     return Vec2(w, h)
 end
 
-local function rememberRawScreenSize(size)
-    if size and size.x and size.y and size.x > 1 and size.y > 1 then
-        State.lastRawScreenSize = Vec2(size.x, size.y)
-    end
+local function estimateFullScreenFromPartial(size)
+    local w = math.floor(size.x + 0.5)
+    local h = math.floor(size.y + 0.5)
+    local estimatedH = math.max(h, math.floor(w * 9 / 16 + 0.5))
+    return sanitizeScreenSize(Vec2(w, estimatedH))
 end
 
-local function collectRawScreenCandidates()
-    local candidates = {}
-
-    local function pushCandidate(value, valueB)
-        local normalized = normalizeScreenSize(value, valueB)
-        if normalized and normalized.x > 1 and normalized.y > 1 then
-            rememberRawScreenSize(normalized)
-            candidates[#candidates + 1] = Vec2(normalized.x, normalized.y)
-        end
+local function screenArea(size)
+    if not size then
+        return 0
     end
-
-    if Render and Render.ScreenSize then
-        local ok, size = TryCall(Render.ScreenSize)
-        if ok then
-            pushCandidate(size)
-        end
-    end
-
-    if Renderer and Renderer.GetScreenSize then
-        local ok, size = TryCall(Renderer.GetScreenSize)
-        if ok then
-            pushCandidate(size)
-        end
-    end
-
-    if Engine and Engine.GetScreenSize then
-        local ok, a, b = TryCall(Engine.GetScreenSize)
-        if ok then
-            pushCandidate(a, b)
-        end
-    end
-
-    return candidates
+    return size.x * size.y
 end
 
-local function isPlausibleScreenSize(size)
-    if not size or not size.x or not size.y then
-        return false
+-- Never shrink a known full-screen size down to a menu viewport / FHD guess.
+local function adoptFullScreenSize(candidate)
+    local size = sanitizeScreenSize(candidate)
+    if not size then
+        return State.cachedFullScreenSize
     end
 
-    local w = math.floor(size.x)
-    local h = math.floor(size.y)
-    if w < CONSTANTS.SCREEN_MIN_W or h < CONSTANTS.SCREEN_MIN_H then
-        return false
-    end
-    if w > CONSTANTS.SCREEN_MAX_W or h > CONSTANTS.SCREEN_MAX_H then
-        return false
+    local current = State.cachedFullScreenSize
+    if not current or screenArea(size) >= screenArea(current) * 0.98 then
+        State.cachedFullScreenSize = size
     end
 
-    local aspect = w / math.max(h, 1)
-    if aspect < 0.55 or aspect > 2.05 then
-        return false
-    end
-
-    return true
+    return State.cachedFullScreenSize
 end
 
-local function resetScreenBaselines(size)
-    if not isPlausibleScreenSize(size) then
-        return
-    end
-
-    baseScreenMinDim = math.min(size.x, size.y)
-    baseScreenArea = size.x * size.y
+local function ReadRawScreenSize()
+    return normalizeScreenSize(Render.ScreenSize())
 end
 
-local function scoreScreenCandidate(size, sourcePriority)
-    if not size or not size.x or not size.y then
-        return -1
-    end
+local function RefreshCachedFullScreenSize()
+    local raw = ReadRawScreenSize()
+    if raw then
+        State.lastRawScreenSize = Vec2(raw.x, raw.y)
 
-    local normalized = normalizeFullScreenSize(size)
-    if not isPlausibleScreenSize(normalized) then
-        return -1
-    end
-
-    local aspect = normalized.x / normalized.y
-    local aspectScore = 1 - math.min(math.abs(aspect - (16 / 9)), math.abs(aspect - (16 / 10))) * 0.35
-    local areaPenalty = 0
-    local area = normalized.x * normalized.y
-
-    if isLikelyPartialViewport(size) then
-        areaPenalty = areaPenalty + 0.45
-    end
-
-    if area > 3840 * 2160 then
-        areaPenalty = areaPenalty + 0.35
-    end
-
-    return sourcePriority + aspectScore * 0.25 - areaPenalty
-end
-
-local function pickBestFullScreenSize(candidates)
-    local best = nil
-    local bestScore = -1
-
-    for i = 1, #candidates do
-        local raw = candidates[i]
-        State.lastRawScreenSize = raw
-        local normalized = normalizeFullScreenSize(raw)
-        if isPlausibleScreenSize(normalized) then
-            local score = scoreScreenCandidate(raw, 1.0)
-            if score > bestScore then
-                bestScore = score
-                best = normalized
+        if not isPartialViewport(raw) then
+            adoptFullScreenSize(raw)
+        elseif not State.cachedFullScreenSize then
+            local estimated = estimateFullScreenFromPartial(raw)
+            if estimated then
+                State.cachedFullScreenSize = estimated
             end
         end
     end
 
-    return best
-end
-
-local function RefreshCachedFullScreenSize()
-    local candidates = collectRawScreenCandidates()
-    local best = pickBestFullScreenSize(candidates)
-
-    if best then
-        State.cachedFullScreenSize = best
-        return best
-    end
-
-    if State.cachedFullScreenSize and isPlausibleScreenSize(State.cachedFullScreenSize) then
-        return State.cachedFullScreenSize
-    end
-
-    return nil
-end
-
-local function getAdaptiveFallbackScreenSize()
-    if State.lastRawScreenSize then
-        local fromRaw = normalizeFullScreenSize(State.lastRawScreenSize)
-        if isPlausibleScreenSize(fromRaw) then
-            return fromRaw
-        end
-    end
-
-    local candidates = collectRawScreenCandidates()
-    local best = pickBestFullScreenSize(candidates)
-    if best then
-        return best
-    end
-
-    return Vec2(DEFAULT_SCREEN_SIZE.x, DEFAULT_SCREEN_SIZE.y)
+    return State.cachedFullScreenSize
 end
 
 local function GetBestScreenSize()
@@ -806,58 +642,43 @@ local function GetBestScreenSize()
         return Vec2(cached.x, cached.y)
     end
 
-    local fallback = getAdaptiveFallbackScreenSize()
-    fallback = normalizeFullScreenSize(fallback)
+    local raw = State.lastRawScreenSize or ReadRawScreenSize()
+    local fallback = (raw and estimateFullScreenFromPartial(raw)) or Vec2(DEFAULT_SCREEN_SIZE.x, DEFAULT_SCREEN_SIZE.y)
     updateScreenBaselines(fallback)
     if not State.screenFallbackLogged then
         State.screenFallbackLogged = true
-        local rawText = State.lastRawScreenSize
-            and string.format(" (raw %dx%d)", State.lastRawScreenSize.x, State.lastRawScreenSize.y)
-            or ""
-        Log("warn", "Using screen size fallback: " .. fallback.x .. "x" .. fallback.y .. rawText)
+        Log("warn", "Using screen size fallback: " .. fallback.x .. "x" .. fallback.y)
     end
     return fallback
 end
 
 local function GetLiveRenderScreenSize()
-    local raw = nil
-
-    if Render and Render.ScreenSize then
-        local ok, size = TryCall(Render.ScreenSize)
-        if ok then
-            raw = normalizeScreenSize(size)
-        end
-    end
-
-    if not raw and Renderer and Renderer.GetScreenSize then
-        local ok, size = TryCall(Renderer.GetScreenSize)
-        if ok then
-            raw = normalizeScreenSize(size)
-        end
-    end
-
+    local raw = ReadRawScreenSize()
     if raw then
         State.lastRawScreenSize = Vec2(raw.x, raw.y)
+        if not isPartialViewport(raw) then
+            adoptFullScreenSize(raw)
+            if State.cachedFullScreenSize then
+                screenSize = Vec2(State.cachedFullScreenSize.x, State.cachedFullScreenSize.y)
+            end
+        end
     end
 
-    if State.cachedFullScreenSize and isPlausibleScreenSize(State.cachedFullScreenSize) then
+    if State.cachedFullScreenSize then
         return Vec2(State.cachedFullScreenSize.x, State.cachedFullScreenSize.y)
     end
-
-    if raw then
-        return normalizeFullScreenSize(raw)
+    if screenSize.x > 1 and screenSize.y > 1 then
+        return Vec2(screenSize.x, screenSize.y)
     end
-
-    return Vec2(screenSize.x, screenSize.y)
+    return GetBestScreenSize()
 end
 
 local function CaptureScreenSizeForMenuSession()
+    -- Prefer the largest size learned while the menu was closed.
     RefreshCachedFullScreenSize()
 
-    local size = State.cachedFullScreenSize or GetBestScreenSize()
-    size = normalizeFullScreenSize(size)
-
-    if not isPlausibleScreenSize(size) then
+    local size = sanitizeScreenSize(State.cachedFullScreenSize or GetBestScreenSize())
+    if not size then
         return
     end
 
@@ -867,13 +688,16 @@ local function CaptureScreenSizeForMenuSession()
         local heightRatio = size.y / previousSize.y
         if math.abs(widthRatio - 1) > 0.05 or math.abs(heightRatio - 1) > 0.05 then
             remapPoolPositionsForScreenChange(previousSize, size)
-            resetScreenBaselines(size)
+            baseScreenMinDim = math.min(size.x, size.y)
+            baseScreenArea = size.x * size.y
         end
     else
-        resetScreenBaselines(size)
+        baseScreenMinDim = math.min(size.x, size.y)
+        baseScreenArea = size.x * size.y
     end
 
     screenSize = size
+    State.cachedFullScreenSize = size
     updateScreenBaselines(size)
 end
 
@@ -919,45 +743,14 @@ local function mixColors(colorA, colorB, t, alpha)
     )
 end
 
-local function getGlobalVarNumber(methodName)
-    if not GlobalVars or not GlobalVars[methodName] then
-        return nil
-    end
-
-    local ok, value = pcall(GlobalVars[methodName], GlobalVars)
-    if ok and type(value) == "number" then
-        return value
-    end
-
-    return nil
-end
-
 local function GetAnimationDt()
-    local realTime = getGlobalVarNumber("GetRealTime")
-    if realTime then
-        if lastRealTime then
-            local rawDt = realTime - lastRealTime
-            lastRealTime = realTime
-
-            if rawDt and rawDt > 0 then
-                if rawDt > CONSTANTS.DT_SPIKE_RESET then
-                    rawDt = CONSTANTS.DT_DEFAULT
-                end
-                return clamp(rawDt, CONSTANTS.ANIMATION_DT_MIN, CONSTANTS.ANIMATION_DT_MAX)
-            end
-        else
-            lastRealTime = realTime
-        end
-    else
-        lastRealTime = nil
+    local dt = GlobalVars.GetAbsFrameTime()
+    if type(dt) ~= "number" or dt <= 0 then
+        dt = CONSTANTS.DT_DEFAULT
+    elseif dt > CONSTANTS.DT_SPIKE_RESET then
+        dt = CONSTANTS.DT_DEFAULT
     end
-
-    local fallbackDt = getGlobalVarNumber("GetAbsFrameTime") or getGlobalVarNumber("GetFrameTime") or CONSTANTS.DT_DEFAULT
-    if fallbackDt <= 0 then
-        fallbackDt = CONSTANTS.DT_DEFAULT
-    end
-
-    return clamp(fallbackDt, CONSTANTS.ANIMATION_DT_MIN, CONSTANTS.ANIMATION_DT_MAX)
+    return clamp(dt, CONSTANTS.ANIMATION_DT_MIN, CONSTANTS.ANIMATION_DT_MAX)
 end
 
 local function getScreenAreaScale()
@@ -1001,53 +794,8 @@ local function roundToInt(value)
 end
 
 local function GetCursorPos()
-    if Input and Input.GetCursorPos then
-        local ok, x, y = pcall(Input.GetCursorPos)
-        if ok then
-            local pos = normalizeCursorPos(x, y)
-            if pos then
-                return pos
-            end
-        end
-
-        ok, x, y = pcall(function() return Input:GetCursorPos() end)
-        if ok then
-            local pos = normalizeCursorPos(x, y)
-            if pos then
-                return pos
-            end
-        end
-    end
-
-    if not Engine or not Engine.GetCursorPos then
-        return nil
-    end
-
-    local ok, a, b = pcall(Engine.GetCursorPos)
-    if ok then
-        local pos = normalizeCursorPos(a, b)
-        if pos then
-            return pos
-        end
-    end
-
-    ok, a, b = pcall(Engine.GetCursorPos, Engine)
-    if ok then
-        local pos = normalizeCursorPos(a, b)
-        if pos then
-            return pos
-        end
-    end
-
-    ok, a, b = pcall(function() return Engine:GetCursorPos() end)
-    if ok then
-        local pos = normalizeCursorPos(a, b)
-        if pos then
-            return pos
-        end
-    end
-
-    return nil
+    local x, y = Input.GetCursorPos()
+    return normalizeCursorPos(x, y)
 end
 
 local STAR_LAYER_PARALLAX = {0.08, 0.52, 1.25}
@@ -1356,30 +1104,18 @@ local function resetRuntimeState()
 end
 
 local function getMenuStyleTable()
-    if not Menu or not Menu.Style then
-        return nil
-    end
-
-    local ok, style = pcall(Menu.Style)
-    if ok and type(style) == "table" then
+    local style = Menu.Style()
+    if type(style) == "table" then
         return style
     end
-
     return nil
 end
 
 local function probeMenuStyleColor(styleName)
-    if not Menu or not Menu.Style or not styleName then
+    if not styleName then
         return nil
     end
-
-    local ok, color = pcall(Menu.Style, styleName)
-    local normalized = ok and normalizeColor(color)
-    if normalized then
-        return normalized
-    end
-
-    return nil
+    return normalizeColor(Menu.Style(styleName))
 end
 
 local function getMenuStyleColor(styleName, defaultColor)
@@ -1472,57 +1208,24 @@ end
 
 local function gradientRectCompat(pos, size, color1, color2, isHorizontal)
     local endPos = Vec2(pos.x + size.x, pos.y + size.y)
-
-    if Render and Render.Gradient then
-        local topLeft = color1
-        local topRight = color1
-        local bottomLeft = color2
-        local bottomRight = color2
-
-        if isHorizontal then
-            topLeft = color1
-            topRight = color2
-            bottomLeft = color1
-            bottomRight = color2
-        end
-
-        local ok = pcall(Render.Gradient, pos, endPos, topLeft, topRight, bottomLeft, bottomRight)
-        if ok then
-            return true
-        end
-
-        ok = pcall(Render.Gradient, Render, pos, endPos, topLeft, topRight, bottomLeft, bottomRight)
-        if ok then
-            return true
-        end
+    local topLeft, topRight, bottomLeft, bottomRight = color1, color1, color2, color2
+    if isHorizontal then
+        topLeft, topRight, bottomLeft, bottomRight = color1, color2, color1, color2
     end
-
-    if Render and Render.FilledRect then
-        Render.FilledRect(pos, endPos, color1, 0)
-    end
-    return false
+    Render.Gradient(pos, endPos, topLeft, topRight, bottomLeft, bottomRight)
+    return true
 end
 
 local function applyIcon(widget, icon)
-    if not widget or not icon then
-        return
-    end
-
-    if widget.Icon then
-        local ok = pcall(widget.Icon, widget, icon)
-        if not ok then
-            pcall(widget.Icon, icon)
-        end
+    if widget and icon then
+        widget:Icon(icon)
     end
 end
 
 local function getUILanguage()
-    local langWidget = Menu and Menu.Find and Menu.Find("SettingsHidden", "", "", "", "Main", "Language")
-    if langWidget and langWidget.Get then
-        local ok, idx = pcall(langWidget.Get, langWidget)
-        if ok and type(idx) == "number" and idx == 1 then
-            return "ru"
-        end
+    local langWidget = Menu.Find("SettingsHidden", "", "", "", "Main", "Language")
+    if langWidget and langWidget:Get() == 1 then
+        return "ru"
     end
     return "en"
 end
@@ -1573,6 +1276,7 @@ ApplyMenuLocalization = function(force)
     end
 
     for _, group in pairs(MenuGroups) do
+        -- CMenuGroup has ForceLocalization; CThirdTab (settings tab) does not.
         if group.widget and group.labelEn and group.widget.ForceLocalization then
             group.widget:ForceLocalization(L(group.labelEn, group.labelRu))
         end
@@ -1583,8 +1287,8 @@ SetupLanguageCallback = function()
     if State.languageCallbackSet then
         return
     end
-    local langWidget = Menu and Menu.Find and Menu.Find("SettingsHidden", "", "", "", "Main", "Language")
-    if not langWidget or not langWidget.SetCallback then
+    local langWidget = Menu.Find("SettingsHidden", "", "", "", "Main", "Language")
+    if not langWidget then
         return
     end
     State.languageCallbackSet = true
@@ -1601,7 +1305,7 @@ SetupLanguageCallback = function()
 end
 
 local function WithTooltip(widget, en, ru)
-    if widget and en and widget.ToolTip then
+    if widget and en then
         widget:ToolTip(L(en, ru))
     end
     return widget
@@ -1696,13 +1400,9 @@ local function DrawSoftBloom(pos, radius, tintColor, alpha, intensity)
     local outerColor = colorWithAlpha(tintColor, math.floor(alpha * 0.24 * intensity))
     local innerColor = colorWithAlpha(warmCenter, math.floor(alpha * 0.55 * intensity))
 
-    if Render and Render.CircleGradient then
-        Render.CircleGradient(pos, radius, outerColor, innerColor)
-        if qualityScale >= 0.92 and intensity > 1.05 then
-            Render.CircleGradient(pos, radius * 1.65, colorWithAlpha(tintColor, math.floor(alpha * 0.12 * intensity)), colorWithAlpha(tintColor, 0))
-        end
-    else
-        Render.FilledCircle(pos, radius * 0.9, colorWithAlpha(tintColor, math.floor(alpha * 0.28 * intensity)), 12)
+    Render.CircleGradient(pos, radius, outerColor, innerColor)
+    if qualityScale >= 0.92 and intensity > 1.05 then
+        Render.CircleGradient(pos, radius * 1.65, colorWithAlpha(tintColor, math.floor(alpha * 0.12 * intensity)), colorWithAlpha(tintColor, 0))
     end
 end
 
@@ -1714,7 +1414,7 @@ local function DrawStarHalo(drawX, drawY, drawSize, coreColor, alpha, glintBoost
 
     Render.FilledCircle(Vec2(drawX, drawY), drawSize * 1.85, makeColor(coreColor.r, coreColor.g, coreColor.b, haloAlpha), 12)
 
-    if (glintBoost or 0) > 0.12 and Render and Render.CircleGradient then
+    if (glintBoost or 0) > 0.12 then
         Render.CircleGradient(
             Vec2(drawX, drawY),
             drawSize * (3.2 + glintBoost * 2),
@@ -2190,14 +1890,12 @@ local function DrawShootingStar(star, toRenderX, toRenderY, fadeInAlpha, primary
         local burstAlpha = math.floor(200 * burstT * fadeInAlpha)
         local burstRadius = star.size * (3 + (1 - burstT) * 10)
         if burstAlpha > 0 then
-            if Render and Render.CircleGradient then
-                Render.CircleGradient(
-                    Vec2(x, y),
-                    burstRadius * 2.2,
-                    colorWithAlpha(mixColors(secondaryColor, makeColor(255, 220, 180, 255), 0.4), math.floor(burstAlpha * 0.45)),
-                    colorWithAlpha(primaryColor, 0)
-                )
-            end
+            Render.CircleGradient(
+                Vec2(x, y),
+                burstRadius * 2.2,
+                colorWithAlpha(mixColors(secondaryColor, makeColor(255, 220, 180, 255), 0.4), math.floor(burstAlpha * 0.45)),
+                colorWithAlpha(primaryColor, 0)
+            )
             Render.FilledCircle(Vec2(x, y), burstRadius, colorWithAlpha(makeColor(255, 245, 220, 255), burstAlpha), 14)
             for burstRay = 0, 5 do
                 local angle = burstRay / 6 * math.pi * 2 + star.progress * 4
@@ -2265,7 +1963,7 @@ local function DrawAmbientStreak(streak, toRenderX, toRenderY, fadeInAlpha, prim
         local bandAlpha = math.floor(alpha * 0.55)
         local midX = (sx + ex) * 0.5
         local midY = (sy + ey) * 0.5
-        if Render and Render.CircleGradient and qualityScale >= CONSTANTS.GLOW_QUALITY_THRESHOLD then
+        if qualityScale >= CONSTANTS.GLOW_QUALITY_THRESHOLD then
             Render.CircleGradient(
                 Vec2(midX, midY),
                 math.min(streak.width * 7, 36),
@@ -2308,7 +2006,6 @@ local function DrawFlyingRocket(rocket, toRenderX, toRenderY, fadeInAlpha, prima
         return
     end
 
-    -- Fully theme-synced palette (primary shaft, secondary base, light tip).
     local tint = rocket.tint or 0.3
     local bodyTint = mixColors(primaryColor, secondaryColor, tint * 0.55)
     local tipTint = mixColors(primaryColor, makeColor(255, 255, 255, 255), 0.35)
@@ -2322,7 +2019,6 @@ local function DrawFlyingRocket(rocket, toRenderX, toRenderY, fadeInAlpha, prima
     )
     local trailColor = mixColors(secondaryColor, primaryColor, 0.4)
 
-    -- Tip (glans) toward flight direction, balls at the rear.
     local tipX = x + cosA * len * 0.52
     local tipY = y + sinA * len * 0.52
     local shaftEndX = x + cosA * len * 0.28
@@ -2330,7 +2026,6 @@ local function DrawFlyingRocket(rocket, toRenderX, toRenderY, fadeInAlpha, prima
     local baseX = x - cosA * len * 0.42
     local baseY = y - sinA * len * 0.42
 
-    -- Twin spheres at the base (slightly behind and apart).
     local twinDist = halfW * 1.55
     local twinR = halfW * 1.15
     local twinPush = halfW * 0.35
@@ -2341,7 +2036,6 @@ local function DrawFlyingRocket(rocket, toRenderX, toRenderY, fadeInAlpha, prima
     Render.FilledCircle(Vec2(twinCX + nx * twinDist * 0.55, twinCY + ny * twinDist * 0.55), twinR * 0.35, highlight, 10)
     Render.FilledCircle(Vec2(twinCX - nx * twinDist * 0.55, twinCY - ny * twinDist * 0.55), twinR * 0.35, highlight, 10)
 
-    -- Shaft: thicker near base, slightly tapered toward tip.
     local segments = CONSTANTS.FLYING_ROCKET_SEGMENTS
     for step = 0, segments - 1 do
         local t = step / math.max(segments - 1, 1)
@@ -2352,13 +2046,11 @@ local function DrawFlyingRocket(rocket, toRenderX, toRenderY, fadeInAlpha, prima
     end
     Render.FilledCircle(Vec2(lerp(baseX, shaftEndX, 0.35), lerp(baseY, shaftEndY, 0.35)), halfW * 0.35, highlight, 8)
 
-    -- Rounded mushroom tip.
     local tipR = halfW * 1.35
     Render.FilledCircle(Vec2(tipX, tipY), tipR, tipFill, 14)
     Render.FilledCircle(Vec2(tipX - cosA * tipR * 0.15, tipY - sinA * tipR * 0.15), tipR * 0.72, bodyColor, 12)
     Render.FilledCircle(Vec2(tipX + nx * tipR * 0.25, tipY + ny * tipR * 0.25), tipR * 0.28, highlight, 8)
 
-    -- Tiny motion puff behind the balls.
     local trailAlpha = math.floor(alpha * 0.22)
     if trailAlpha > 1 then
         local trailX = twinCX - cosA * halfW * 2.4
@@ -2556,7 +2248,7 @@ end
 
 local function SaveWidgetConfigValue(key)
     local widget = Script[key]
-    if not widget or not widget.Get then
+    if not widget then
         return
     end
 
@@ -2582,7 +2274,19 @@ local function LoadWidgetConfigValue(key)
         return
     end
 
-    local floatDefault = WidgetGet(widget, 0)
+    local current = WidgetGet(widget, nil)
+    if type(current) == "boolean" then
+        local intVal = ConfigReadInt(key, -999999)
+        if intVal ~= -999999 then
+            WidgetSet(widget, intVal ~= 0)
+        end
+        return
+    end
+
+    if type(current) ~= "number" then
+        return
+    end
+
     local intVal = ConfigReadInt(key, -999999)
     if intVal ~= -999999 then
         WidgetSet(widget, intVal)
@@ -2592,10 +2296,7 @@ local function LoadWidgetConfigValue(key)
     local floatVal = ConfigReadFloat(key, -999999)
     if floatVal ~= -999999 then
         WidgetSet(widget, floatVal)
-        return
     end
-
-    WidgetSet(widget, floatDefault)
 end
 
 local function SaveCustomPresetValues()
@@ -2611,10 +2312,6 @@ local function LoadCustomPresetValues()
 end
 
 local function LoadConfigProfile()
-    if not Config then
-        return
-    end
-
     State.applyingPreset = true
 
     for i = 1, #CONFIG_BOOL_KEYS do
@@ -2892,7 +2589,21 @@ local Icons = {
 }
 
 function Script.OnScriptsLoaded()
+    State.cachedFullScreenSize = nil
+    State.lastRawScreenSize = nil
+    State.screenFallbackLogged = false
+    RefreshCachedFullScreenSize()
     CaptureScreenSizeForMenuSession()
+    if State.cachedFullScreenSize then
+        Log("info", string.format(
+            "Screen size: %dx%d (raw %s)",
+            State.cachedFullScreenSize.x,
+            State.cachedFullScreenSize.y,
+            State.lastRawScreenSize
+                and string.format("%dx%d", State.lastRawScreenSize.x, State.lastRawScreenSize.y)
+                or "n/a"
+        ))
+    end
 
     initPool(bgParticlePool, createBgParticle, 100)
     initPool(starPool, createStar, 200)
@@ -2910,16 +2621,8 @@ function Script.OnScriptsLoaded()
     local main = tab:Create(L("Settings", "Настройки"))
     MenuGroups.settings = {widget = main, labelEn = "Settings", labelRu = "Настройки"}
 
-    if tab and tab.Icon then
+    if tab then
         tab:Icon(Icons.tab)
-    end
-
-    local ok, cosmicMenuTab = pcall(function()
-        return tab:Parent()
-    end)
-
-    if ok and cosmicMenuTab and cosmicMenuTab.Icon then
-        cosmicMenuTab:Icon(Icons.tab)
     end
 
     local g_general = main:Create(L("General", "Общее"))
@@ -3312,18 +3015,19 @@ function Script.OnScriptsLoaded()
     end
 
     local function attachCustomCallback(widget)
-        if widget and widget.SetCallback then
-            widget:SetCallback(function()
-                if IsCustomPresetMarkBlocked() then
-                    return
-                end
-                MarkCustomPreset()
-                SaveCustomPresetValues()
-                if UpdateMenuControls then
-                    UpdateMenuControls()
-                end
-            end, false)
+        if not widget then
+            return
         end
+        widget:SetCallback(function()
+            if IsCustomPresetMarkBlocked() then
+                return
+            end
+            MarkCustomPreset()
+            SaveCustomPresetValues()
+            if UpdateMenuControls then
+                UpdateMenuControls()
+            end
+        end, false)
     end
 
     State.applyingPreset = true
@@ -3351,59 +3055,56 @@ function Script.OnScriptsLoaded()
         attachCustomCallback(presetTrackedWidgets[i])
     end
 
-    if Script.flyingRockets and Script.flyingRockets.SetCallback then
-        Script.flyingRockets:SetCallback(function()
-            if State.applyingPreset then
-                return
-            end
+    Script.flyingRockets:SetCallback(function()
+        if State.applyingPreset then
+            return
+        end
 
-            local enabled = WidgetGet(Script.flyingRockets, false)
-            SaveWidgetConfigValue("flyingRockets")
-            OnFlyingRocketsToggled()
+        local enabled = WidgetGet(Script.flyingRockets, false)
+        SaveWidgetConfigValue("flyingRockets")
+        OnFlyingRocketsToggled()
 
-            if not enabled then
-                State.blockCustomPresetMarks = 0
-                MarkCustomPreset()
-                SaveCustomPresetValues()
-            end
-        end, false)
-    end
+        if not enabled then
+            State.blockCustomPresetMarks = 0
+            MarkCustomPreset()
+            SaveCustomPresetValues()
+        end
+    end, false)
 
-    if Script.qualityPreset and Script.qualityPreset.SetCallback then
-        Script.qualityPreset:SetCallback(function()
-            if State.applyingPreset then
-                return
-            end
-            local presetIndex = clamp(roundToInt(WidgetGet(Script.qualityPreset, 3)), 1, CONSTANTS.CUSTOM_PRESET_INDEX)
-            ConfigWriteInt("quality_preset", presetIndex)
-            if presetIndex >= 1 and presetIndex <= CONSTANTS.BUILTIN_PRESET_COUNT then
-                ApplyQualityPreset(presetIndex)
-            elseif presetIndex == CONSTANTS.CUSTOM_PRESET_INDEX then
-                State.lastQualityPreset = CONSTANTS.CUSTOM_PRESET_INDEX
-                ConfigWriteInt("quality_preset", CONSTANTS.CUSTOM_PRESET_INDEX)
+    Script.qualityPreset:SetCallback(function()
+        if State.applyingPreset then
+            return
+        end
+        local presetIndex = clamp(roundToInt(WidgetGet(Script.qualityPreset, 3)), 1, CONSTANTS.CUSTOM_PRESET_INDEX)
+        ConfigWriteInt("quality_preset", presetIndex)
+        if presetIndex >= 1 and presetIndex <= CONSTANTS.BUILTIN_PRESET_COUNT then
+            ApplyQualityPreset(presetIndex)
+        elseif presetIndex == CONSTANTS.CUSTOM_PRESET_INDEX then
+            State.lastQualityPreset = CONSTANTS.CUSTOM_PRESET_INDEX
+            ConfigWriteInt("quality_preset", CONSTANTS.CUSTOM_PRESET_INDEX)
+        end
+        if UpdateMenuControls then
+            UpdateMenuControls()
+        end
+    end, false)
+
+    local function attachConfigFlagCallback(widget, key)
+        if not widget then
+            return
+        end
+        widget:SetCallback(function()
+            SaveWidgetConfigValue(key)
+            if key == "themeUseAccentOnly" or key == "themeMonochrome" then
+                if key == "themeUseAccentOnly" and WidgetGet(Script.themeUseAccentOnly, false) then
+                    WidgetSet(Script.themeMonochrome, false)
+                    SaveWidgetConfigValue("themeMonochrome")
+                end
+                RefreshThemeCache()
             end
             if UpdateMenuControls then
                 UpdateMenuControls()
             end
-        end, false)
-    end
-
-    local function attachConfigFlagCallback(widget, key)
-        if widget and widget.SetCallback then
-            widget:SetCallback(function()
-                SaveWidgetConfigValue(key)
-                if key == "themeUseAccentOnly" or key == "themeMonochrome" then
-                    if key == "themeUseAccentOnly" and WidgetGet(Script.themeUseAccentOnly, false) then
-                        WidgetSet(Script.themeMonochrome, false)
-                        SaveWidgetConfigValue("themeMonochrome")
-                    end
-                    RefreshThemeCache()
-                end
-                if UpdateMenuControls then
-                    UpdateMenuControls()
-                end
-            end, true)
-        end
+        end, true)
     end
 
     attachConfigFlagCallback(Script.enabled, "enabled")
@@ -3495,13 +3196,6 @@ function Script.OnScriptsLoaded()
         setDisabled(Script.pauseWhenIdle, not masterEnabled)
         setDisabled(Script.idleThreshold, not masterEnabled or not pauseIdle)
         setDisabled(Script.debugOverlay, not masterEnabled)
-    end
-
-    if Script.enabled and Script.enabled.SetCallback then
-        Script.enabled:SetCallback(function()
-            SaveWidgetConfigValue("enabled")
-            UpdateMenuControls()
-        end, true)
     end
 
     State.applyingPreset = false
@@ -3664,15 +3358,8 @@ local function EnsureDebugFont()
     if State.debugFont then
         return State.debugFont
     end
-    if not Render or not Render.LoadFont then
-        return nil
-    end
-    local ok, font = pcall(Render.LoadFont, "MuseoSansEx", Enum.FontCreate.FONTFLAG_ANTIALIAS)
-    if ok and font then
-        State.debugFont = font
-        return font
-    end
-    return nil
+    State.debugFont = Render.LoadFont("MuseoSansEx", Enum.FontCreate.FONTFLAG_ANTIALIAS)
+    return State.debugFont
 end
 
 local function DrawDebugOverlay(settings, fadeInAlpha, renderW, renderH)
@@ -3686,12 +3373,14 @@ local function DrawDebugOverlay(settings, fadeInAlpha, renderW, renderH)
     local font = EnsureDebugFont()
     local raw = State.lastRawScreenSize
     local rawText = raw and string.format("%dx%d", raw.x, raw.y) or "n/a"
+    local cached = State.cachedFullScreenSize
+    local cachedText = cached and string.format("%dx%d", cached.x, cached.y) or "n/a"
     local lines = {
         string.format("dt: %.3f  quality: %.2f", State.lastDt or 0, qualityScale),
         string.format("particles: %d  stars: %d  streaks: %d  rockets: %d", #bgParticleActive, #starActive, #ambientStreakActive, #flyingRocketActive),
         string.format("sim: %s  idle: %.1fs", State.simulationPaused and "paused" or "active", State.menuIdleTime or 0),
         string.format("screen: %dx%d  raw: %s", screenSize.x, screenSize.y, rawText),
-        string.format("render: %dx%d  cached: %s", renderW, renderH, State.cachedFullScreenSize and "yes" or "no"),
+        string.format("render: %dx%d  cached: %s", renderW, renderH, cachedText),
         string.format("preset: %d  named: %d", roundToInt(WidgetGet(Script.qualityPreset, 3)), State.lastNamedPreset or 0),
     }
 
@@ -3703,10 +3392,10 @@ local function DrawDebugOverlay(settings, fadeInAlpha, renderW, renderH)
 
     Render.FilledRect(Vec2(x - 4, y - 4), Vec2(x + panelW, y + panelH), Color(0, 0, 0, math.floor(140 * fadeInAlpha)), 4)
 
-    if font and Render.Text then
+    if font then
         for i, line in ipairs(lines) do
             local alpha = math.floor(220 * fadeInAlpha)
-            pcall(Render.Text, font, 12, line, Vec2(x, y + (i - 1) * lineHeight), Color(180, 220, 255, alpha))
+            Render.Text(font, 12, line, Vec2(x, y + (i - 1) * lineHeight), Color(180, 220, 255, alpha))
         end
     end
 end
@@ -3737,10 +3426,7 @@ end
 --#region Simulation
 
 local function IsMenuOpen()
-    if Menu and Menu.Opened then
-        return Menu.Opened() == true
-    end
-    return false
+    return Menu.Opened() == true
 end
 
 local function UpdateCosmicSimulation(dt)
@@ -3784,9 +3470,22 @@ local function UpdateCosmicSimulation(dt)
             menuWasOpen = false
             State.fadeInAlpha = 0
             State.frameSettings = nil
+            RefreshCachedFullScreenSize()
         end
         -- No draw while closed; skip sim during close debounce and after.
         return
+    end
+
+    do
+        local raw = ReadRawScreenSize()
+        if raw and not isPartialViewport(raw) then
+            local beforeArea = screenArea(State.cachedFullScreenSize)
+            adoptFullScreenSize(raw)
+            local cached = State.cachedFullScreenSize
+            if cached and screenArea(cached) > beforeArea * 1.02 then
+                CaptureScreenSizeForMenuSession()
+            end
+        end
     end
 
     fadeInTime = math.min(fadeInTime + dt, CONSTANTS.FADE_IN_DURATION)
@@ -4262,12 +3961,10 @@ local function DrawBackgroundEffects(fadeInAlpha)
             )
         end
 
-        if Render and Render.Shadow then
-            Render.Shadow(Vec2(0, 0), Vec2(width, 1), colorWithAlpha(coldPrimary, math.floor(edgeAlpha * 0.28)), 5)
-            Render.Shadow(Vec2(0, height - 1), Vec2(width, height), colorWithAlpha(coldSecondary, math.floor(edgeAlpha * 0.24)), 5)
-            Render.Shadow(Vec2(0, 0), Vec2(1, height), colorWithAlpha(coldPrimary, math.floor(edgeAlpha * 0.18)), 4)
-            Render.Shadow(Vec2(width - 1, 0), Vec2(width, height), colorWithAlpha(coldSecondary, math.floor(edgeAlpha * 0.18)), 4)
-        end
+        Render.Shadow(Vec2(0, 0), Vec2(width, 1), colorWithAlpha(coldPrimary, math.floor(edgeAlpha * 0.28)), 5)
+        Render.Shadow(Vec2(0, height - 1), Vec2(width, height), colorWithAlpha(coldSecondary, math.floor(edgeAlpha * 0.24)), 5)
+        Render.Shadow(Vec2(0, 0), Vec2(1, height), colorWithAlpha(coldPrimary, math.floor(edgeAlpha * 0.18)), 4)
+        Render.Shadow(Vec2(width - 1, 0), Vec2(width, height), colorWithAlpha(coldSecondary, math.floor(edgeAlpha * 0.18)), 4)
     end
 
     if settings.chromaticRim and not settings.backgroundOnly then
@@ -4281,25 +3978,17 @@ local function DrawBackgroundEffects(fadeInAlpha)
         local basePos = Vec2(cursorHaloX, cursorHaloY)
         local trailPos = Vec2(cursorHaloX - cursorHaloOffsetX, cursorHaloY - cursorHaloOffsetY)
 
-        if Render and Render.CircleGradient then
-            if qualityScale >= 0.92 then
-                Render.CircleGradient(basePos, haloRadius * 2.05, colorWithAlpha(primaryColor, math.floor(haloAlpha * 0.14)), colorWithAlpha(primaryColor, 0))
-                Render.CircleGradient(trailPos, haloRadius * 1.35, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.20)), colorWithAlpha(secondaryColor, 0))
-                Render.CircleGradient(basePos, haloRadius * 1.0, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.38)), colorWithAlpha(primaryColor, 0))
-                Render.CircleGradient(basePos, haloRadius * 0.48, colorWithAlpha(makeColor(255, 255, 255, 255), math.floor(haloAlpha * 0.36)), colorWithAlpha(primaryColor, 0))
-            else
-                Render.CircleGradient(basePos, haloRadius * 1.35, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.28)), colorWithAlpha(primaryColor, 0))
-                Render.CircleGradient(basePos, haloRadius * 0.55, colorWithAlpha(makeColor(255, 255, 255, 255), math.floor(haloAlpha * 0.32)), colorWithAlpha(primaryColor, 0))
-            end
+        if qualityScale >= 0.92 then
+            Render.CircleGradient(basePos, haloRadius * 2.05, colorWithAlpha(primaryColor, math.floor(haloAlpha * 0.14)), colorWithAlpha(primaryColor, 0))
+            Render.CircleGradient(trailPos, haloRadius * 1.35, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.20)), colorWithAlpha(secondaryColor, 0))
+            Render.CircleGradient(basePos, haloRadius * 1.0, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.38)), colorWithAlpha(primaryColor, 0))
+            Render.CircleGradient(basePos, haloRadius * 0.48, colorWithAlpha(makeColor(255, 255, 255, 255), math.floor(haloAlpha * 0.36)), colorWithAlpha(primaryColor, 0))
         else
-            Render.FilledCircle(basePos, haloRadius * 1.55, colorWithAlpha(primaryColor, math.floor(haloAlpha * 0.18)), 20)
-            Render.FilledCircle(trailPos, haloRadius * 1.1, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.20)), 18)
-            Render.FilledCircle(basePos, haloRadius * 0.72, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.32)), 18)
+            Render.CircleGradient(basePos, haloRadius * 1.35, colorWithAlpha(secondaryColor, math.floor(haloAlpha * 0.28)), colorWithAlpha(primaryColor, 0))
+            Render.CircleGradient(basePos, haloRadius * 0.55, colorWithAlpha(makeColor(255, 255, 255, 255), math.floor(haloAlpha * 0.32)), colorWithAlpha(primaryColor, 0))
         end
 
-        if Render and Render.ShadowCircle then
-            Render.ShadowCircle(basePos, haloRadius * 0.62, colorWithAlpha(primaryColor, math.floor(haloAlpha * 0.26)), haloRadius * 0.75)
-        end
+        Render.ShadowCircle(basePos, haloRadius * 0.62, colorWithAlpha(primaryColor, math.floor(haloAlpha * 0.26)), haloRadius * 0.75)
     end
 
     if settings.cursorStardust then
@@ -4477,7 +4166,17 @@ function Script.OnUpdateEx()
         State.screenCacheIdleFrames = (State.screenCacheIdleFrames or 0) + 1
         if State.screenCacheIdleFrames >= CONSTANTS.SCREEN_CACHE_IDLE_FRAMES then
             State.screenCacheIdleFrames = 0
+            local previous = State.cachedFullScreenSize
             RefreshCachedFullScreenSize()
+            local nextSize = State.cachedFullScreenSize
+            if nextSize and previous
+                and (math.abs(nextSize.x - previous.x) > 1 or math.abs(nextSize.y - previous.y) > 1) then
+                screenSize = Vec2(nextSize.x, nextSize.y)
+                updateScreenBaselines(nextSize)
+            elseif nextSize and (not screenSize or screenSize.x <= 1) then
+                screenSize = Vec2(nextSize.x, nextSize.y)
+                updateScreenBaselines(nextSize)
+            end
         end
         return
     end
@@ -4528,7 +4227,6 @@ function Script.OnGameEnd()
     menuWasOpen = false
     menuClosedFrames = 0
     menuClosedAccumulated = 0
-    lastRealTime = nil
     State.shootingStarsWasEnabled = nil
     State.starsWasEnabled = nil
     State.multiLayerWasEnabled = nil
